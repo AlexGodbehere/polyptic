@@ -301,6 +301,30 @@ export const MachineView = z.object({
 });
 export type MachineView = z.infer<typeof MachineView>;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Murals & placement (Phase 3) — the spatial canvas model
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A named, switchable canvas. A deployment has several murals; screens are placed onto one. */
+export const Mural = z.object({
+  id: z.string(),
+  name: z.string(),
+});
+export type Mural = z.infer<typeof Mural>;
+
+/** A screen placed on a mural at a position/size in canvas pixels (default size = the screen's
+ *  native resolution). A screen with NO placement is "unplaced" (lives in the tray). A screen is
+ *  placed on at most one mural at a time. */
+export const Placement = z.object({
+  muralId: z.string(),
+  screenId: z.string(),
+  x: z.number(),
+  y: z.number(),
+  w: z.number().positive(),
+  h: z.number().positive(),
+});
+export type Placement = z.infer<typeof Placement>;
+
 export const AdminHello = z.object({
   t: z.literal("admin/hello"),
   protocol: z.literal(PROTOCOL_VERSION),
@@ -313,6 +337,8 @@ export const ServerToAdminState = z.object({
   t: z.literal("admin/state"),
   revision: z.number().int().nonnegative(),
   machines: z.array(MachineView),
+  murals: z.array(Mural), // Phase 3
+  placements: z.array(Placement), // Phase 3 — which screen sits where on which mural
 });
 export const ServerToAdminMessage = z.discriminatedUnion("t", [ServerToAdminState]);
 export type ServerToAdminMessage = z.infer<typeof ServerToAdminMessage>;
@@ -327,6 +353,23 @@ export const IdentBody = z.object({
   ttlMs: z.number().int().positive().optional(), // optional auto-off, for fire-and-forget pulses
 });
 export type IdentBody = z.infer<typeof IdentBody>;
+
+// REST bodies — murals & placement (Phase 3)
+export const CreateMuralBody = z.object({ name: z.string().min(1).max(64) });
+export type CreateMuralBody = z.infer<typeof CreateMuralBody>;
+
+export const RenameMuralBody = z.object({ name: z.string().min(1).max(64) });
+export type RenameMuralBody = z.infer<typeof RenameMuralBody>;
+
+/** Place or move a screen on a mural (canvas pixels; w/h default to the screen's resolution). */
+export const PlaceScreenBody = z.object({
+  muralId: z.string(),
+  x: z.number(),
+  y: z.number(),
+  w: z.number().positive().optional(),
+  h: z.number().positive().optional(),
+});
+export type PlaceScreenBody = z.infer<typeof PlaceScreenBody>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
