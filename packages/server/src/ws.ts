@@ -43,6 +43,7 @@ import type { RawData } from "ws";
 
 import { hashCredential } from "./enroll";
 import type { Enrollment } from "./enroll";
+import type { AuthService } from "./auth-local";
 import type { ControlPlane, RegisterMachineInput, ScreenAssignment } from "./state";
 import type { AgentHub, PlayerHub } from "./hub";
 import type { AdminBroadcaster, AdminHub, Presence } from "./admin";
@@ -51,16 +52,21 @@ interface WsDeps {
   server: Server;
   control: ControlPlane;
   enrollment: Enrollment;
+  /** Local-auth service — gates the /admin upgrade on a valid session cookie (Phase 3f). */
+  auth: AuthService;
   hub: PlayerHub;
   agentHub: AgentHub;
   adminHub: AdminHub;
   presence: Presence;
   broadcaster: AdminBroadcaster;
   log: FastifyBaseLogger;
+  /** Allowed browser origins for the /admin WS upgrade (anti-CSWSH); from CORS_ORIGIN. */
+  allowedOrigins: string[];
 }
 
 export function attachWebSockets(deps: WsDeps): void {
-  const { server, control, enrollment, hub, agentHub, adminHub, presence, broadcaster, log } = deps;
+  const { server, control, enrollment, auth, hub, agentHub, adminHub, presence, broadcaster, log, allowedOrigins } =
+    deps;
 
   const agentWss = new WebSocketServer({ noServer: true });
   const playerWss = new WebSocketServer({ noServer: true });
@@ -76,11 +82,43 @@ export function attachWebSockets(deps: WsDeps): void {
     }
 
     if (pathname === "/agent") {
+      // Device channel — authenticated via enrollment credentials on agent/hello, NOT a user session.
       agentWss.handleUpgrade(req, socket, head, (ws) => agentWss.emit("connection", ws, req));
     } else if (pathname === "/player") {
+      // Device channel — players carry no user session; not gated.
       playerWss.handleUpgrade(req, socket, head, (ws) => playerWss.emit("connection", ws, req));
     } else if (pathname === "/admin") {
-      adminWss.handleUpgrade(req, socket, head, (ws) => adminWss.emit("connection", ws, req));
+      // Anti-CSWSH: a browser WS handshake sends the page's Origin and the cookie is auto-attached, so
+      // reject a cross-site origin BEFORE the cookie check (SameSite doesn't cover WS upgrades). A
+      // non-browser client (the e2e) sends no Origin and passes through.
+      const origin = req.headers.origin;
+      if (origin && !allowedOrigins.includes(origin)) {
+        log.warn({ event: "admin.ws.badorigin", origin }, "rejected /admin upgrade — origin not allowed");
+        socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      // Operator channel — gate on a valid signed session cookie (Phase 3f). When auth is disabled the
+      // check is skipped (mirrors the REST gate). Reject the upgrade outright if there is no session.
+      if (!auth.enabled) {
+        adminWss.handleUpgrade(req, socket, head, (ws) => adminWss.emit("connection", ws, req));
+        return;
+      }
+      void auth
+        .verifyCookieHeader(req.headers.cookie)
+        .then((user) => {
+          if (!user) {
+            log.warn({ event: "admin.ws.rejected" }, "rejected /admin upgrade — no valid session");
+            socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+            socket.destroy();
+            return;
+          }
+          adminWss.handleUpgrade(req, socket, head, (ws) => adminWss.emit("connection", ws, req));
+        })
+        .catch((err) => {
+          log.warn({ event: "admin.ws.error", err: String(err) }, "error gating /admin upgrade");
+          socket.destroy();
+        });
     } else {
       socket.destroy();
     }

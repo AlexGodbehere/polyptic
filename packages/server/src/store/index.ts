@@ -12,6 +12,8 @@ import { PostgresStore } from "./postgres";
 import type { Store } from "./types";
 
 export type {
+  EnrollmentMode,
+  PersistedBootstrap,
   PersistedContent,
   PersistedContentSource,
   PersistedMachine,
@@ -19,7 +21,9 @@ export type {
   PersistedPlacement,
   PersistedScene,
   PersistedScreen,
+  PersistedSession,
   PersistedState,
+  PersistedUser,
   PersistedVideoWall,
   Store,
 } from "./types";

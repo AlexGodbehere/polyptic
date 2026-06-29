@@ -1,30 +1,85 @@
 /**
- * Stub operator session (Phase 3a). Real local accounts (Argon2id + secure session cookies, D29)
- * land in a later sub-phase; for now the sign-in screen just flips this localStorage flag so the
- * router guard lets the operator into the console.
+ * Operator session + settings endpoints (Phase 3f — D29 real local accounts).
+ *
+ * Replaces the Phase-3a localStorage stub. The session itself lives ONLY in an httpOnly, signed,
+ * sameSite session cookie set by the server — the browser never sees, stores, or can script the
+ * session id (that's the whole point: no token in JS, no plaintext anywhere). These helpers just
+ * drive the auth/settings REST surface; the cookie rides along automatically via the shared
+ * transport's `credentials: "include"`. The reactive "who am I" lives in the Pinia store.
+ *
+ * Every response is zod-validated at the edge against the shared contract, same discipline as the
+ * wire. No secret (password or hash) is ever sent back by these routes or logged here.
  */
-const KEY = "polyptic.signedIn";
+import { AuthUser, ChangePasswordBody, EnrollmentInfo, LoginBody } from "@polyptic/protocol";
+import type { ChangePasswordBody as ChangePasswordBodyT, LoginBody as LoginBodyT } from "@polyptic/protocol";
 
-export function isSignedIn(): boolean {
-  try {
-    return localStorage.getItem(KEY) === "true";
-  } catch {
-    return false;
-  }
+import { send } from "./api";
+
+const BASE_AUTH = "/auth";
+const BASE_SETTINGS = "/settings";
+
+/** The server may return the user bare or wrapped as `{ user }`; accept either, then validate. */
+function unwrapUser(raw: unknown): AuthUser {
+  const candidate =
+    raw && typeof raw === "object" && "user" in (raw as Record<string, unknown>)
+      ? (raw as Record<string, unknown>).user
+      : raw;
+  return AuthUser.parse(candidate);
 }
 
-export function signIn(): void {
-  try {
-    localStorage.setItem(KEY, "true");
-  } catch {
-    /* storage unavailable — sign-in is a no-op stub anyway */
-  }
+/** Likewise tolerate `{ enrollment }` wrapping for the enrollment-info routes. */
+function unwrapEnrollment(raw: unknown): EnrollmentInfo {
+  const candidate =
+    raw && typeof raw === "object" && "enrollment" in (raw as Record<string, unknown>)
+      ? (raw as Record<string, unknown>).enrollment
+      : raw;
+  return EnrollmentInfo.parse(candidate);
 }
 
-export function signOut(): void {
-  try {
-    localStorage.removeItem(KEY);
-  } catch {
-    /* noop */
-  }
+/**
+ * POST /api/v1/auth/login { email, password } → the signed-in AuthUser (the server also sets the
+ * session cookie). A 401 here is an expected "wrong credentials" outcome and a 429 is a lockout —
+ * both are handled by the sign-in form, so we suppress the global session-expired redirect.
+ */
+export async function login(body: LoginBodyT): Promise<AuthUser> {
+  const raw = await send<unknown>("POST", `${BASE_AUTH}/login`, LoginBody.parse(body), {
+    suppressAuthRedirect: true,
+  });
+  return unwrapUser(raw);
+}
+
+/** POST /api/v1/auth/logout — revoke the server-side session and clear the cookie. */
+export async function logout(): Promise<void> {
+  await send<unknown>("POST", `${BASE_AUTH}/logout`);
+}
+
+/**
+ * GET /api/v1/auth/me → the current AuthUser, or a 401 (self-reporting) when not signed in. This is
+ * the router guard's session probe; its 401 is expected, so it never triggers the global redirect.
+ */
+export async function fetchMe(): Promise<AuthUser> {
+  const raw = await send<unknown>("GET", `${BASE_AUTH}/me`, undefined, {
+    suppressAuthRedirect: true,
+  });
+  return unwrapUser(raw);
+}
+
+/**
+ * POST /api/v1/auth/change-password { currentPassword, newPassword } — rotate the operator's
+ * password (newPassword min 8, enforced by the contract). Never echoes either value back.
+ */
+export async function changePassword(body: ChangePasswordBodyT): Promise<void> {
+  await send<unknown>("POST", `${BASE_AUTH}/change-password`, ChangePasswordBody.parse(body));
+}
+
+/** GET /api/v1/settings/enrollment → open-mode note or the gated bootstrap token (operator-only). */
+export async function getEnrollment(): Promise<EnrollmentInfo> {
+  const raw = await send<unknown>("GET", `${BASE_SETTINGS}/enrollment`);
+  return unwrapEnrollment(raw);
+}
+
+/** POST /api/v1/settings/enrollment/regenerate → mint a fresh gated token, returning the new info. */
+export async function regenerateEnrollment(): Promise<EnrollmentInfo> {
+  const raw = await send<unknown>("POST", `${BASE_SETTINGS}/enrollment/regenerate`);
+  return unwrapEnrollment(raw);
 }

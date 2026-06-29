@@ -358,6 +358,7 @@ beforeAll(async () => {
       // so its screens exist to place + combine. (Gated enrollment is covered elsewhere.)
       PLAYER_BASE_URL: "http://localhost:5173",
       LOG_LEVEL: "error",
+      AUTH_ENABLED: "false",
     },
     stdout: "inherit",
     stderr: "inherit",

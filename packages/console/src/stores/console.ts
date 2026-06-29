@@ -12,9 +12,13 @@
 import { defineStore } from "pinia";
 import { PROTOCOL_VERSION, ServerToAdminMessage, parseMessage } from "@polyptic/protocol";
 import type {
+  AuthUser,
+  ChangePasswordBody,
   ContentKind,
   ContentSource,
   CreateContentSourceBody,
+  EnrollmentInfo,
+  LoginBody,
   MachineView,
   Mural,
   Placement,
@@ -26,6 +30,7 @@ import type {
 } from "@polyptic/protocol";
 
 import * as api from "../api";
+import * as auth from "../auth";
 
 /** Assigning content takes EITHER a library source by id OR an ad-hoc URL — exactly one (the
  *  contract's SetContentBody refinement). The ad-hoc URL path is the Phase-3b behaviour. */
@@ -80,6 +85,14 @@ function initialTheme(): "light" | "dark" {
 }
 
 export interface ConsoleState {
+  /** The signed-in operator (D29), or null when not authenticated. The session itself lives only in
+   *  an httpOnly cookie — this is just the public profile the server reports via /auth/me. */
+  currentUser: AuthUser | null;
+  /** Whether the initial /auth/me probe has resolved. The router guard runs it exactly once per load
+   *  and then trusts `currentUser`, so navigations don't re-hit the network. */
+  sessionChecked: boolean;
+  /** Enrollment-token visibility for Settings + the cold-start wizard (open mode vs gated token). */
+  enrollment: EnrollmentInfo | null;
   connected: boolean;
   revision: number;
   machines: MachineView[];
@@ -109,6 +122,9 @@ type WallBounds = { x: number; y: number; w: number; h: number };
 
 export const useConsoleStore = defineStore("console", {
   state: (): ConsoleState => ({
+    currentUser: null,
+    sessionChecked: false,
+    enrollment: null,
     connected: false,
     revision: 0,
     machines: [],
@@ -126,6 +142,43 @@ export const useConsoleStore = defineStore("console", {
   }),
 
   getters: {
+    // ── Auth (Phase 3f) ─────────────────────────────────────────────────────────
+
+    /** Whether an operator session is currently established. */
+    isAuthenticated(state): boolean {
+      return state.currentUser !== null;
+    },
+
+    /** The signed-in operator's email, or "" when not signed in. */
+    currentEmail(state): string {
+      return state.currentUser?.email ?? "";
+    },
+
+    /** Two-letter avatar initials derived from the operator's email (e.g. "operator@…" → "OP"). */
+    accountInitials(state): string {
+      const email = state.currentUser?.email;
+      if (!email) return "OP";
+      const local = email.split("@")[0] ?? email;
+      const parts = local.split(/[._-]+/).filter(Boolean);
+      const letters =
+        parts.length >= 2 && parts[0] && parts[1]
+          ? `${parts[0][0]}${parts[1][0]}`
+          : local.slice(0, 2);
+      return letters.toUpperCase();
+    },
+
+    // ── Enrollment (Phase 3f) ────────────────────────────────────────────────────
+
+    /** True when the server enrolls machines in open mode (no token required). */
+    enrollmentOpen(state): boolean {
+      return state.enrollment?.mode === "open";
+    },
+
+    /** The gated bootstrap token, when in gated mode and loaded; else null. */
+    enrollmentToken(state): string | null {
+      return state.enrollment?.mode === "gated" ? state.enrollment.token : null;
+    },
+
     /** Every screen across all machines, flattened. Each ScreenView already carries its machineId. */
     screens(state): ScreenView[] {
       return state.machines.flatMap((m) => m.screens);
@@ -346,6 +399,94 @@ export const useConsoleStore = defineStore("console", {
   },
 
   actions: {
+    // ── Auth (Phase 3f — D29 local accounts) ─────────────────────────────────────
+
+    /**
+     * Resolve the operator session, probing GET /auth/me at most once per page load. The router
+     * guard awaits this before deciding to admit or redirect; subsequent navigations reuse the
+     * cached result. Returns the current user (or null when unauthenticated).
+     */
+    async ensureSession(): Promise<AuthUser | null> {
+      if (!this.sessionChecked) await this.fetchMe();
+      return this.currentUser;
+    },
+
+    /** Probe /auth/me and fold the result into state. A 401 (or any failure) means "not signed in". */
+    async fetchMe(): Promise<AuthUser | null> {
+      try {
+        this.currentUser = await auth.fetchMe();
+      } catch {
+        // 401 self-report, or the control plane is unreachable — either way, treat as signed out.
+        this.currentUser = null;
+      } finally {
+        this.sessionChecked = true;
+      }
+      return this.currentUser;
+    },
+
+    /**
+     * Sign in with email + password. On success the server sets the session cookie and we cache the
+     * returned AuthUser. Errors (401 wrong credentials, 429 lockout) propagate to the sign-in form
+     * unchanged so it can show the right message — we deliberately do NOT swallow them here.
+     */
+    async login(body: LoginBody): Promise<AuthUser> {
+      const user = await auth.login(body);
+      this.currentUser = user;
+      this.sessionChecked = true;
+      return user;
+    },
+
+    /**
+     * Sign out: revoke the server session, drop the cached user, and tear down the admin socket so no
+     * authenticated channel lingers. Best-effort — a failed logout call still clears local state.
+     */
+    async logout(): Promise<void> {
+      try {
+        await auth.logout();
+      } catch (err) {
+        console.error("[console] logout failed", err);
+      }
+      this.markSignedOut();
+    },
+
+    /**
+     * Clear all session-derived local state and close the live channel. Called on explicit logout and
+     * when any guarded request comes back 401 (session expired/revoked mid-use).
+     */
+    markSignedOut(): void {
+      this.currentUser = null;
+      this.sessionChecked = true;
+      this.enrollment = null;
+      this.disconnect();
+    },
+
+    /** Change the operator's password (min 8, enforced by the contract). Errors propagate to the UI. */
+    async changePassword(body: ChangePasswordBody): Promise<void> {
+      await auth.changePassword(body);
+    },
+
+    // ── Enrollment token (Phase 3f) ──────────────────────────────────────────────
+
+    /** Load the enrollment-token info for Settings + the cold-start wizard. */
+    async fetchEnrollment(): Promise<void> {
+      try {
+        this.enrollment = await auth.getEnrollment();
+      } catch (err) {
+        console.error("[console] fetchEnrollment failed", err);
+      }
+    },
+
+    /** Mint a fresh gated bootstrap token, replacing the shown one. Returns false (no throw) on error. */
+    async regenerateEnrollment(): Promise<boolean> {
+      try {
+        this.enrollment = await auth.regenerateEnrollment();
+        return true;
+      } catch (err) {
+        console.error("[console] regenerateEnrollment failed", err);
+        return false;
+      }
+    },
+
     // ── Admin WebSocket ───────────────────────────────────────────────────────
 
     /** Open (and keep open) the admin channel. Idempotent — safe to call on every shell mount. */

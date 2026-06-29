@@ -26,6 +26,8 @@ import {
 } from "@polyptic/protocol";
 
 import type {
+  EnrollmentMode,
+  PersistedBootstrap,
   PersistedContent,
   PersistedContentSource,
   PersistedMachine,
@@ -33,7 +35,9 @@ import type {
   PersistedPlacement,
   PersistedScene,
   PersistedScreen,
+  PersistedSession,
   PersistedState,
+  PersistedUser,
   PersistedVideoWall,
   Store,
 } from "./types";
@@ -103,6 +107,29 @@ interface SceneRow {
   mural_id: string;
   snapshot: unknown;
   schedule_at: string | null;
+}
+
+interface UserRow {
+  id: string;
+  email: string;
+  password_hash: string;
+  created_at: Date;
+}
+
+interface SessionRow {
+  id: string;
+  user_id: string;
+  created_at: Date;
+  expires_at: Date;
+}
+
+interface BootstrapRow {
+  mode: string;
+  token: string | null;
+}
+
+interface CountRow {
+  count: string; // count(*) comes back as a bigint string
 }
 
 export class PostgresStore implements Store {
@@ -210,6 +237,37 @@ export class PostgresStore implements Store {
         mural_id    text NOT NULL,
         snapshot    jsonb NOT NULL DEFAULT '{}'::jsonb,
         schedule_at text
+      )
+    `;
+    // Local operator accounts (Phase 3f / D29). Passwords are stored ONLY as argon2id hashes; the
+    // plaintext is never persisted. Email is unique (stored normalized: trimmed + lower-cased).
+    await sql`
+      CREATE TABLE IF NOT EXISTS users (
+        id            text PRIMARY KEY,
+        email         text UNIQUE NOT NULL,
+        password_hash text NOT NULL,
+        created_at    timestamptz NOT NULL DEFAULT now()
+      )
+    `;
+    // Server-side sessions (Phase 3f). `id` is sha256(cookieToken) so a DB read never yields a usable
+    // token. Sessions are revocable (delete the row) and expire at expires_at.
+    await sql`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id         text PRIMARY KEY,
+        user_id    text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        expires_at timestamptz NOT NULL
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id)`;
+    await sql`CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions (expires_at)`;
+    // Enrollment bootstrap (Phase 3f): a single row holding the agent enrollment mode + token,
+    // seeded on first boot from POLYPTIC_BOOTSTRAP_TOKEN and mutated by the Settings "regenerate".
+    await sql`
+      CREATE TABLE IF NOT EXISTS bootstrap (
+        id    int PRIMARY KEY DEFAULT 1,
+        mode  text NOT NULL DEFAULT 'open',
+        token text
       )
     `;
   }
@@ -581,6 +639,117 @@ export class PostgresStore implements Store {
         scheduleAt: row.schedule_at ?? null,
       };
     });
+  }
+
+  // ── Local operator accounts + sessions (Phase 3f) ────────────────────────────
+
+  async getUserByEmail(email: string): Promise<PersistedUser | undefined> {
+    const sql = this.sql;
+    const rows = await sql<UserRow[]>`
+      SELECT id, email, password_hash, created_at FROM users WHERE email = ${email} LIMIT 1
+    `;
+    const row = rows[0];
+    return row ? this.toUser(row) : undefined;
+  }
+
+  async getUserById(id: string): Promise<PersistedUser | undefined> {
+    const sql = this.sql;
+    const rows = await sql<UserRow[]>`
+      SELECT id, email, password_hash, created_at FROM users WHERE id = ${id} LIMIT 1
+    `;
+    const row = rows[0];
+    return row ? this.toUser(row) : undefined;
+  }
+
+  async countUsers(): Promise<number> {
+    const sql = this.sql;
+    const rows = await sql<CountRow[]>`SELECT count(*)::text AS count FROM users`;
+    return rows[0] ? Number(rows[0].count) : 0;
+  }
+
+  async createUser(user: PersistedUser): Promise<void> {
+    const sql = this.sql;
+    await sql`
+      INSERT INTO users (id, email, password_hash, created_at)
+      VALUES (${user.id}, ${user.email}, ${user.passwordHash}, ${new Date(user.createdAt)})
+    `;
+  }
+
+  async updateUserPassword(id: string, passwordHash: string): Promise<void> {
+    const sql = this.sql;
+    await sql`UPDATE users SET password_hash = ${passwordHash} WHERE id = ${id}`;
+  }
+
+  async createSession(session: PersistedSession): Promise<void> {
+    const sql = this.sql;
+    await sql`
+      INSERT INTO sessions (id, user_id, created_at, expires_at)
+      VALUES (
+        ${session.id},
+        ${session.userId},
+        ${new Date(session.createdAt)},
+        ${new Date(session.expiresAt)}
+      )
+      ON CONFLICT (id) DO NOTHING
+    `;
+  }
+
+  async getSession(id: string): Promise<PersistedSession | undefined> {
+    const sql = this.sql;
+    const rows = await sql<SessionRow[]>`
+      SELECT id, user_id, created_at, expires_at FROM sessions WHERE id = ${id} LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      userId: row.user_id,
+      createdAt: row.created_at.toISOString(),
+      expiresAt: row.expires_at.toISOString(),
+    };
+  }
+
+  async deleteSession(id: string): Promise<void> {
+    const sql = this.sql;
+    await sql`DELETE FROM sessions WHERE id = ${id}`;
+  }
+
+  async deleteSessionsForUser(userId: string): Promise<void> {
+    const sql = this.sql;
+    await sql`DELETE FROM sessions WHERE user_id = ${userId}`;
+  }
+
+  async deleteExpiredSessions(nowIso: string): Promise<void> {
+    const sql = this.sql;
+    await sql`DELETE FROM sessions WHERE expires_at <= ${new Date(nowIso)}`;
+  }
+
+  private toUser(row: UserRow): PersistedUser {
+    return {
+      id: row.id,
+      email: row.email,
+      passwordHash: row.password_hash,
+      createdAt: row.created_at.toISOString(),
+    };
+  }
+
+  // ── Enrollment bootstrap token (Phase 3f) ────────────────────────────────────
+
+  async getBootstrap(): Promise<PersistedBootstrap | undefined> {
+    const sql = this.sql;
+    const rows = await sql<BootstrapRow[]>`SELECT mode, token FROM bootstrap WHERE id = 1 LIMIT 1`;
+    const row = rows[0];
+    if (!row) return undefined;
+    const mode: EnrollmentMode = row.mode === "gated" ? "gated" : "open";
+    return { mode, token: row.token ?? null };
+  }
+
+  async setBootstrap(bootstrap: PersistedBootstrap): Promise<void> {
+    const sql = this.sql;
+    await sql`
+      INSERT INTO bootstrap (id, mode, token) VALUES (1, ${bootstrap.mode}, ${bootstrap.token})
+      ON CONFLICT (id) DO UPDATE SET mode = EXCLUDED.mode, token = EXCLUDED.token
+    `;
   }
 
   async close(): Promise<void> {

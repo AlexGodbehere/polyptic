@@ -122,6 +122,48 @@ export interface PersistedScene {
   scheduleAt?: string | null;
 }
 
+// ── Local operator accounts + sessions + enrollment bootstrap (Phase 3f / D29) ──
+
+/**
+ * A local operator account. Passwords are NEVER stored in plaintext — only `passwordHash`, an
+ * argon2id digest produced by `Bun.password.hash`. The email is stored normalized (trimmed + lower).
+ */
+export interface PersistedUser {
+  id: string;
+  email: string;
+  /** argon2id hash (Bun.password). The plaintext password is never stored or logged. */
+  passwordHash: string;
+  /** ISO-8601 creation timestamp. */
+  createdAt: string;
+}
+
+/**
+ * A server-side session. `id` is the OPAQUE session identifier the server holds — specifically the
+ * sha256 of the random session token carried in the (signed, http-only) cookie, so a database read
+ * never reveals a usable token. Sessions are revocable (delete the row) and expire at `expiresAt`.
+ */
+export interface PersistedSession {
+  /** sha256(sessionToken) hex — the cookie carries the raw token, the DB only ever sees its hash. */
+  id: string;
+  userId: string;
+  createdAt: string;
+  /** ISO-8601 expiry. A session past this instant is treated as absent and swept. */
+  expiresAt: string;
+}
+
+/** Enrollment mode for the agent bootstrap token (mirrors the protocol `EnrollmentInfo.mode`). */
+export type EnrollmentMode = "open" | "gated";
+
+/**
+ * The persisted enrollment bootstrap: which mode the deployment runs in and (when `gated`) the
+ * current bootstrap token an agent must present on first contact. `open` mode has a `null` token.
+ * Seeded on first boot from `POLYPTIC_BOOTSTRAP_TOKEN`; mutated by the Settings "regenerate" action.
+ */
+export interface PersistedBootstrap {
+  mode: EnrollmentMode;
+  token: string | null;
+}
+
 /** The full snapshot returned by `load()` — everything needed to rebuild the in-memory state. */
 export interface PersistedState {
   revision: number;
@@ -196,6 +238,35 @@ export interface Store {
   deleteScene(id: string): Promise<void>;
   /** All persisted scenes. */
   listScenes(): Promise<PersistedScene[]>;
+
+  // ── Local operator accounts + sessions (Phase 3f / D29) ────────────────────
+  /** Look up a user by (normalized) email. Used by login + change-password. */
+  getUserByEmail(email: string): Promise<PersistedUser | undefined>;
+  /** Look up a user by id. Used when resolving a session back to its operator. */
+  getUserById(id: string): Promise<PersistedUser | undefined>;
+  /** How many users exist — drives "seed an admin on first boot if none exist". */
+  countUsers(): Promise<number>;
+  /** Insert a new user row (id + email + argon2id hash + created_at). */
+  createUser(user: PersistedUser): Promise<void>;
+  /** Replace a user's password hash (after verifying the current password). No-op if absent. */
+  updateUserPassword(id: string, passwordHash: string): Promise<void>;
+
+  /** Insert a session row (its id is sha256(token); the raw token only ever lives in the cookie). */
+  createSession(session: PersistedSession): Promise<void>;
+  /** Look up a session by its id (sha256 of the cookie token). Undefined if revoked/absent. */
+  getSession(id: string): Promise<PersistedSession | undefined>;
+  /** Revoke a single session (logout). No-op if absent. */
+  deleteSession(id: string): Promise<void>;
+  /** Revoke every session for a user (e.g. after a password change). */
+  deleteSessionsForUser(userId: string): Promise<void>;
+  /** Sweep sessions whose expires_at is at or before `nowIso`. */
+  deleteExpiredSessions(nowIso: string): Promise<void>;
+
+  // ── Enrollment bootstrap token (Phase 3f) ──────────────────────────────────
+  /** The persisted enrollment bootstrap (mode + token). Undefined before first seed. */
+  getBootstrap(): Promise<PersistedBootstrap | undefined>;
+  /** Persist the enrollment bootstrap (single row). */
+  setBootstrap(bootstrap: PersistedBootstrap): Promise<void>;
 
   /** Release any underlying resources (DB pool). */
   close(): Promise<void>;

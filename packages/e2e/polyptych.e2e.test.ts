@@ -255,6 +255,7 @@ beforeAll(async () => {
       PORT: String(PORT),
       PLAYER_BASE_URL: "http://localhost:5173",
       LOG_LEVEL: "error",
+      AUTH_ENABLED: "false",
     },
     stdout: "inherit",
     stderr: "inherit",

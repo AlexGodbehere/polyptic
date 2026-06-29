@@ -1,20 +1,92 @@
 <script setup lang="ts">
+import { onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { useConsoleStore } from "../stores/console";
-import { signOut } from "../auth";
 
-// A light-touch Settings stub: the Appearance theme switch and Sign out are wired (they lean on
-// core 3a plumbing — toggleTheme + the auth stub); the richer panels arrive in a later sub-phase.
+// The real Settings view (Phase 3f — D29): signed-in account, change password, logout, the
+// enrollment-token card (open-mode note or gated token with Copy + Regenerate), and the theme toggle.
 const store = useConsoleStore();
 const router = useRouter();
+
+onMounted(() => {
+  // Load the enrollment-token info (open vs gated) so the card can render the real value.
+  void store.fetchEnrollment();
+});
 
 function setTheme(theme: "light" | "dark"): void {
   if (store.theme !== theme) store.toggleTheme();
 }
 
-function onSignOut(): void {
-  signOut();
-  void router.replace({ name: "signin" });
+// ── Logout ────────────────────────────────────────────────────────────────────
+const loggingOut = ref(false);
+async function onSignOut(): Promise<void> {
+  if (loggingOut.value) return;
+  loggingOut.value = true;
+  await store.logout();
+  await router.replace({ name: "signin" });
+}
+
+// ── Enrollment token ────────────────────────────────────────────────────────────
+const copied = ref(false);
+const regenerating = ref(false);
+
+async function copyToken(): Promise<void> {
+  const token = store.enrollmentToken;
+  if (!token) return;
+  try {
+    await navigator.clipboard.writeText(token);
+    copied.value = true;
+    window.setTimeout(() => (copied.value = false), 1600);
+  } catch {
+    /* clipboard unavailable (e.g. non-secure context) — Copy is a best-effort convenience */
+  }
+}
+
+async function regenerate(): Promise<void> {
+  if (regenerating.value) return;
+  if (!window.confirm("Regenerate the enrolment token? Machines still using the old token can no longer dial in.")) {
+    return;
+  }
+  regenerating.value = true;
+  await store.regenerateEnrollment();
+  regenerating.value = false;
+}
+
+// ── Change password ─────────────────────────────────────────────────────────────
+const pw = reactive({ current: "", next: "", confirm: "" });
+const pwError = ref<string | null>(null);
+const pwSuccess = ref(false);
+const pwSaving = ref(false);
+
+async function onChangePassword(): Promise<void> {
+  if (pwSaving.value) return;
+  pwError.value = null;
+  pwSuccess.value = false;
+  if (!pw.current) {
+    pwError.value = "Enter your current password.";
+    return;
+  }
+  if (pw.next.length < 8) {
+    pwError.value = "New password must be at least 8 characters.";
+    return;
+  }
+  if (pw.next !== pw.confirm) {
+    pwError.value = "New passwords do not match.";
+    return;
+  }
+  pwSaving.value = true;
+  try {
+    await store.changePassword({ currentPassword: pw.current, newPassword: pw.next });
+    pwSuccess.value = true;
+    pw.current = "";
+    pw.next = "";
+    pw.confirm = "";
+  } catch {
+    // Generic message — never reveal which field was at fault beyond "current password wrong".
+    pwError.value = "Could not change password. Check your current password and try again.";
+  } finally {
+    pwSaving.value = false;
+  }
 }
 </script>
 
@@ -23,6 +95,7 @@ function onSignOut(): void {
     <div class="page-inner">
       <h1 class="page-title">Settings</h1>
 
+      <!-- Appearance ------------------------------------------------------------ -->
       <div class="card panel">
         <div class="panel-title">Appearance</div>
         <div class="panel-sub">Theme for the console.</div>
@@ -36,21 +109,90 @@ function onSignOut(): void {
         </div>
       </div>
 
+      <!-- Enrolment token ------------------------------------------------------- -->
       <div class="card panel">
         <div class="panel-title">Enrolment token</div>
-        <div class="panel-sub">Managing the shared secret new machines present arrives with the Machines view.</div>
-        <span class="cs-badge">Coming soon</span>
+        <div class="panel-sub">The shared secret new machines present when they dial in.</div>
+
+        <template v-if="store.enrollment === null">
+          <div class="token-empty">Loading…</div>
+        </template>
+
+        <template v-else-if="store.enrollmentOpen">
+          <div class="open-note">
+            <span class="open-badge">Open mode</span>
+            <span>Any agent that connects is auto-registered — no token required. Set an enrolment
+              secret on the server to gate access.</span>
+          </div>
+        </template>
+
+        <template v-else>
+          <div class="token-row">
+            <code class="token">{{ store.enrollmentToken }}</code>
+            <button class="btn-ghost-sm" @click="copyToken">{{ copied ? "Copied ✓" : "Copy" }}</button>
+            <button class="btn-ghost-sm" :disabled="regenerating" @click="regenerate">
+              {{ regenerating ? "Regenerating…" : "Regenerate" }}
+            </button>
+          </div>
+          <div class="token-hint">New machines must present this token to dial in.</div>
+        </template>
       </div>
 
+      <!-- Change password ------------------------------------------------------- -->
+      <div class="card panel">
+        <div class="panel-title">Change password</div>
+        <div class="panel-sub">Use at least 8 characters.</div>
+
+        <label class="field-label">Current password</label>
+        <input
+          v-model="pw.current"
+          class="input field"
+          type="password"
+          autocomplete="current-password"
+          :disabled="pwSaving"
+          @keyup.enter="onChangePassword"
+        />
+
+        <label class="field-label">New password</label>
+        <input
+          v-model="pw.next"
+          class="input field"
+          type="password"
+          autocomplete="new-password"
+          :disabled="pwSaving"
+          @keyup.enter="onChangePassword"
+        />
+
+        <label class="field-label">Confirm new password</label>
+        <input
+          v-model="pw.confirm"
+          class="input field"
+          type="password"
+          autocomplete="new-password"
+          :disabled="pwSaving"
+          @keyup.enter="onChangePassword"
+        />
+
+        <div v-if="pwError" class="error">⚠ {{ pwError }}</div>
+        <div v-if="pwSuccess" class="success">✓ Password changed.</div>
+
+        <button class="btn btn-primary save" :disabled="pwSaving" @click="onChangePassword">
+          {{ pwSaving ? "Saving…" : "Change password" }}
+        </button>
+      </div>
+
+      <!-- Account --------------------------------------------------------------- -->
       <div class="card panel">
         <div class="panel-title">Account</div>
         <div class="account">
-          <div class="avatar">OP</div>
+          <div class="avatar">{{ store.accountInitials }}</div>
           <div class="who">
             <div class="who-name">Operator</div>
-            <div class="who-email">operator@accent.co</div>
+            <div class="who-email">{{ store.currentEmail || "—" }}</div>
           </div>
-          <button class="btn btn-ghost" @click="onSignOut">Sign out</button>
+          <button class="btn btn-ghost" :disabled="loggingOut" @click="onSignOut">
+            {{ loggingOut ? "Signing out…" : "Sign out" }}
+          </button>
         </div>
       </div>
     </div>
@@ -88,16 +230,105 @@ function onSignOut(): void {
   color: var(--muted);
   margin-bottom: 14px;
 }
-.cs-badge {
-  display: inline-block;
-  background: var(--accent-soft);
-  color: var(--accent-fg);
+.token-empty {
+  font-size: 12.5px;
+  color: var(--muted2);
+}
+.open-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.open-badge {
+  flex: 0 0 auto;
+  background: var(--ok-soft, var(--accent-soft));
+  color: var(--ok, var(--accent-fg));
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  padding: 4px 10px;
+  letter-spacing: 0.03em;
+  padding: 3px 9px;
   border-radius: 20px;
+  white-space: nowrap;
+}
+.token-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.token {
+  flex: 1;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: var(--muted-bg);
+  padding: 10px 13px;
+  border-radius: 9px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.token-hint {
+  font-size: 11.5px;
+  color: var(--muted2);
+  margin-top: 8px;
+}
+.btn-ghost-sm {
+  padding: 9px 14px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--fg2);
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.btn-ghost-sm:hover:not(:disabled) {
+  background: var(--muted-bg);
+}
+.btn-ghost-sm:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.field-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg2);
+  margin-bottom: 6px;
+}
+.field {
+  margin-bottom: 14px;
+}
+.error {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--bad);
+  background: var(--bad-soft);
+  border-radius: 8px;
+  padding: 9px 11px;
+  margin-bottom: 14px;
+}
+.success {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--ok, var(--accent-fg));
+  background: var(--ok-soft, var(--accent-soft));
+  border-radius: 8px;
+  padding: 9px 11px;
+  margin-bottom: 14px;
+}
+.save {
+  padding: 10px 16px;
+  font-size: 13px;
 }
 .account {
   display: flex;

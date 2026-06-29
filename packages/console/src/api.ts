@@ -35,9 +35,40 @@ export class ApiError extends Error {
   }
 }
 
-async function send<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+/** Per-request transport knobs. */
+export interface SendOptions {
+  /**
+   * Suppress the global "session expired" redirect for THIS request even on a 401. Set by the auth
+   * probes (login / me) whose 401 is an expected, locally-handled outcome — not a dropped session.
+   */
+  suppressAuthRedirect?: boolean;
+}
+
+// A single app-wide hook fired when an authenticated request comes back 401 (the server-side session
+// expired or was revoked mid-use). The router registers it to bounce the operator to /signin. Kept at
+// module scope so every api call shares one handler without threading it through call sites.
+let onUnauthorized: (() => void) | null = null;
+
+/** Register (or clear, with null) the handler invoked when a guarded request 401s. */
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
+/**
+ * The shared REST transport. Every request carries the session cookie (`credentials: "include"`) so
+ * the server's auth preHandler sees it — same-origin in prod, cross-origin to :8080 in dev (the
+ * server must allow credentialed CORS from the Vite origin for that to work). A 401 on a guarded
+ * request trips the global unauthorized handler (→ /signin) unless the caller opts out.
+ */
+export async function send<T = unknown>(
+  method: string,
+  path: string,
+  body?: unknown,
+  opts: SendOptions = {},
+): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
+    credentials: "include",
     headers: body === undefined ? undefined : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -49,6 +80,7 @@ async function send<T = unknown>(method: string, path: string, body?: unknown): 
     } catch {
       payload = undefined;
     }
+    if (res.status === 401 && !opts.suppressAuthRedirect) onUnauthorized?.();
     throw new ApiError(res.status, `${method} ${path} -> ${res.status}`, payload);
   }
 

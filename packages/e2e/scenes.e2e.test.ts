@@ -379,6 +379,7 @@ beforeAll(async () => {
       // No POLYPTIC_BOOTSTRAP_TOKEN → OPEN mode: the fake agent is auto-registered + auto-approved.
       PLAYER_BASE_URL: "http://localhost:5173",
       LOG_LEVEL: "error",
+      AUTH_ENABLED: "false",
     },
     stdout: "inherit",
     stderr: "inherit",

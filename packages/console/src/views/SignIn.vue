@@ -2,36 +2,51 @@
 import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useConsoleStore } from "../stores/console";
-import { signIn } from "../auth";
+import { ApiError } from "../api";
 import Logo from "../components/Logo.vue";
 
-// Stub sign-in (D29's real local accounts come later). Any non-empty credentials enter the app.
+// Real local-account sign-in (Phase 3f — D29). Credentials POST to /auth/login over the credentialed
+// transport; on success the server sets the httpOnly session cookie and we route on.
 const store = useConsoleStore();
 const router = useRouter();
 const route = useRoute();
 
-const email = ref("operator@accent.co");
+// Prefill the dev-default seed account so the local demo signs in with one click. In a real
+// deployment the operator types their own credentials (and the seeded account's password is rotated
+// — the boot banner nags about exactly that). See securityNotes.
+const email = ref("operator@polyptic.local");
 const password = ref("polyptic");
-const error = ref(false);
+const errorMessage = ref<string | null>(null);
 const loading = ref(false);
 
 const themeIcon = computed(() => (store.theme === "light" ? "☾ Dark" : "☼ Light"));
 
-function onSignIn(): void {
+async function onSignIn(): Promise<void> {
   if (loading.value) return;
   if (!email.value.trim() || !password.value.trim()) {
-    error.value = true;
+    errorMessage.value = "Enter an email and password to continue.";
     return;
   }
   loading.value = true;
-  error.value = false;
-  // A brief, deliberate beat so the spinner reads as "doing something" — matches the prototype.
-  window.setTimeout(() => {
-    signIn();
-    loading.value = false;
+  errorMessage.value = null;
+  try {
+    await store.login({ email: email.value.trim(), password: password.value });
     const redirect = typeof route.query.redirect === "string" ? route.query.redirect : "/wall";
-    void router.replace(redirect);
-  }, 600);
+    await router.replace(redirect);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 429) {
+      // Lockout after too many failed attempts (server-side rate limit). Surface the cooldown.
+      errorMessage.value =
+        "Too many attempts. This account is temporarily locked — wait a moment and try again.";
+    } else if (err instanceof ApiError && err.status === 401) {
+      errorMessage.value = "Incorrect email or password.";
+    } else {
+      // Network / server error — keep it generic (never leak whether the email exists).
+      errorMessage.value = "Could not sign in. Check the control plane is reachable and try again.";
+    }
+  } finally {
+    loading.value = false;
+  }
 }
 </script>
 
@@ -52,6 +67,7 @@ function onSignIn(): void {
         class="input field"
         type="email"
         autocomplete="username"
+        :disabled="loading"
         @keyup.enter="onSignIn"
       />
 
@@ -61,10 +77,11 @@ function onSignIn(): void {
         class="input field"
         type="password"
         autocomplete="current-password"
+        :disabled="loading"
         @keyup.enter="onSignIn"
       />
 
-      <div v-if="error" class="error">⚠ Enter an email and password to continue.</div>
+      <div v-if="errorMessage" class="error">⚠ {{ errorMessage }}</div>
 
       <button class="btn btn-primary submit" :disabled="loading" @click="onSignIn">
         <span v-if="loading" class="spinner"></span>

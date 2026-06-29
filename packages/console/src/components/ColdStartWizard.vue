@@ -35,7 +35,8 @@ const focusedScreen = ref<string | null>(null);
 const identing = reactive<Record<string, boolean>>({});
 const identTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-// Reset all wizard state whenever it (re)opens.
+// Reset all wizard state whenever it (re)opens, and (re)load the enrollment-token info so STEP 1
+// shows the REAL token (gated mode) or the open-mode note — closing the Phase-3e placeholder gap.
 watch(
   () => props.open,
   (open) => {
@@ -44,11 +45,18 @@ watch(
       focusedScreen.value = null;
       for (const k of Object.keys(drafts)) delete drafts[k];
       for (const k of Object.keys(identing)) delete identing[k];
+      void store.fetchEnrollment();
     }
   },
+  { immediate: true },
 );
 
 const pending = computed(() => store.pendingMachines);
+
+// Enrollment-token info (open vs gated) for STEP 1 — sourced from GET /settings/enrollment.
+const enrollmentLoaded = computed(() => store.enrollment !== null);
+const enrollmentOpen = computed(() => store.enrollmentOpen);
+const enrollmentToken = computed(() => store.enrollmentToken);
 
 const enrollingMachine = computed(() =>
   enrollingId.value ? store.machineById(enrollingId.value) : undefined,
@@ -170,10 +178,24 @@ function close(): void {
             </li>
           </ol>
 
+          <!-- the REAL enrolment token (gated) or the open-mode note (Phase 3f) -->
+          <div v-if="enrollmentLoaded && !enrollmentOpen" class="enrol-token-block">
+            <div class="enrol-token-label">Enrolment token</div>
+            <div class="enrol-token">{{ enrollmentToken }}</div>
+          </div>
+          <div v-else-if="enrollmentLoaded && enrollmentOpen" class="enrol-open">
+            <span class="enrol-open-badge">Open mode</span>
+            <span>No token needed — any agent that connects is auto-registered.</span>
+          </div>
+
           <div class="run">
-            <code
+            <code v-if="enrollmentLoaded && !enrollmentOpen"
               >POLYPTIC_SERVER=ws://this-host:8080 \
-POLYPTIC_BOOTSTRAP_TOKEN=&lt;your-enrolment-secret&gt; \
+POLYPTIC_BOOTSTRAP_TOKEN={{ enrollmentToken }} \
+polyptic-agent</code
+            >
+            <code v-else
+              >POLYPTIC_SERVER=ws://this-host:8080 \
 polyptic-agent</code
             >
           </div>
@@ -380,6 +402,46 @@ polyptic-agent</code
   color: var(--fg2);
   white-space: pre;
   line-height: 1.6;
+}
+.enrol-token-block {
+  margin-bottom: 16px;
+}
+.enrol-token-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.enrol-token {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  background: var(--muted-bg);
+  padding: 12px 14px;
+  border-radius: 10px;
+  text-align: center;
+  overflow-x: auto;
+}
+.enrol-open {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+.enrol-open-badge {
+  flex: 0 0 auto;
+  background: var(--accent-soft);
+  color: var(--accent-fg);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 3px 9px;
+  border-radius: 20px;
+  white-space: nowrap;
 }
 .waiting {
   display: flex;

@@ -86,14 +86,29 @@ export function constantTimeEqual(a: string, b: string): boolean {
  * when no token is set (OPEN MODE / dev default).
  */
 export class Enrollment {
-  /** True when no bootstrap token is configured — every agent is auto-registered + auto-approved. */
-  readonly open: boolean;
-  private readonly token: string | undefined;
+  private token: string | undefined;
 
   constructor(token: string | undefined) {
+    this.token = Enrollment.normalize(token);
+  }
+
+  /** True when no bootstrap token is configured — every agent is auto-registered + auto-approved. */
+  get open(): boolean {
+    return this.token === undefined;
+  }
+
+  private static normalize(token: string | undefined): string | undefined {
     const trimmed = token?.trim();
-    this.token = trimmed && trimmed.length > 0 ? trimmed : undefined;
-    this.open = this.token === undefined;
+    return trimmed && trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  /**
+   * Replace the live bootstrap token (Phase 3f — the Settings "regenerate" action). Passing a token
+   * switches the deployment to GATED; passing `undefined` switches it back to OPEN. The agent WS path
+   * reads `open`/`authenticate` dynamically, so the change takes effect on the next `agent/hello`.
+   */
+  setToken(token: string | undefined): void {
+    this.token = Enrollment.normalize(token);
   }
 
   /** Build from the environment (`POLYPTIC_BOOTSTRAP_TOKEN`). */
