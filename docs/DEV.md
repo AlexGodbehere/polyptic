@@ -42,9 +42,8 @@ colour-coded by name:
 | name (colour)      | process               | what it does                                                              |
 | ------------------ | --------------------- | ------------------------------------------------------------------------- |
 | `server` (green)   | `@polyptic/server`   | HTTP + WS on **:8080**; loads the registry from Postgres; REST API + `/admin` |
-| `player` (cyan)    | `@polyptic/player`   | Vite dev server on **:5173**; the per-screen renderer (SolidJS)           |
-| `admin`  (magenta) | `@polyptic/admin`    | Vite dev server on **:5174**; the legacy operator Admin UI (SolidJS, retired at 3e) |
-| `console` (blue)   | `@polyptic/console`  | Vite dev server on **:5175**; the new Vue operator console (Phase 3a: the Wall view) |
+| `player` (cyan)    | `@polyptic/player`   | Vite dev server on **:5173**; the per-screen renderer (Vue)               |
+| `console` (blue)   | `@polyptic/console`  | Vite dev server on **:5175**; the Vue operator console (Wall · Content · Scenes · Machines · Settings) |
 | `agent`  (yellow)  | `@polyptic/agent`    | dials the server, registers one screen, opens the player page             |
 
 Stop the stack with **Ctrl-C**. Postgres keeps running in Docker (that's what makes the

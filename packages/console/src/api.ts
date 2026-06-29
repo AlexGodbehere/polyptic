@@ -86,6 +86,34 @@ export function unplaceScreen(screenId: string): Promise<unknown> {
   return send("DELETE", `/screens/${encodeURIComponent(screenId)}/placement`);
 }
 
+// ── Machines (enrollment, Phase 2b) ──────────────────────────────────────────
+
+/**
+ * POST /api/v1/machines/:machineId/approve — admit a pending machine. The server promotes it to
+ * `approved`, registers its reported outputs as screens, and broadcasts the new admin/state.
+ */
+export function approveMachine(machineId: string): Promise<unknown> {
+  return send("POST", `/machines/${encodeURIComponent(machineId)}/approve`);
+}
+
+/**
+ * POST /api/v1/machines/:machineId/reject { reason? } — deny a pending machine, or revoke an already
+ * approved one. The optional reason is sent only when supplied (the server treats it as advisory).
+ */
+export function rejectMachine(machineId: string, reason?: string): Promise<unknown> {
+  const trimmed = reason?.trim();
+  return send(
+    "POST",
+    `/machines/${encodeURIComponent(machineId)}/reject`,
+    trimmed ? { reason: trimmed } : undefined,
+  );
+}
+
+/** POST /api/v1/machines/:machineId/ident { on, ttlMs? } — flash every screen the machine drives. */
+export function identMachine(machineId: string, body: IdentBody): Promise<unknown> {
+  return send("POST", `/machines/${encodeURIComponent(machineId)}/ident`, IdentBody.parse(body));
+}
+
 // ── Screen registry / content (existing Phase 2 routes) ──────────────────────
 
 /** POST /api/v1/screens/:screenId/rename { friendlyName }. */

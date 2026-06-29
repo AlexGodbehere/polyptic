@@ -24,8 +24,8 @@ const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? "0.0.0.0";
 const CORS_ORIGIN = (
   process.env.CORS_ORIGIN ??
-  // 5173 player, 5174 old SolidJS admin, 5175 Vue console (Phase 3a).
-  "http://localhost:5173,http://localhost:5174,http://localhost:5175"
+  // 5173 player, 5175 Vue console.
+  "http://localhost:5173,http://localhost:5175"
 )
   .split(",")
   .map((o) => o.trim())

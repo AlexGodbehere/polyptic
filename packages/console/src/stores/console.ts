@@ -167,6 +167,33 @@ export const useConsoleStore = defineStore("console", {
         this.machines.find((m) => m.screens.some((s) => s.id === screenId));
     },
 
+    // ── Machines / enrollment (Phase 2b) ──────────────────────────────────────
+
+    /** Machines awaiting an operator decision — surfaced first in the Machines view + the nav badge. */
+    pendingMachines(state): MachineView[] {
+      return state.machines.filter((m) => m.status === "pending");
+    },
+
+    /** Admitted machines (online first, then by label) — the ones whose screens are live. */
+    approvedMachines(state): MachineView[] {
+      return state.machines
+        .filter((m) => m.status === "approved")
+        .slice()
+        .sort((a, b) => {
+          if (a.online !== b.online) return a.online ? -1 : 1;
+          return a.label.localeCompare(b.label);
+        });
+    },
+
+    /** Machines an operator denied/revoked — kept listed so access can be restored. */
+    rejectedMachines(state): MachineView[] {
+      return state.machines.filter((m) => m.status === "rejected");
+    },
+
+    machineById(): (id: string) => MachineView | undefined {
+      return (id: string) => this.machines.find((m) => m.id === id);
+    },
+
     // ── Combined surfaces (video walls, Phase 3b) ─────────────────────────────
 
     /** The combined surfaces living on a given mural. */
@@ -464,6 +491,47 @@ export const useConsoleStore = defineStore("console", {
         this.openSocket();
       }, delay);
       backoffMs = Math.min(backoffMs * 2, RECONNECT_MAX_MS);
+    },
+
+    // ── Machines / enrollment (Phase 2b) ────────────────────────────────────────
+
+    /**
+     * Admit a pending machine. Optimistically flips its status to `approved` so the UI (and the
+     * cold-start wizard) advances immediately; the authoritative admin/state broadcast then arrives
+     * with the machine's registered screens and overwrites local state.
+     */
+    async approveMachine(id: string): Promise<void> {
+      const machine = this.machines.find((m) => m.id === id);
+      if (machine) machine.status = "approved"; // optimistic
+      try {
+        await api.approveMachine(id);
+      } catch (err) {
+        console.error("[console] approveMachine failed", err);
+      }
+    },
+
+    /**
+     * Reject a pending machine, or revoke an already-approved one (same endpoint). Optimistically
+     * marks it `rejected`; the server clears its screens and re-broadcasts. The optional reason is
+     * advisory and only sent when provided.
+     */
+    async rejectMachine(id: string, reason?: string): Promise<void> {
+      const machine = this.machines.find((m) => m.id === id);
+      if (machine) machine.status = "rejected"; // optimistic
+      try {
+        await api.rejectMachine(id, reason);
+      } catch (err) {
+        console.error("[console] rejectMachine failed", err);
+      }
+    },
+
+    /** Flash every screen a machine drives (fire-and-forget pulse) so an operator can spot the box. */
+    async identMachine(id: string): Promise<void> {
+      try {
+        await api.identMachine(id, { on: true, ttlMs: 3000 });
+      } catch (err) {
+        console.error("[console] identMachine failed", err);
+      }
     },
 
     // ── Murals ────────────────────────────────────────────────────────────────

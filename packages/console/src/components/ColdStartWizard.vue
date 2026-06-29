@@ -1,0 +1,623 @@
+<!--
+  ColdStartWizard.vue — the guided first-run flow for getting a brand-new machine onto the wall.
+
+  Opened from the Machines view (a first-run empty state, or the "Connect a machine" button). It is a
+  full-bleed overlay over the main column, mirroring docs/design/console.dc.html's COLD START WIZARD:
+
+    STEP 1 — connect: show how to enrol a new box (install the agent, present the bootstrap token —
+      or nothing, if the server runs in open mode), then LIVE-WATCH the store for the machine to
+      appear `pending` and Approve / Reject it inline.
+    STEP 2 — map screens: for each screen the freshly approved machine reports, Ident the physical
+      panel, give it a memorable name, and optionally place it on the active mural.
+
+  Everything composes EXISTING store actions (approveMachine / rejectMachine / identScreen /
+  renameScreen / placeScreen) — no new endpoints, no direct fetch.
+-->
+<script setup lang="ts">
+import { ref, reactive, computed, watch } from "vue";
+import { useRouter } from "vue-router";
+import { useConsoleStore } from "../stores/console";
+import { formatLastSeen, countLabel } from "../time";
+
+const props = defineProps<{ open: boolean; now: number }>();
+const emit = defineEmits<{ (e: "close"): void }>();
+
+const store = useConsoleStore();
+const router = useRouter();
+
+// The machine this run is enrolling. Set when the operator approves a pending box in STEP 1; the
+// wizard then follows that machine into STEP 2 once the server reports it `approved`.
+const enrollingId = ref<string | null>(null);
+
+// Per-screen rename drafts (keyed by screenId) + transient ident flashes for STEP 2.
+const drafts = reactive<Record<string, string>>({});
+const focusedScreen = ref<string | null>(null);
+const identing = reactive<Record<string, boolean>>({});
+const identTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// Reset all wizard state whenever it (re)opens.
+watch(
+  () => props.open,
+  (open) => {
+    if (open) {
+      enrollingId.value = null;
+      focusedScreen.value = null;
+      for (const k of Object.keys(drafts)) delete drafts[k];
+      for (const k of Object.keys(identing)) delete identing[k];
+    }
+  },
+);
+
+const pending = computed(() => store.pendingMachines);
+
+const enrollingMachine = computed(() =>
+  enrollingId.value ? store.machineById(enrollingId.value) : undefined,
+);
+
+// STEP 2 begins once the machine we're enrolling is actually approved by the server.
+const step = computed<1 | 2>(() =>
+  enrollingMachine.value && enrollingMachine.value.status === "approved" ? 2 : 1,
+);
+
+const waiting = computed(() => step.value === 1 && pending.value.length === 0);
+
+const title = computed(() =>
+  step.value === 2 ? "Name & place your screens" : "Connect your first machine",
+);
+const subtitle = computed(() =>
+  step.value === 2
+    ? "These screens are live but anonymous. Map each one to the physical panel on your wall."
+    : "No machines are on the wall yet. Bring one online to get started.",
+);
+
+const screens = computed(() => enrollingMachine.value?.screens ?? []);
+const targetMuralId = computed(() => store.activeMuralId ?? store.murals[0]?.id ?? null);
+
+// ── STEP 1 ─────────────────────────────────────────────────────────────────
+function approve(id: string): void {
+  void store.approveMachine(id);
+  enrollingId.value = id; // follow this machine into STEP 2
+}
+
+function reject(id: string): void {
+  void store.rejectMachine(id);
+}
+
+// ── STEP 2 ─────────────────────────────────────────────────────────────────
+function nameFor(id: string, fallback: string): string {
+  return drafts[id] ?? fallback;
+}
+
+function onNameInput(id: string, value: string): void {
+  drafts[id] = value;
+}
+
+function commitName(id: string): void {
+  focusedScreen.value = null;
+  const draft = drafts[id];
+  if (draft === undefined) return;
+  const trimmed = draft.trim();
+  if (trimmed.length >= 1 && trimmed.length <= 64) void store.renameScreen(id, trimmed);
+}
+
+function ident(id: string): void {
+  void store.identScreen(id);
+  identing[id] = true;
+  const existing = identTimers.get(id);
+  if (existing) clearTimeout(existing);
+  identTimers.set(
+    id,
+    setTimeout(() => {
+      identing[id] = false;
+    }, 3000),
+  );
+}
+
+function isPlaced(id: string): boolean {
+  return store.placementForScreen(id) !== undefined;
+}
+
+function place(id: string, index: number): void {
+  const muralId = targetMuralId.value;
+  if (!muralId) return;
+  if (isPlaced(id)) {
+    void store.unplaceScreen(id);
+    return;
+  }
+  // Fan the new screens out across the canvas so they don't stack.
+  void store.placeScreen(id, muralId, 120 + index * 220, 120);
+}
+
+function finish(): void {
+  emit("close");
+  void router.push({ name: "wall" });
+}
+
+function close(): void {
+  emit("close");
+}
+</script>
+
+<template>
+  <div v-if="open" class="cs-overlay">
+    <div class="cs-scroll">
+      <div class="cs-panel">
+        <button class="cs-close" title="Close" @click="close">✕</button>
+
+        <div class="cs-eyebrow">First-run setup</div>
+        <h1 class="cs-title">{{ title }}</h1>
+        <p class="cs-sub">{{ subtitle }}</p>
+
+        <!-- STEP 1: connect ------------------------------------------------- -->
+        <div v-if="step === 1" class="card cs-card">
+          <div class="card-label">Enrol a new machine</div>
+          <ol class="steps">
+            <li>
+              <span class="num">1</span>
+              <span>Install the Polyptic agent on a PC behind your screens and start it.</span>
+            </li>
+            <li>
+              <span class="num">2</span>
+              <span>
+                Point it at this control plane and give it the enrolment secret (its
+                <b>bootstrap token</b>) — it dials in automatically. If the server runs in
+                <b>open mode</b>, no token is needed.
+              </span>
+            </li>
+            <li>
+              <span class="num">3</span>
+              <span>Approve it below, then name &amp; place the screens it drives.</span>
+            </li>
+          </ol>
+
+          <div class="run">
+            <code
+              >POLYPTIC_SERVER=ws://this-host:8080 \
+POLYPTIC_BOOTSTRAP_TOKEN=&lt;your-enrolment-secret&gt; \
+polyptic-agent</code
+            >
+          </div>
+
+          <!-- waiting for the machine to dial in -->
+          <div v-if="waiting" class="waiting">
+            <span class="spinner"></span>
+            <span class="waiting-text">Waiting for a machine to dial in…</span>
+            <span class="waiting-hint">
+              It appears here the moment its agent connects — keep this open.
+            </span>
+          </div>
+
+          <!-- pending machines have arrived: approve / reject inline -->
+          <div v-else class="pend-list">
+            <div v-for="m in pending" :key="m.id" class="pend">
+              <div class="pend-head">
+                <span class="dot dot-on"></span>
+                <span class="pend-label">{{ m.label }}</span>
+                <span class="pend-id">requesting access</span>
+              </div>
+              <div class="pend-meta">
+                {{ m.online ? "Online" : "Offline" }} · reports
+                {{ countLabel(m.outputCount, "screen") }} ·
+                {{ m.online ? "just now" : formatLastSeen(m.lastSeen, now) }}
+              </div>
+              <div class="pend-actions">
+                <button class="btn-reject" @click="reject(m.id)">Reject</button>
+                <button class="btn-approve" @click="approve(m.id)">Approve machine</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- STEP 2: map screens --------------------------------------------- -->
+        <div v-else class="card cs-card">
+          <div class="cs-hint">
+            For each screen: <b>Ident</b> to see which physical panel flashes, give it a memorable
+            name, then place it on your mural.
+          </div>
+
+          <div v-if="screens.length === 0" class="waiting">
+            <span class="spinner"></span>
+            <span class="waiting-text">Registering screens for {{ enrollingMachine?.label }}…</span>
+          </div>
+
+          <div v-else class="map-list">
+            <div v-for="(s, i) in screens" :key="s.id" class="map-row">
+              <span class="map-idx">{{ i + 1 }}</span>
+              <input
+                class="map-name"
+                :value="nameFor(s.id, s.friendlyName)"
+                placeholder="Name this screen…"
+                spellcheck="false"
+                autocomplete="off"
+                @focus="focusedScreen = s.id"
+                @input="onNameInput(s.id, ($event.target as HTMLInputElement).value)"
+                @blur="commitName(s.id)"
+                @keyup.enter="commitName(s.id); ($event.target as HTMLInputElement).blur()"
+              />
+              <button
+                class="map-ident"
+                :class="{ active: identing[s.id] }"
+                @click="ident(s.id)"
+              >
+                <span class="ident-dot"></span>{{ identing[s.id] ? "Flashing…" : "Ident" }}
+              </button>
+              <button
+                class="map-place"
+                :class="{ done: isPlaced(s.id) }"
+                :disabled="!targetMuralId"
+                :title="targetMuralId ? '' : 'Create a mural on the Wall first'"
+                @click="place(s.id, i)"
+              >
+                {{ isPlaced(s.id) ? "Placed ✓" : "Place" }}
+              </button>
+            </div>
+          </div>
+
+          <p v-if="!targetMuralId" class="no-mural">
+            No mural yet — you can still name screens now and place them later on the Wall.
+          </p>
+
+          <button class="btn-finish" @click="finish">Finish — open the Wall</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.cs-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 120;
+  background: var(--bg);
+}
+.cs-scroll {
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+.cs-panel {
+  position: relative;
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  padding: 48px 24px 60px;
+}
+.cs-close {
+  position: absolute;
+  top: 20px;
+  right: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.cs-close:hover {
+  background: var(--muted-bg);
+  color: var(--fg2);
+}
+.cs-eyebrow {
+  text-align: center;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--accent-fg);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+.cs-title {
+  text-align: center;
+  font-size: 23px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
+}
+.cs-sub {
+  text-align: center;
+  font-size: 13.5px;
+  color: var(--muted);
+  margin: 0 0 26px;
+  line-height: 1.5;
+}
+.cs-card {
+  padding: 22px;
+  box-shadow: var(--shadow);
+}
+.card-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.steps {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.steps li {
+  display: flex;
+  gap: 11px;
+  align-items: flex-start;
+  font-size: 13px;
+  color: var(--fg2);
+  line-height: 1.5;
+}
+.num {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--muted-bg);
+  color: var(--fg2);
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.run {
+  background: var(--muted-bg);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 18px;
+  overflow-x: auto;
+}
+.run code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--fg2);
+  white-space: pre;
+  line-height: 1.6;
+}
+.waiting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 22px;
+  border: 1.5px dashed var(--line2);
+  border-radius: 11px;
+}
+.spinner {
+  width: 22px;
+  height: 22px;
+  border: 2.5px solid var(--line2);
+  border-right-color: var(--accent);
+  border-radius: 50%;
+  animation: cs-spin 0.8s linear infinite;
+}
+@keyframes cs-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.waiting-text {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.waiting-hint {
+  font-size: 11.5px;
+  color: var(--muted2);
+  text-align: center;
+  line-height: 1.5;
+}
+.pend-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.pend {
+  border: 1px solid var(--warn-soft);
+  border-left: 3px solid var(--warn);
+  border-radius: 11px;
+  padding: 15px;
+  background: var(--surface);
+  animation: cs-fade 0.25s ease;
+}
+@keyframes cs-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.pend-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 4px;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.dot-on {
+  background: var(--ok);
+}
+.pend-label {
+  font-size: 14px;
+  font-weight: 600;
+}
+.pend-id {
+  font-size: 11px;
+  color: var(--muted2);
+}
+.pend-meta {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-bottom: 13px;
+}
+.pend-actions {
+  display: flex;
+  gap: 9px;
+}
+.btn-reject {
+  flex: 1;
+  padding: 9px;
+  border-radius: 9px;
+  border: 1px solid var(--line2);
+  background: var(--surface);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--bad);
+  cursor: pointer;
+  font-family: inherit;
+}
+.btn-reject:hover {
+  background: var(--bad-soft);
+}
+.btn-approve {
+  flex: 2;
+  padding: 9px;
+  border-radius: 9px;
+  border: none;
+  background: var(--primary);
+  color: var(--primary-fg);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.btn-approve:hover {
+  opacity: 0.92;
+}
+.cs-hint {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+.cs-hint b {
+  color: var(--fg2);
+  font-weight: 600;
+}
+.map-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.map-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.map-idx {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--muted-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.map-name {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+  outline: none;
+  font-family: inherit;
+}
+.map-name:focus {
+  border-color: var(--accent);
+}
+.map-ident {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line2);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg2);
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.map-ident:hover {
+  background: var(--muted-bg);
+}
+.map-ident.active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-fg);
+}
+.ident-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.map-place {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line2);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg2);
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.map-place:hover:not(:disabled) {
+  background: var(--muted-bg);
+}
+.map-place:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.map-place.done {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-fg);
+}
+.no-mural {
+  font-size: 11.5px;
+  color: var(--muted2);
+  line-height: 1.5;
+  margin: 0 0 16px;
+}
+.btn-finish {
+  width: 100%;
+  padding: 11px;
+  border-radius: 9px;
+  border: none;
+  background: var(--primary);
+  color: var(--primary-fg);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.btn-finish:hover {
+  opacity: 0.92;
+}
+</style>
