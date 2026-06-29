@@ -2,7 +2,7 @@
 
 The remembered path. Fixed direction, flexible detail. Update the **CURRENT** marker as we go. Phases are sequenced by dependency, not by calendar.
 
-> **CURRENT: Phase 2b ✅ done → Phase 3 (murals) next.** Enrollment/claim + durable per-machine credentials built + verified: full typecheck (6 pkgs) green, e2e **23/23** (Phase 1/2a regression + gated enrollment), and a Postgres capstone (gated enroll → approve → restart → credential persists → reconnect admitted; wrong token rejected). mTLS transport deferred to the deploy/hardening layer (D12). **Note (D20):** Phase 3 = the "murals" spatial canvas (UI design exploration in progress) — operators drag/snap **screens** (independent of host) into arrangements; a Screen gains a position and a **Mural/Wall** entity is introduced.
+> **CURRENT: Phase 3a ✅ done → Phase 3b next (Phase 4 building in parallel).** The Vue console (`packages/console`: Vue 3 + Vite + Vue Router + Pinia + **Vue Flow**) + its Wall murals canvas + server murals/placement are built + verified (typecheck green, e2e **28/28**). Console on **:5175** (old SolidJS admin stays on :5174 until 3e). Sub-phases left: **3b** combined surfaces → 3c content library → 3d scenes → 3e machines view + cold-start → 3f sign-in + settings. **Phase 4** (device stack: real sway/x11 backends + `apt install` packaging) is building **in parallel** (independent files) — code-complete pending the UTM-VM visual cold-boot test.
 
 ---
 
