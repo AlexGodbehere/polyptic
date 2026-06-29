@@ -1,0 +1,205 @@
+# Default values for the Polyptic control-plane (server) chart.
+# This file mirrors deploy/docker-compose.yml + deploy/server.Dockerfile +
+# deploy/.env.example. Override on `helm install -f my-values.yaml` or `--set`.
+
+# -- Number of server replicas. The control plane is currently a single-writer
+# process (it holds the desired-state authority + in-memory WS hubs); keep this
+# at 1 unless you have introduced sticky sessions / shared coordination.
+replicaCount: 1
+
+image:
+  # Container image for the server, built from deploy/server.Dockerfile.
+  repository: ghcr.io/polyptic/polyptic-server
+  pullPolicy: IfNotPresent
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+
+# Image pull secrets for private registries, e.g. [{ name: regcred }].
+imagePullSecrets: []
+
+# Override chart name / fullname in resource names.
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # If true, create a ServiceAccount for the server pods.
+  create: true
+  # Annotations to add to the ServiceAccount (e.g. IRSA / Workload Identity).
+  annotations: {}
+  # Name to use; generated from the fullname template when empty.
+  name: ""
+
+# Extra annotations / labels applied to the Deployment's pod template.
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  # The Service port. The container always listens on containerPort (8080).
+  port: 8080
+  # Optional fixed nodePort when type=NodePort.
+  nodePort: ""
+  annotations: {}
+
+# The port the server binds inside the container (server reads PORT). Keep 8080
+# to match server.Dockerfile (EXPOSE 8080) and the Service default.
+containerPort: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    # nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  host: polyptic.example.com
+  # Path + pathType for the single host rule.
+  path: /
+  pathType: Prefix
+  tls:
+    # When enabled, emit a tls block for `host` using `secretName`.
+    enabled: false
+    secretName: polyptic-tls
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# Liveness / readiness both hit the UNGATED top-level /healthz (NOT /api/v1).
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 6
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Prometheus scrape annotations for the UNGATED top-level /metrics endpoint.
+# These are merged onto the pod template; a ServiceMonitor (Prometheus Operator)
+# is out of scope but the annotations work with the standard kubernetes_sd scrape.
+metrics:
+  enabled: true
+  path: /metrics
+  port: 8080
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra raw env vars appended verbatim to the container (list of {name,value} or
+# valueFrom maps). Use for anything not surfaced as a first-class value below.
+extraEnv: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Application configuration (mirrors deploy/.env.example).
+# Non-secret values land in a ConfigMap; secret values land in a Secret.
+# ─────────────────────────────────────────────────────────────────────────────
+config:
+  # Registry backend: `postgres` (durable, default) or `memory` (ephemeral test double).
+  store: postgres
+
+  # Comma-separated allowed CORS origins for the console/player (browsers send the
+  # session cookie cross-origin, so this MUST list every browser origin). In prod
+  # this is typically your HTTPS console origin.
+  corsOrigin: "https://polyptic.example.com"
+
+  # Public base URL of the player app (used when the server pushes render URLs).
+  playerBaseUrl: "https://polyptic.example.com"
+
+  # Fastify log level: trace|debug|info|warn|error|fatal.
+  logLevel: info
+
+  # NODE_ENV — "production" implies secure cookies unless SECURE_COOKIES is set.
+  nodeEnv: production
+
+  # AUTH GATE (Phase 3f / D29). Leave true for any real deployment. The e2e suite
+  # runs with this false; NEVER ship a public deployment with auth disabled.
+  authEnabled: true
+
+  # Mark session cookies `secure` (HTTPS-only). PRODUCTION over HTTPS MUST set this
+  # true (see README "Production note"). Left true here because the prod default is HTTPS.
+  secureCookies: true
+
+  # Capture cadence for the live-preview thumbnails (server → agent server/capture
+  # poll interval, milliseconds). Empty uses the server's built-in default.
+  captureIntervalMs: ""
+
+secrets:
+  # COOKIE_SECRET — signs the http-only session cookies. MUST be a long random
+  # value in production. If left empty AND existingSecret is unset, the chart
+  # generates a random 64-char secret on first install and preserves it across
+  # upgrades (via lookup). Provide your own for GitOps/repeatable installs.
+  cookieSecret: ""
+
+  # POLYPTIC_BOOTSTRAP_TOKEN — shared agent-enrollment secret. UNSET ("") → OPEN
+  # mode (every agent auto-approved; dev only). SET → gated enrollment + operator
+  # approval. Set the SAME value on each agent.
+  bootstrapToken: ""
+
+  # Seed operator (created on first boot if no users exist). Set BOTH to bootstrap
+  # the first admin login; leave empty to manage operators out-of-band.
+  adminEmail: ""
+  adminPassword: ""
+
+  # Use a pre-existing Secret instead of letting the chart create one. When set,
+  # the chart references keys from it: COOKIE_SECRET, POLYPTIC_BOOTSTRAP_TOKEN,
+  # POLYPTIC_ADMIN_EMAIL, POLYPTIC_ADMIN_PASSWORD, DATABASE_URL.
+  existingSecret: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Database wiring.
+#   * postgresql.enabled=true  → deploy the Bitnami Postgres subchart; the chart
+#     derives DATABASE_URL from these credentials automatically.
+#   * postgresql.enabled=false → supply externalDatabase.url (or set
+#     secrets.existingSecret with a DATABASE_URL key, or config-level env override).
+# ─────────────────────────────────────────────────────────────────────────────
+postgresql:
+  enabled: false
+  auth:
+    username: polyptic
+    password: polyptic
+    database: polyptic
+    # Optional: use an existing secret for the Postgres password.
+    existingSecret: ""
+  # Bitnami chart sub-values pass through here (primary.persistence, etc.).
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
+
+externalDatabase:
+  # Full Postgres connection string, used when postgresql.enabled=false.
+  # e.g. postgres://user:pass@my-pg.rds.amazonaws.com:5432/polyptic
+  url: ""

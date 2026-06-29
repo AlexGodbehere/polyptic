@@ -16,8 +16,10 @@ import Fastify from "fastify";
 import { AdminBroadcaster, AdminHub, Presence } from "./admin";
 import { AuthService, authConfigFromEnv } from "./auth-local";
 import { registerAuthRoutes } from "./auth-routes";
+import { CaptureCoordinator, ThumbnailStore } from "./capture";
 import { Enrollment } from "./enroll";
 import { AgentHub, PlayerHub } from "./hub";
+import { registerOpsRoutes } from "./ops";
 import { registerRestRoutes } from "./rest";
 import { ControlPlane } from "./state";
 import { createStore } from "./store";
@@ -35,6 +37,14 @@ const AUTH_PUBLIC_PATHS = new Set([
 
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? "0.0.0.0";
+const STARTED_AT = Date.now();
+// Build identity surfaced on /healthz + /metrics. Wired by the deploy (image tag + git sha).
+const BUILD_VERSION = process.env.POLYPTIC_VERSION?.trim() || "0.0.0";
+const BUILD_REVISION = process.env.POLYPTIC_REVISION?.trim() || process.env.GIT_SHA?.trim() || "dev";
+// Live-preview capture sweep cadence (ms). 0 disables the periodic sweep (on-demand still works).
+const CAPTURE_INTERVAL_MS = Number(process.env.CAPTURE_INTERVAL_MS ?? 4000);
+// Max thumbnails held in memory at once (LRU cap).
+const THUMBNAIL_CAPACITY = Number(process.env.CAPTURE_THUMBNAIL_CAP ?? 300);
 const CORS_ORIGIN = (
   process.env.CORS_ORIGIN ??
   // 5173 player, 5175 Vue console.
@@ -75,6 +85,18 @@ const adminHub = new AdminHub();
 const presence = new Presence();
 const broadcaster = new AdminBroadcaster({ control, playerHub: hub, presence, adminHub, log: fastify.log });
 
+// ── Live preview (Phase 5): bounded thumbnail store + capture coordinator. ──
+const thumbnails = new ThumbnailStore(
+  Number.isFinite(THUMBNAIL_CAPACITY) && THUMBNAIL_CAPACITY > 0 ? THUMBNAIL_CAPACITY : 300,
+);
+const capture = new CaptureCoordinator({
+  control,
+  agentHub,
+  thumbnails,
+  log: fastify.log,
+  intervalMs: Number.isFinite(CAPTURE_INTERVAL_MS) ? CAPTURE_INTERVAL_MS : 4000,
+});
+
 await fastify.register(cors, {
   origin: CORS_ORIGIN,
   // PUT/DELETE (3a placement/murals), PATCH (3c content-sources + 3d scenes edits).
@@ -103,7 +125,18 @@ fastify.addHook("preHandler", async (request: FastifyRequest, reply: FastifyRepl
 });
 
 registerAuthRoutes(fastify, auth, enrollment);
-registerRestRoutes(fastify, control, hub, agentHub, broadcaster);
+registerRestRoutes(fastify, control, hub, agentHub, broadcaster, capture);
+// TOP-LEVEL ops endpoints (/healthz, /metrics) — NOT /api/v1, so UNgated for scrapers/liveness.
+registerOpsRoutes(fastify, {
+  control,
+  agentHub,
+  playerHub: hub,
+  thumbnails,
+  storeKind,
+  version: BUILD_VERSION,
+  revision: BUILD_REVISION,
+  startedAt: STARTED_AT,
+});
 attachWebSockets({
   server: fastify.server,
   control,
@@ -114,9 +147,13 @@ attachWebSockets({
   adminHub,
   presence,
   broadcaster,
+  capture,
   log: fastify.log,
   allowedOrigins: CORS_ORIGIN,
 });
+
+// Start the periodic live-preview capture sweep (no-op when CAPTURE_INTERVAL_MS=0).
+capture.start();
 
 // Auth boot banner: secure by default; make the dev shortcuts loud.
 if (!authConfig.enabled) {
@@ -160,6 +197,7 @@ if (enrollment.open) {
 
 async function shutdown(signal: string): Promise<void> {
   fastify.log.info({ event: "server.shutdown", signal }, "shutting down");
+  capture.stop();
   try {
     await fastify.close();
   } catch (err) {

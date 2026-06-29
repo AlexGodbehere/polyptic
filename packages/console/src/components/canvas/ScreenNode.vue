@@ -11,6 +11,7 @@
 -->
 <script setup lang="ts">
 import { computed } from "vue";
+import { useScreenThumbnail } from "./useThumbnails";
 
 type ScreenStatus = "live" | "empty" | "offline" | "error";
 
@@ -28,6 +29,20 @@ interface ScreenNodeData {
 }
 
 const props = defineProps<{ id: string; data: ScreenNodeData }>();
+
+// Live preview: the agent's most recent capture of what's actually on this panel, refreshed on a
+// throttle by the shared manager and painted as the tile's fill (behind the label/state overlays).
+// Paused automatically while the screen is offline, so we fall back to the neutral/empty styling.
+const thumbUrl = useScreenThumbnail(
+  computed(() => props.data.screenId),
+  computed(() => props.data.online),
+);
+
+// Only paint a preview when we actually have a frame AND the screen is reachable. An offline screen
+// keeps its "Screen dark" treatment; identing wins over everything (handled below).
+const hasThumb = computed(
+  () => !!thumbUrl.value && props.data.status !== "offline" && !props.data.identing,
+);
 
 const dotColor = computed(() => {
   if (props.data.status === "offline") return "var(--bad)";
@@ -70,7 +85,15 @@ const kindLabel = computed(() =>
 </script>
 
 <template>
-  <div class="screen-node" :class="{ identing: data.identing }" :style="nodeStyle">
+  <div class="screen-node" :class="{ identing: data.identing, 'has-thumb': hasThumb }" :style="nodeStyle">
+    <!-- live preview fill (behind the label + state overlays) -->
+    <div
+      v-if="hasThumb"
+      class="thumb"
+      :style="{ backgroundImage: `url(${thumbUrl})` }"
+      aria-hidden="true"
+    ></div>
+
     <!-- label chip -->
     <div class="label">
       <span class="dot" :style="{ background: dotColor }"></span>
@@ -87,7 +110,9 @@ const kindLabel = computed(() =>
     <template v-else>
       <!-- live -->
       <template v-if="data.status === 'live'">
-        <div class="state live-state">
+        <!-- When a preview frame is showing, the picture IS the content — drop the redundant
+             "Showing content" label so the capture reads clean; keep the small surface-count tag. -->
+        <div v-if="!hasThumb" class="state live-state">
           <span class="content-name">{{ contentLabel }}</span>
         </div>
         <span class="kind-label">{{ kindLabel }}</span>
@@ -100,7 +125,7 @@ const kindLabel = computed(() =>
       </div>
 
       <!-- empty -->
-      <div v-else-if="data.status === 'empty'" class="state empty-state">
+      <div v-else-if="data.status === 'empty' && !hasThumb" class="state empty-state">
         <span class="plus">+</span>
         <span class="empty-text">Drop content</span>
       </div>
@@ -127,6 +152,32 @@ const kindLabel = computed(() =>
 }
 .screen-node.identing {
   animation: ident-flash 1.4s infinite;
+}
+/* When a live preview is showing, neutralise the status background so the capture fills cleanly. */
+.screen-node.has-thumb {
+  background: #0b0d12 !important;
+}
+
+/* Live preview fill — the captured frame, scaled to cover the tile, sitting beneath every overlay. */
+.thumb {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+/* A soft top scrim keeps the label chip legible over bright captures. */
+.screen-node.has-thumb .label {
+  background: rgba(8, 10, 14, 0.62);
+  backdrop-filter: blur(4px);
+}
+.screen-node.has-thumb .name {
+  color: #f4f6fb;
+}
+.screen-node.has-thumb .kind-label {
+  color: rgba(244, 246, 251, 0.82);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
 }
 
 .label {

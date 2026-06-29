@@ -12,10 +12,18 @@
 import { ref, computed, watch } from "vue";
 import type { ScreenView } from "@polyptic/protocol";
 import { useConsoleStore } from "../stores/console";
+import { useScreenThumbnail } from "./canvas/useThumbnails";
 
 const props = defineProps<{ screen: ScreenView; machineLabel: string }>();
 
 const store = useConsoleStore();
+
+// Live preview of what's actually on this panel, refreshed on a throttle by the shared manager and
+// paused automatically while the screen is offline (falls back to the neutral placeholder tile).
+const thumbUrl = useScreenThumbnail(
+  computed(() => props.screen.id),
+  computed(() => props.screen.online),
+);
 
 const draft = ref(props.screen.friendlyName);
 const focused = ref(false);
@@ -62,6 +70,17 @@ function ident(): void {
       :class="screen.online ? 'dot-on' : 'dot-off'"
       :title="screen.online ? 'player connected' : 'player offline'"
     ></span>
+
+    <!-- live preview tile (falls back to a neutral placeholder when offline / no frame yet) -->
+    <div class="preview" :class="{ live: thumbUrl }">
+      <div
+        v-if="thumbUrl"
+        class="preview-img"
+        :style="{ backgroundImage: `url(${thumbUrl})` }"
+        aria-hidden="true"
+      ></div>
+      <span v-else class="preview-empty" aria-hidden="true">▦</span>
+    </div>
 
     <div class="name-col">
       <input
@@ -111,6 +130,33 @@ function ident(): void {
 }
 .dot-off {
   background: var(--muted2);
+}
+.preview {
+  flex: 0 0 auto;
+  width: 64px;
+  height: 36px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--muted-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.preview.live {
+  background: #0b0d12;
+}
+.preview-img {
+  width: 100%;
+  height: 100%;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+.preview-empty {
+  font-size: 14px;
+  color: var(--muted2);
+  line-height: 1;
 }
 .name-col {
   flex: 1;

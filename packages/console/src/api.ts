@@ -89,6 +89,47 @@ export async function send<T = unknown>(
   return (text ? (JSON.parse(text) as T) : (undefined as T));
 }
 
+// ── Live previews / thumbnails (Phase 5) ─────────────────────────────────────
+
+/**
+ * Fetch the latest capture for a screen as a browser object URL, or null when there's nothing to
+ * show. This is the live-preview path: the server holds the most recent `agent/thumbnail` frame the
+ * agent captured for the screen's machine; GET /api/v1/screens/:id/thumbnail returns it as raw image
+ * bytes (200) or 204 when no capture is available yet (or the machine can't capture).
+ *
+ * It deliberately does NOT go through `send()` — that helper JSON-parses the body, whereas a
+ * thumbnail is binary. We `fetch` directly with `credentials: "include"` so the operator's session
+ * cookie rides along (a bare `<img src>` would NOT send the cookie cross-origin to :8080 in dev,
+ * which is exactly why the preview has to be fetched-to-blob and handed back as an object URL).
+ *
+ * The caller OWNS the returned URL and MUST `URL.revokeObjectURL()` it once the next frame replaces
+ * it (or the preview unmounts) — otherwise every refresh leaks a blob. A non-2xx other than 204 is
+ * treated as "no preview" (returns null); a 401 additionally trips the global unauthorized handler so
+ * an expired session still bounces the operator to /signin, consistent with `send()`.
+ */
+export async function fetchThumbnail(screenId: string): Promise<string | null> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/screens/${encodeURIComponent(screenId)}/thumbnail`, {
+      method: "GET",
+      credentials: "include",
+    });
+  } catch {
+    // Network/CORS failure — treat as "no preview right now" rather than throwing into the poll loop.
+    return null;
+  }
+
+  if (res.status === 204) return null;
+  if (!res.ok) {
+    if (res.status === 401) onUnauthorized?.();
+    return null;
+  }
+
+  const blob = await res.blob();
+  if (blob.size === 0) return null;
+  return URL.createObjectURL(blob);
+}
+
 // ── Murals ────────────────────────────────────────────────────────────────────
 
 /** POST /api/v1/murals { name } — create a new mural. */

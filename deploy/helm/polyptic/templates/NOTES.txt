@@ -1,0 +1,75 @@
+Polyptic control plane has been deployed.
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+Image:     {{ include "polyptic.image" . }}
+Store:     {{ .Values.config.store }}
+
+1. Reach the control plane
+{{- if .Values.ingress.enabled }}
+
+   Ingress is enabled:
+     http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}{{ .Values.ingress.path }}
+{{- else if eq .Values.service.type "NodePort" }}
+
+   NodePort service. Find the port + a node IP:
+     export NODE_PORT=$(kubectl get svc {{ include "polyptic.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}")
+     export NODE_IP=$(kubectl get nodes -o jsonpath="{.items[0].status.addresses[0].address}")
+     echo "http://$NODE_IP:$NODE_PORT"
+{{- else if eq .Values.service.type "LoadBalancer" }}
+
+   LoadBalancer service. Wait for the external IP:
+     kubectl get svc {{ include "polyptic.fullname" . }} -n {{ .Release.Namespace }} -w
+{{- else }}
+
+   ClusterIP service (in-cluster only). Port-forward for local access:
+     kubectl port-forward svc/{{ include "polyptic.fullname" . }} -n {{ .Release.Namespace }} 8080:{{ .Values.service.port }}
+     # then open http://localhost:8080
+{{- end }}
+
+2. Liveness / ops endpoints (UNGATED — not behind /api/v1):
+     GET /healthz   liveness + readiness
+     GET /metrics   Prometheus exposition{{ if .Values.metrics.enabled }} (pod scrape annotations are set){{ end }}
+
+3. Auth gate (Phase 3f / D29):
+{{- if .Values.config.authEnabled }}
+     AUTH is ENABLED. Operator routes (/api/v1/**) require a session.
+  {{- if and .Values.secrets.adminEmail .Values.secrets.adminPassword }}
+     A seed admin was configured (POLYPTIC_ADMIN_EMAIL / POLYPTIC_ADMIN_PASSWORD).
+  {{- else }}
+     No seed admin configured. Set secrets.adminEmail + secrets.adminPassword to
+     bootstrap the first operator, then `helm upgrade`.
+  {{- end }}
+  {{- if not .Values.config.secureCookies }}
+
+     ⚠️  SECURE_COOKIES is false. PRODUCTION MUST be served over HTTPS with
+        config.secureCookies=true (see chart README → Production note).
+  {{- end }}
+{{- else }}
+     ⚠️  AUTH IS DISABLED (config.authEnabled=false): every /api/v1 route and the
+        /admin WS are UNPROTECTED. For tests/dev ONLY — never run a real
+        deployment with auth disabled.
+{{- end }}
+
+4. Agent enrollment:
+{{- if .Values.secrets.bootstrapToken }}
+     GATED — agents must present the bootstrap token; new machines appear pending
+     and await operator approval in the console.
+{{- else }}
+     ⚠️  OPEN — secrets.bootstrapToken is empty, so every agent that connects is
+        auto-registered AND auto-approved. Set secrets.bootstrapToken for gated
+        enrollment in any real deployment.
+{{- end }}
+
+5. Database:
+{{- if .Values.postgresql.enabled }}
+     In-cluster Postgres subchart enabled. DATABASE_URL is derived automatically
+     and points at {{ include "polyptic.postgresql.host" . }}:5432.
+{{- else if .Values.externalDatabase.url }}
+     External Postgres in use (externalDatabase.url).
+{{- else if eq .Values.config.store "memory" }}
+     STORE=memory — ephemeral; registry state is lost on pod restart. Dev only.
+{{- else }}
+     ⚠️  STORE={{ .Values.config.store }} but no database configured. Set
+        postgresql.enabled=true or externalDatabase.url.
+{{- end }}

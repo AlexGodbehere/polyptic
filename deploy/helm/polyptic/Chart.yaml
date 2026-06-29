@@ -1,0 +1,32 @@
+apiVersion: v2
+name: polyptic
+description: >-
+  Polyptic control plane (server) — a generic, self-hostable display-wall /
+  kiosk-fleet orchestrator. This chart deploys ONLY the server (REST + WebSocket
+  control plane on :8080). On-device agents are installed per-box from the .deb/.rpm
+  package (deploy/nfpm.yaml), NOT in Kubernetes.
+type: application
+
+# Chart version — bump on any change to the chart itself.
+version: 0.1.0
+
+# The app (server) version this chart deploys. Mirror your image tag / release.
+appVersion: "0.1.0"
+
+home: https://github.com/polyptic/polyptic
+sources:
+  - https://github.com/polyptic/polyptic
+keywords:
+  - polyptic
+  - display-wall
+  - kiosk
+  - signage
+  - orchestrator
+maintainers:
+  - name: Polyptic Maintainers
+    email: maintainers@polyptic.example
+
+# Database: bring your own Postgres via externalDatabase.url / a DATABASE_URL secret (the
+# production norm) — this chart deploys ONLY the server and renders standalone. In-cluster
+# Postgres is OPT-IN: add the Bitnami `postgresql` chart under a `dependencies:` block here,
+# run `helm dependency build`, then set `postgresql.enabled=true`.

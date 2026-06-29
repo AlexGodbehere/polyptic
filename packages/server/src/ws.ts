@@ -44,6 +44,7 @@ import type { RawData } from "ws";
 import { hashCredential } from "./enroll";
 import type { Enrollment } from "./enroll";
 import type { AuthService } from "./auth-local";
+import type { CaptureCoordinator } from "./capture";
 import type { ControlPlane, RegisterMachineInput, ScreenAssignment } from "./state";
 import type { AgentHub, PlayerHub } from "./hub";
 import type { AdminBroadcaster, AdminHub, Presence } from "./admin";
@@ -59,13 +60,15 @@ interface WsDeps {
   adminHub: AdminHub;
   presence: Presence;
   broadcaster: AdminBroadcaster;
+  /** Live-preview capture (Phase 5) — ingests inbound `agent/thumbnail` frames. */
+  capture: CaptureCoordinator;
   log: FastifyBaseLogger;
   /** Allowed browser origins for the /admin WS upgrade (anti-CSWSH); from CORS_ORIGIN. */
   allowedOrigins: string[];
 }
 
 export function attachWebSockets(deps: WsDeps): void {
-  const { server, control, enrollment, auth, hub, agentHub, adminHub, presence, broadcaster, log, allowedOrigins } =
+  const { server, control, enrollment, auth, hub, agentHub, adminHub, presence, broadcaster, capture, log, allowedOrigins } =
     deps;
 
   const agentWss = new WebSocketServer({ noServer: true });
@@ -125,7 +128,7 @@ export function attachWebSockets(deps: WsDeps): void {
   });
 
   agentWss.on("connection", (ws: WebSocket) =>
-    handleAgent(ws, control, enrollment, agentHub, presence, broadcaster, log),
+    handleAgent(ws, control, enrollment, agentHub, presence, broadcaster, capture, log),
   );
   playerWss.on("connection", (ws: WebSocket) =>
     handlePlayer(ws, control, hub, presence, broadcaster, log),
@@ -142,6 +145,7 @@ function handleAgent(
   agentHub: AgentHub,
   presence: Presence,
   broadcaster: AdminBroadcaster,
+  capture: CaptureCoordinator,
   log: FastifyBaseLogger,
 ): void {
   log.info({ event: "agent.connected" }, "agent socket opened");
@@ -325,11 +329,9 @@ function handleAgent(
         "agent status",
       );
     } else {
-      // agent/thumbnail — captured but not yet stored (Phase 5).
-      log.debug(
-        { event: "agent.thumbnail", machineId: msg.machineId, connector: msg.connector, mime: msg.mime },
-        "agent thumbnail",
-      );
+      // agent/thumbnail — the frame is already AgentMessage-validated; hand it to the coordinator,
+      // which resolves connector→screenId, decodes the payload and stores the latest preview (Phase 5).
+      capture.ingest(msg);
     }
   });
 

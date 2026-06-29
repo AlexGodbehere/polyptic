@@ -40,6 +40,7 @@ import {
 import type { FastifyInstance } from "fastify";
 import type { Screen, ScreenSlice } from "@polyptic/protocol";
 
+import type { CaptureCoordinator } from "./capture";
 import type { ControlPlane } from "./state";
 import type { AgentHub, PlayerHub } from "./hub";
 import type { AdminBroadcaster } from "./admin";
@@ -61,6 +62,7 @@ export function registerRestRoutes(
   hub: PlayerHub,
   agentHub: AgentHub,
   broadcaster: AdminBroadcaster,
+  capture: CaptureCoordinator,
 ): void {
   function pushRender(screenId: string, slice: ScreenSlice): number {
     const message = ServerToPlayerRender.parse({
@@ -113,6 +115,59 @@ export function registerRestRoutes(
 
   // GET /api/v1/screens -> Screen[]
   fastify.get("/api/v1/screens", async () => control.getScreens());
+
+  // ── Phase 5 — live preview ──────────────────────────────────────────────────
+
+  // GET /api/v1/screens/:screenId/thumbnail
+  //   200 image/* with the latest captured bytes (Cache-Control: no-store), or 204 if none yet.
+  //   Gated (operator-only) — it lives under /api/v1. A 404 distinguishes an unknown screen from a
+  //   known screen with no capture yet (204).
+  fastify.get("/api/v1/screens/:screenId/thumbnail", async (request, reply) => {
+    const params = ScreenParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+    const screen = control.getScreen(params.data.screenId);
+    if (!screen) {
+      return reply.code(404).send({ error: `unknown screen: ${params.data.screenId}` });
+    }
+    const thumb = capture.thumbnails.get(params.data.screenId);
+    reply.header("Cache-Control", "no-store");
+    if (!thumb) {
+      // No preview captured yet — 204 lets the console show a placeholder without erroring.
+      return reply.code(204).send();
+    }
+    reply.header("X-Captured-At", thumb.takenAt);
+    // Don't reflect an agent-supplied mime verbatim — whitelist to known image types and forbid
+    // content-type sniffing, so a hostile/garbled capture can't be served as something executable.
+    const safeMime = /^image\/(jpeg|png|webp|avif)$/.test(thumb.mime)
+      ? thumb.mime
+      : "application/octet-stream";
+    reply.header("X-Content-Type-Options", "nosniff");
+    reply.type(safeMime);
+    return reply.send(thumb.bytes);
+  });
+
+  // POST /api/v1/screens/:screenId/capture
+  //   Force an on-demand refresh: ask the screen's machine to re-capture that output now. 404 unknown.
+  //   Returns { ok, requested } — `requested` is the number of agent sockets the request reached
+  //   (0 means the machine's agent is offline; the next sweep / reconnect will refresh).
+  fastify.post("/api/v1/screens/:screenId/capture", async (request, reply) => {
+    const params = ScreenParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+    const screen = control.getScreen(params.data.screenId);
+    if (!screen) {
+      return reply.code(404).send({ error: `unknown screen: ${params.data.screenId}` });
+    }
+    const requested = capture.captureNow(screen.machineId, screen.connector);
+    fastify.log.info(
+      { event: "capture.ondemand", screenId: screen.id, machineId: screen.machineId, requested },
+      "requested on-demand capture",
+    );
+    return reply.send({ ok: true, requested });
+  });
 
   // POST /api/v1/screens/:screenId/surfaces  { surfaces: Surface[] }
   fastify.post("/api/v1/screens/:screenId/surfaces", async (request, reply) => {

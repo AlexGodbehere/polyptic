@@ -36,6 +36,11 @@ export class PlayerHub {
     return this.byScreen.get(screenId)?.size ?? 0;
   }
 
+  /** Number of distinct screens with at least one live player socket (for /metrics). */
+  screenCount(): number {
+    return this.byScreen.size;
+  }
+
   /** Send a validated server→player message to every open socket on a screen. Returns count delivered. */
   send(screenId: string, message: ServerToPlayerMessage): number {
     const set = this.byScreen.get(screenId);
@@ -78,6 +83,16 @@ export class AgentHub {
 
   count(machineId: string): number {
     return this.byMachine.get(machineId)?.size ?? 0;
+  }
+
+  /** Number of distinct machines with at least one live agent socket (for /metrics). */
+  machineCount(): number {
+    return this.byMachine.size;
+  }
+
+  /** The machineIds with at least one live agent socket (for fleet-wide capture sweeps). */
+  machineIds(): string[] {
+    return [...this.byMachine.keys()];
   }
 
   /** Send a validated server→agent message to every open socket for a machine. Returns count delivered. */

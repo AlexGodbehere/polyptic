@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "polyptic.configMapName" . }}
+  labels:
+    {{- include "polyptic.labels" . | nindent 4 }}
+data:
+  # Non-secret server configuration (mirrors deploy/.env.example).
+  PORT: {{ .Values.containerPort | quote }}
+  HOST: "0.0.0.0"
+  STORE: {{ .Values.config.store | quote }}
+  CORS_ORIGIN: {{ .Values.config.corsOrigin | quote }}
+  PLAYER_BASE_URL: {{ .Values.config.playerBaseUrl | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  NODE_ENV: {{ .Values.config.nodeEnv | quote }}
+  AUTH_ENABLED: {{ .Values.config.authEnabled | quote }}
+  SECURE_COOKIES: {{ .Values.config.secureCookies | quote }}
+  {{- if ne (toString .Values.config.captureIntervalMs) "" }}
+  CAPTURE_INTERVAL_MS: {{ .Values.config.captureIntervalMs | quote }}
+  {{- end }}
