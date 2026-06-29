@@ -69,10 +69,13 @@ Ubuntu 24.04 LTS minimal → `greetd [initial_session]` passwordless autologin (
 ### Live preview
 Always-on `grim` per-output **JPEG thumbnails** pushed up the existing outbound WSS (shows *real* render + auth state — you'd see a login page if auth broke). On-demand `wayvnc` bound to `127.0.0.1`, tunnelled through the authenticated control plane to **noVNC** for deep debugging. Plus a WYSIWYG "intended layout" diagram next to the real thumbnail.
 
-## Deployment
-- `polyptic-server`: a **Helm chart** (any cluster) **and** a **docker-compose** (any Docker host), with Postgres.
-- `polyptic-agent`: shipped as a single-file binary / `.deb`; provisioned declaratively (cloud-init / Ansible / an immutable image) so "remote-desktop in and edit the script" never returns.
-- `polyptic-player`: static assets served by the server.
+## Deploy / Distribution
+Polyptic ships as **two artifacts** — see **[`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md)** for the full packaging story (image, `.deb`/`.rpm`, the tag-driven release flow, env reference, and the optional private-npm options):
+
+- **Server** — one **Docker image** (`ghcr.io/<owner>/polyptic-server`) that bundles the control plane **plus** the console and player SPAs, served same-origin so the session cookie just works. Deploy with `docker run`, the **docker-compose** `full` profile (server + Postgres), or the **Helm chart** in `deploy/helm/polyptic` (any cluster, bring-your-own Postgres). You don't `npm install` Polyptic — you run the image.
+- **Agent** — a per-box **`.deb`/`.rpm`** from the GitHub Release: `sudo apt install ./polyptic-agent_*.deb` then `polyptic-agent setup …`. The device-side guide (cold-boot chain, backends, troubleshooting, VM walkthrough) is **[`docs/DEPLOY.md`](docs/DEPLOY.md)**.
+- **Releases** are **tag-driven**: pushing `vX.Y.Z` builds the image + packages and attaches them to the Release. Nothing publishes on a normal push.
+- `polyptic-player`: static assets served by the server (bundled into the image).
 
 ## Roadmap
 - **Phase 0 — Quick win (days):** point an *existing* wall at anonymous/`kiosk` dashboard URLs to delete any plaintext-password boot hack immediately and validate that the wall can be decoupled from human auth. Reversible, no new infra.

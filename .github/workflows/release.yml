@@ -1,0 +1,202 @@
+# Polyptic — release automation.
+#
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ THIS WORKFLOW ONLY FIRES ON A GIT TAG `v*` (or manual workflow_dispatch).  │
+# │ NOTHING here runs on a normal push to a branch. Publishing the npm         │
+# │ packages is OFF by default and only happens when the repo variable         │
+# │ PUBLISH_NPM is explicitly set to "true". No step ever echoes a secret.     │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# On a tag it:
+#   1. builds + pushes the single control-plane image to GHCR (multi-arch),
+#   2. builds the agent .deb + .rpm (amd64 + arm64) and attaches them to the
+#      GitHub Release,
+#   3. (opt-in) publishes the npm packages to GitHub Packages.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # 1. Server image → GHCR (console + player + control plane, one artifact).
+  # ───────────────────────────────────────────────────────────────────────────
+  server-image:
+    name: build & push server image (GHCR)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lowercase repo + derive tags (git tag, sha, latest on tags).
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/polyptic-server
+          tags: |
+            type=ref,event=tag
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/server.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            POLYPTIC_VERSION=${{ github.ref_name }}
+            POLYPTIC_REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 2. Agent packages (.deb + .rpm) for amd64 + arm64 → attached to the Release.
+  #    Bun cross-compiles the runtime into the binary, so one amd64 runner builds
+  #    BOTH arches (deploy/build-agent.sh takes the arch as its first arg).
+  # ───────────────────────────────────────────────────────────────────────────
+  agent-packages:
+    name: build agent packages (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    # Only attach to a real Release object — i.e. on a tag, not workflow_dispatch.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    env:
+      NFPM_VERSION: "2.41.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.1"
+
+      - name: Cache Bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install nfpm (pinned)
+        run: |
+          curl -sSfL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" -o /tmp/nfpm.deb
+          sudo dpkg -i /tmp/nfpm.deb
+          nfpm --version
+
+      # Derive the package version from the tag (strip the leading `v`); fall back
+      # to the agent package.json default when run manually with no tag.
+      - name: Resolve version
+        id: ver
+        run: |
+          ref="${{ github.ref_name }}"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build .deb + .rpm
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: bash deploy/build-agent.sh ${{ matrix.arch }}
+
+      - name: Upload build artifacts (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: polyptic-agent-${{ matrix.arch }}
+          path: |
+            deploy/dist/*.deb
+            deploy/dist/*.rpm
+
+      # Attach to the GitHub Release. Only runs on a tag push (a Release exists);
+      # softprops appends, so each matrix arch adds its own packages.
+      - name: Attach to Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            deploy/dist/*.deb
+            deploy/dist/*.rpm
+          fail_on_unmatched_files: true
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 3. OPT-IN: publish npm packages to GitHub Packages.
+  #    Hard-gated: this job is skipped entirely unless the repo variable
+  #    PUBLISH_NPM == "true". Without that opt-in it is a no-op. (Packages must
+  #    also have publish metadata / be un-private'd for `npm publish` to succeed.)
+  # ───────────────────────────────────────────────────────────────────────────
+  publish-npm:
+    name: publish npm packages (GitHub Packages)
+    runs-on: ubuntu-latest
+    if: vars.PUBLISH_NPM == 'true'
+    needs: [server-image, agent-packages]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.1"
+
+      - name: Setup Node (npm registry → GitHub Packages)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@polyptic"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build protocol
+        run: cd packages/protocol && bun run build
+
+      # Publish each non-private workspace package. Packages still marked
+      # "private": true are skipped by npm, so this stays safe until a maintainer
+      # opts a package in by adding publish metadata.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for pkg in packages/protocol packages/server; do
+            echo "::group::publish $pkg"
+            ( cd "$pkg" && npm publish --access restricted ) || echo "skipped $pkg (private or already published)"
+            echo "::endgroup::"
+          done

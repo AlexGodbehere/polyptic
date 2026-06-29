@@ -2,6 +2,8 @@
 
 How a bare Linux box becomes a Polyptic display. This is the **device** guide (the `polyptic-agent` package, the cold-boot chain, the kiosk stack). For running the **control plane** (server + console + Postgres) see `docs/DEV.md`; for the why behind these choices see `docs/ARCHITECTURE.md` ("On-device stack" + "Gotchas") and `docs/DECISIONS.md` (**D26**, **D27**, **D9**, **D16**).
 
+> **Packaging & distribution** — how Polyptic *ships* (the server Docker image, the agent `.deb`/`.rpm`, the tag-driven release flow, and the optional private npm story) lives in **`docs/DISTRIBUTION.md`**. This page is the operational "install it on a box" guide; that page is "what the artifacts are and where they come from."
+
 > Status: Phase 4. The real `wayland-sway` / `x11-i3` display backends and `polyptic-agent setup` ship in this phase. The backends drive a real compositor + GPU, so they are **VM-/hardware-verified**, not unit-tested — every step below that touches a display is marked where it needs a real virtual output or real hardware. See the [Verification checklist](#verification-checklist--visual-cold-boot-dod) at the end.
 
 ---
@@ -27,7 +29,7 @@ On a machine with the repo checked out (build host — can be your Mac or a Linu
 
 ```bash
 # 1. Build the .deb for the target's architecture (amd64 thin clients, arm64 Apple-Silicon VMs)
-bash deploy/build-agent.sh --arch amd64          # → dist/polyptic-agent_<ver>_amd64.deb
+bash deploy/build-agent.sh amd64          # → dist/polyptic-agent_<ver>_amd64.deb
 ```
 
 On the **target box** (Ubuntu Server-minimal), as a user with sudo:
@@ -127,8 +129,8 @@ The agent is a **Bun single binary** (D7): `deploy/build-agent.sh` compiles `pac
 
 ```bash
 # from the repo root, on a host with bun
-bash deploy/build-agent.sh --arch amd64      # x86-64 thin clients
-bash deploy/build-agent.sh --arch arm64      # Apple-Silicon VM guests, ARM clients
+bash deploy/build-agent.sh amd64      # x86-64 thin clients
+bash deploy/build-agent.sh arm64      # Apple-Silicon VM guests, ARM clients
 # → dist/polyptic-agent_<version>_<arch>.deb
 ```
 

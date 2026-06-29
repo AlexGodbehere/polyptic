@@ -1,0 +1,55 @@
+# Polyptic — continuous integration.
+#
+# The ONLY workflow that runs on a normal push. Type-checks the whole workspace
+# and runs the test suite against the in-memory store (STORE=memory — no Postgres
+# needed). Nothing here publishes or pushes anything.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: typecheck & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.1"
+
+      # Cache Bun's global module cache, keyed on the lockfile.
+      - name: Cache Bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # `typecheck` builds @polyptic/protocol first, then tsc/vue-tsc every package.
+      - name: Typecheck
+        run: bun run typecheck
+
+      # `test` builds the protocol then runs `bun test`. STORE=memory keeps it
+      # DB-free (the in-memory store double); no Postgres service required.
+      - name: Test
+        run: bun run test
+        env:
+          STORE: memory

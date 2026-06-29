@@ -1,0 +1,21 @@
+# Root .dockerignore — keeps the Docker build context (the repo root) lean.
+# Patterns are relative to the context root. Host node_modules / dist are built
+# for the dev OS and must NOT leak into the linux image — `bun install` and the
+# in-image `vite build` regenerate them. (BuildKit also honours the more specific
+# deploy/server.Dockerfile.dockerignore, which it prefers when present.)
+node_modules
+**/node_modules
+dist
+**/dist
+*.tsbuildinfo
+.git
+.gitignore
+.idea
+.vscode
+media
+**/*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+deploy/dist

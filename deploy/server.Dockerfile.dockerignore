@@ -5,10 +5,15 @@
 # regenerates them inside the image.
 **/node_modules
 **/dist
+*.tsbuildinfo
 .git
 .idea
 .vscode
 **/*.log
+media
+.env
+.env.*
+!.env.example
 deploy
 docs
 README.md

@@ -1,0 +1,207 @@
+# Polyptic — distribution & packaging
+
+How Polyptic ships, and how you put it on real infrastructure. This is the **packaging** guide — the artifacts, where they come from, and the exact commands to run them. For turning a bare Linux box into a display see `docs/DEPLOY.md`; for the dev/VM loop see `docs/DEV.md`.
+
+> **Nothing here auto-publishes.** The release workflow only runs when *you* push a `vX.Y.Z` tag, and the image/registry steps need secrets that don't exist until you create them. Read this end-to-end before you cut the first release — you choose when (and whether) anything leaves your machine.
+
+Polyptic is two deployable things plus an optional one:
+
+| What | Artifact | How you install it | Lives where |
+|---|---|---|---|
+| **Server** (control plane + console + player) | one **Docker image** `ghcr.io/<owner>/polyptic-server` | `docker run` / compose / Helm | your cluster or Docker host |
+| **Agent** (per display box) | a **`.deb`** (and `.rpm`) from the GitHub Release | `apt install ./polyptic-agent_*.deb` | each kiosk machine |
+| **Workspace packages** (`@polyptic/*`) | npm tarballs | *optional* — internal to the product; you almost never need these | a private registry, only if you want one |
+
+Throughout, replace `<owner>` with your GitHub org/user (the chart default is `ghcr.io/polyptic/polyptic-server`, i.e. `<owner>` = `polyptic`).
+
+---
+
+## (a) The server — one image that is the whole control plane
+
+The server image is **self-contained**: it bundles the **control plane** (Fastify REST + WebSocket on `:8080`, `/healthz`, `/metrics`, `/media`), the **console** (the Vue operator SPA) and the **player** (the Vue per-screen SPA) in a single artifact. The server serves the console and player as static assets from the *same origin* as the API, which is a real simplification: the session cookie is same-origin, so there is **no cross-origin CORS to configure** for the bundled UIs. You ship one image; you don't wire three.
+
+> **Why the image, and not `npm install`?** Polyptic is a *product you run*, not a library you depend on. The unit of deployment is this image (server) and the `.deb` (agent). You never `npm install polyptic` to stand it up — see [(d) Self-hosted npm](#d-self-hosted-npm--optional-and-only-if-you-want-it) for why the workspace packages are internal.
+
+### The image is built in CI, not here
+
+The console and player are **Vite SPAs**; their production build (`vite build`) runs in CI or on your machine — see `deploy/server.Dockerfile`. The image's build stage runs `bun install`, builds `@polyptic/protocol`, builds the console + player static bundles, and the runtime stage runs `bun packages/server/src/index.ts` with the built SPAs on disk. The server is pointed at those bundles with `CONSOLE_DIR` / `PLAYER_DIR` (the image bakes sane defaults; you only override them if you relocate the assets).
+
+### Run it three ways
+
+**1. `docker run` — the smallest possible thing**
+
+```bash
+docker run -d --name polyptic-server -p 8080:8080 \
+  -e DATABASE_URL=postgres://polyptic:polyptic@your-db:5432/polyptic \
+  -e COOKIE_SECRET="$(openssl rand -hex 32)" \
+  -e SECURE_COOKIES=true \
+  -e CORS_ORIGIN=https://polyptic.example.com \
+  -e POLYPTIC_ADMIN_EMAIL=alex@example.com \
+  -e POLYPTIC_ADMIN_PASSWORD='change-me-now' \
+  -e MEDIA_DIR=/var/lib/polyptic/media \
+  -e MEDIA_PUBLIC_BASE=https://polyptic.example.com \
+  -v polyptic-media:/var/lib/polyptic/media \
+  ghcr.io/<owner>/polyptic-server:0.1.0
+```
+
+You bring your own Postgres (any reachable Postgres 16; `DATABASE_URL` points at it). Put a TLS-terminating reverse proxy in front so the cookie can be `SECURE_COOKIES=true`.
+
+**2. docker-compose — server + Postgres together**
+
+`deploy/docker-compose.yml` ships a `full` profile that builds the server from `deploy/server.Dockerfile` and brings up Postgres alongside it:
+
+```bash
+docker compose -f deploy/docker-compose.yml --profile full up -d
+```
+
+For a *released* image instead of a local build, set the `server.image` to `ghcr.io/<owner>/polyptic-server:0.1.0` and drop the `build:` block (or override with a small `docker-compose.override.yml`). The compose file already wires the media volume and the `db`-network `DATABASE_URL`; copy `deploy/.env.example` → `deploy/.env` and fill in the auth secrets.
+
+**3. Helm — on Kubernetes**
+
+The standalone chart in `deploy/helm/polyptic` deploys **only the server** (agents are not in the cluster — they live on the boxes). Bring your own Postgres via `externalDatabase.url`, or flip on the in-cluster Bitnami subchart:
+
+```bash
+helm install polyptic deploy/helm/polyptic \
+  --set image.repository=ghcr.io/<owner>/polyptic-server \
+  --set image.tag=0.1.0 \
+  --set externalDatabase.url=postgres://polyptic:polyptic@my-pg:5432/polyptic \
+  --set secrets.cookieSecret="$(openssl rand -hex 32)" \
+  --set config.corsOrigin=https://polyptic.example.com \
+  --set ingress.enabled=true --set ingress.host=polyptic.example.com \
+  --set ingress.tls.enabled=true
+```
+
+If you leave `secrets.cookieSecret` empty the chart generates one on first install and preserves it across upgrades. Liveness/readiness hit the **ungated** `/healthz`; Prometheus scrape annotations target the ungated `/metrics`. See `deploy/helm/polyptic/README.md` for the full values reference.
+
+### Server environment reference
+
+Set on `docker run -e …`, the compose `environment:` / `.env`, or Helm `config.*` / `secrets.*`. Everything has a working default except where noted as **required for a real deployment**.
+
+| Env var | Purpose | Notes |
+|---|---|---|
+| `DATABASE_URL` | Postgres connection string | **Required** in prod (`STORE=postgres`, the default). `postgres://user:pass@host:5432/polyptic`. |
+| `STORE` | Registry backend: `postgres` or `memory` | `memory` is a test-only double; never run real with it. |
+| `PORT` | HTTP + WS listen port | Default `8080`. The image `EXPOSE`s 8080. |
+| `COOKIE_SECRET` | Signs the http-only session cookies | **Required** in prod; long random value (`openssl rand -hex 32`). |
+| `SECURE_COOKIES` | Mark session cookies `Secure` (HTTPS-only) | **Set `true` in production over HTTPS.** `NODE_ENV=production` implies it unless overridden. |
+| `CORS_ORIGIN` | Comma-separated allowed browser origins | Only needed when a browser hits the API from a *different* origin than the bundled console (e.g. a separately hosted console). Same-origin bundled UI needs nothing here. |
+| `POLYPTIC_ADMIN_EMAIL` / `POLYPTIC_ADMIN_PASSWORD` | Seed the first operator on first boot | Created only if no users exist yet. Set both, or manage operators out-of-band. |
+| `POLYPTIC_BOOTSTRAP_TOKEN` | Shared agent-enrollment secret | Unset → **open mode** (auto-approve, dev only). Set → **gated**: agents show PENDING until approved. Same value on each agent. |
+| `MEDIA_DIR` | Directory uploads are written to | Mount a **persistent** volume here in prod (e.g. `/var/lib/polyptic/media`). |
+| `MEDIA_PUBLIC_BASE` | Absolute base URL prepended to `/media/<id>` | Must be reachable by players/public wall — your public HTTPS origin. |
+| `MEDIA_MAX_BYTES` | Max upload size in bytes | Default ~200 MB (`209715200`). |
+| `CAPTURE_INTERVAL_MS` | Live-preview thumbnail capture cadence | Empty → server default. Server polls agents for `server/capture`. |
+| `CONSOLE_DIR` / `PLAYER_DIR` | Where the server reads the built console/player SPA assets | Baked into the image; override only if you relocate the bundles. |
+
+---
+
+## (b) The agent — `apt install` a `.deb` (or `.rpm`)
+
+The per-box agent is **not** in the server image. It ships as a native package built by `deploy/nfpm.yaml` (nFPM produces both a `.deb` for Debian/Ubuntu and a `.rpm` for Fedora/RHEL/openSUSE from one compiled Bun single-file binary). Each release attaches these to the GitHub Release.
+
+On a target box (Ubuntu Server-minimal), as a sudo user:
+
+```bash
+# 1. install from the Release asset (the leading ./ makes apt resolve deps from the repos)
+sudo apt install ./polyptic-agent_0.1.0_amd64.deb        # or _arm64.deb for ARM/Apple-Silicon VMs
+
+# 2. point it at the control plane and wire the zero-click kiosk chain (idempotent)
+sudo polyptic-agent setup \
+  --server-url wss://polyptic.example.com/agent \
+  --bootstrap-token "$POLYPTIC_BOOTSTRAP_TOKEN"          # omit only if the server runs OPEN mode
+
+# 3. reboot into the kiosk
+sudo reboot
+```
+
+The box cold-boots into a Chromium-per-output kiosk and dials home; it shows **PENDING** in the console until an operator **Approves** it. Per-box config lives in `/etc/polyptic/agent.toml` (written by `setup`, re-editable; `systemctl restart polyptic-agent` or re-run `setup` to apply). The full device story — backends, multi-output placement, crash hardening, troubleshooting, the UTM/VM walkthrough — is in **`docs/DEPLOY.md`**.
+
+On RPM distros the command is `sudo dnf install ./polyptic-agent_0.1.0_x86_64.rpm` (nFPM maps `amd64→x86_64`, `arm64→aarch64`), then the same `polyptic-agent setup`.
+
+> **Build the package yourself** (until you cut a release, or for an arch CI doesn't build): `bash deploy/build-agent.sh amd64` on a host with `bun` + `nfpm` produces `deploy/dist/polyptic-agent_<ver>_amd64.deb`. See `docs/DEPLOY.md` → "Step 1 — Build the `.deb`".
+
+---
+
+## (c) Releases — one tag builds everything
+
+Releases are driven entirely by **git tags**. Pushing a tag of the form `vX.Y.Z` is what triggers the release workflow; nothing builds or publishes on an ordinary push to `main`.
+
+```bash
+# when you are ready to ship a version (and ONLY then):
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+On that tag the release workflow:
+
+1. **Builds the server image** and pushes it to GHCR as `ghcr.io/<owner>/polyptic-server:0.1.0` (and `:latest`). This includes the `vite build` of the console + player that this sandbox can't run — it runs in CI.
+2. **Builds the agent packages** — `polyptic-agent_0.1.0_amd64.deb`, `_arm64.deb`, and the matching `.rpm`s — via `deploy/build-agent.sh` + `deploy/nfpm.yaml`.
+3. **Creates the GitHub Release** for the tag and **attaches the `.deb`/`.rpm` assets** so operators can `apt install ./…` straight from the Release page.
+
+What it needs before it can succeed (you set these up when you're ready, not before):
+
+- **GHCR push:** the built-in `GITHUB_TOKEN` with `packages: write` (granted in the workflow's `permissions:`), or a PAT if you push to a different org. No external secret needed for the default org.
+- **Release assets:** `contents: write` (again the built-in token).
+- That's it — no third-party registries, no cloud credentials. The chart's `appVersion` / image `tag` and `nfpm.yaml`'s `${VERSION}` should match the tag you push (e.g. bump `Chart.yaml` `version`/`appVersion` to `0.1.0` in the commit you tag).
+
+> Pre-tag dry run: build locally with `docker build -f deploy/server.Dockerfile -t polyptic-server:test .` and `bash deploy/build-agent.sh amd64` to confirm both artifacts build before you ever push a tag.
+
+---
+
+## (d) Self-hosted npm — OPTIONAL, and only if you want it
+
+**You do not need this to deploy Polyptic.** The `@polyptic/*` workspace packages (`@polyptic/protocol`, `@polyptic/server`, `@polyptic/console`, `@polyptic/player`, `@polyptic/agent`) are **internal to the product**: they are wired together inside the monorepo and shipped *as* the Docker image and the `.deb`. You deploy the image and the package — you never `npm install @polyptic/server` to run Polyptic. So **publishing to any npm registry is entirely optional**, and **nothing is published until you deliberately choose to.**
+
+You'd only want a registry if your org wants to **consume these packages elsewhere** — e.g. a separate internal tool that imports `@polyptic/protocol`'s zod contracts, or you split a package out of the monorepo later. If that day comes, here are the two sane paths.
+
+### Recommended: GitHub Packages (lowest friction)
+
+GitHub Packages gives you an org-scoped private npm registry with **zero new infrastructure** — it's the same GitHub account, same `GITHUB_TOKEN`, same access model as your code and your GHCR images. Recommended unless you specifically need to be off GitHub.
+
+**1.** Add `publishConfig` to each package's `package.json` you want to publish:
+
+```jsonc
+// packages/protocol/package.json (and any other @polyptic/* you publish)
+{
+  "name": "@polyptic/protocol",
+  "version": "0.1.0",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
+}
+```
+
+**2.** Add an `.npmrc` that scopes `@polyptic` to GitHub Packages and authenticates. For **publishing in CI**, use the workflow's token via an env var (never hard-code a token in a committed file):
+
+```ini
+# .npmrc  (repo root — safe to commit; the token comes from the environment)
+@polyptic:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
+```
+
+In the release/publish workflow, set `NODE_AUTH_TOKEN` to a token with `packages: write` (the built-in `GITHUB_TOKEN` works for the package's own org; use a PAT for a different org).
+
+**3.** Publish (per package, once you've bumped the version):
+
+```bash
+cd packages/protocol
+npm publish        # uses publishConfig.registry + the scoped .npmrc above
+# (with bun: bunx npm publish — npm is the registry client either way)
+```
+
+**4.** To *consume* a published package from another repo, that repo needs the same `@polyptic:registry=…` line plus a read token (`//npm.pkg.github.com/:_authToken=<PAT-with-read:packages>`), then `npm install @polyptic/protocol` resolves from GitHub Packages.
+
+### Alternative: Verdaccio (full control, off GitHub)
+
+If you want the registry **entirely under your control** — air-gapped, on your own host, no GitHub dependency — run **[Verdaccio](https://verdaccio.org/)**, a lightweight self-hosted npm registry and caching proxy. In one paragraph: `docker run -d -p 4873:4873 -v verdaccio-storage:/verdaccio/storage verdaccio/verdaccio` stands it up; create a user with `npm adduser --registry http://your-host:4873`; point the scope at it with `.npmrc` line `@polyptic:registry=http://your-host:4873`; then `npm publish --registry http://your-host:4873`. Verdaccio transparently proxies the public npm registry for everything *not* under `@polyptic`, so a single registry URL serves both your private scope and public deps. Put TLS + auth in front of it for anything beyond a trusted LAN. This is the right choice when policy forbids storing packages on GitHub; otherwise GitHub Packages is less to operate.
+
+**Either way: this is opt-in.** Until you add `publishConfig` and run `npm publish` (or set up a publish workflow), the `@polyptic/*` packages stay inside the monorepo and ship only as the image and the `.deb`.
+
+---
+
+## See also
+
+- `docs/DEPLOY.md` — the on-device guide (making a box a display; backends; troubleshooting; VM walkthrough).
+- `deploy/helm/polyptic/README.md` — full Helm values reference.
+- `deploy/.env.example` — annotated server environment.
+- `docs/DEV.md` — local dev + bringing up the control plane for testing.

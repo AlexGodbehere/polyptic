@@ -23,6 +23,7 @@ import { AgentHub, PlayerHub } from "./hub";
 import { MediaStore, registerMediaServeRoute } from "./media";
 import { registerOpsRoutes } from "./ops";
 import { registerRestRoutes } from "./rest";
+import { registerSpaHosting, spaConfigFromEnv } from "./spa";
 import { ControlPlane } from "./state";
 import { createStore } from "./store";
 import { attachWebSockets } from "./ws";
@@ -179,6 +180,24 @@ attachWebSockets({
   log: fastify.log,
   allowedOrigins: CORS_ORIGIN,
 });
+
+// ── Phase 8 — SPA HOSTING (opt-in): when CONSOLE_DIR / PLAYER_DIR point at built dists, serve them as
+// static assets straight from disk, same-origin, so the image is the whole product. When NEITHER is set
+// (dev), this is a no-op: the Vite dev servers serve the SPAs and the control plane stays API/WS-only —
+// which is exactly the configuration the e2e suite drives. Registered LAST so every API/ops/media route
+// (and the WS upgrades on the raw server) win; only genuinely-unmatched paths reach the SPA fallback.
+const spaServed = await registerSpaHosting(fastify, spaConfigFromEnv(), fastify.log);
+if (spaServed.length > 0) {
+  fastify.log.info(
+    { event: "spa.serving", served: spaServed },
+    `serving built SPA(s) from disk, same-origin: ${spaServed.join(", ")}`,
+  );
+} else {
+  fastify.log.info(
+    { event: "spa.disabled" },
+    "no CONSOLE_DIR/PLAYER_DIR set — API/WS only (the SPAs are served by their Vite dev servers in dev).",
+  );
+}
 
 // Start the periodic live-preview capture sweep (no-op when CAPTURE_INTERVAL_MS=0).
 capture.start();
