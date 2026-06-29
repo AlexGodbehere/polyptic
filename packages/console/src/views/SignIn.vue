@@ -15,7 +15,7 @@ const route = useRoute();
 // deployment the operator types their own credentials (and the seeded account's password is rotated
 // — the boot banner nags about exactly that). See securityNotes.
 const email = ref("operator@polyptic.local");
-const password = ref("polyptic");
+const password = ref("polyptic-admin"); // matches the seeded dev admin (auth-local DEV_ADMIN_PASSWORD)
 const errorMessage = ref<string | null>(null);
 const loading = ref(false);
 
