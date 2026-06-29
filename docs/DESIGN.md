@@ -178,4 +178,12 @@ Settled while the design was in flight; build deferred until after Phase 3.
 
 **Backends.** Phase 4 makes the agent's `wayland-sway`/`x11-i3` `DisplayBackend`s **real** (swaymsg-IPC window placement + Chromium launching + `grim`/`wayvnc` capture), replacing today's Phase-1 stubs; `dev-open` stays for non-Linux dev.
 
-**Test target (noted).** Two complementary VMs: **OrbStack** (headless, no display) for fast iteration on the **install → systemd → agent → enrolment** plumbing + a *headless* sway (`WLR_BACKENDS=headless`); and **Parallels** (or UTM) — a desktop-virtualization VM with a real virtual display — for the **visual** "cold-boot → active scene, zero clicks" DoD, where sway + Chromium actually render. Caveats for the visual VM: it presents ~one virtual output (so *multi-output-per-client* + the real 6-screen wall stay a real-hardware test), the virtual GPU may need `WLR_NO_HARDWARE_CURSORS` or the x11/i3 fallback, and on Apple Silicon the guest is arm64 (build the `.deb` for the VM arch *and* the likely-amd64 thin clients).
+**Test target (noted).** Two complementary VMs: **OrbStack** (headless, no display) for fast iteration on the **install → systemd → agent → enrolment** plumbing + a *headless* sway (`WLR_BACKENDS=headless`); and **UTM** (QEMU + virtio-gpu) — a desktop-virtualization VM with a real virtual display — for the **visual** "cold-boot → active scene, zero clicks" DoD, where sway + Chromium actually render. Caveats for the visual VM: it presents ~one virtual output (so *multi-output-per-client* + the real 6-screen wall stay a real-hardware test), the virtual GPU may need `WLR_NO_HARDWARE_CURSORS` or the x11/i3 fallback, and on Apple Silicon the guest is arm64 (build the `.deb` for the VM arch *and* the likely-amd64 thin clients).
+
+---
+
+## Update 2026-06-29 (later) — renamed to "Polyptic" + logo + console design refresh
+
+- **Renamed Polyptych → Polyptic** across the whole codebase: npm scope `@polyptic/*`, env vars `POLYPTIC_*`, `/etc/polyptic`, `~/.polyptic`, the `polyptic-agent` binary, brand text, and the repo folder `~/code/polyptic`. 115 files; verified typecheck + e2e 28/28. (Easier to spell.)
+- **Logo** (`packages/console/src/components/Logo.vue`): the hinged-panel mark — two angled side panels + a squared-off centre on a rounded holder, **theme-inverting** (holder `--primary`, panels `--primary-fg`). Wired into the nav rail + sign-in. Horizontal lockup = mark + the "Polyptic" wordmark.
+- **Console design refreshed** (`docs/design/console.dc.html` v4): brand is **Polyptic**, the logo mark replaces the old "P", and the **scene controls moved to the top-left of the Wall top bar** (active scene + Save scene lead it). The full scene rail/management lands in **3d** against this reference.

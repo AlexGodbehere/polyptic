@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useConsoleStore } from "../stores/console";
 import { signIn } from "../auth";
+import Logo from "../components/Logo.vue";
 
 // Stub sign-in (D29's real local accounts come later). Any non-empty credentials enter the app.
 const store = useConsoleStore();
@@ -38,7 +39,7 @@ function onSignIn(): void {
   <div class="signin">
     <div class="card sheet">
       <div class="brand">
-        <div class="brand-mark">P</div>
+        <Logo :size="40" :rounded="11" />
         <span class="brand-name">Polyptic</span>
       </div>
 

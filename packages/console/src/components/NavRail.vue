@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useConsoleStore } from "../stores/console";
+import Logo from "./Logo.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -21,7 +22,7 @@ function isActive(name: string): boolean {
 
 <template>
   <nav class="rail">
-    <div class="logo">P</div>
+    <Logo :size="34" :rounded="9" style="margin-bottom: 8px" />
 
     <button class="nav" :class="{ active: isActive('wall') }" title="Wall" @click="go('wall')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">

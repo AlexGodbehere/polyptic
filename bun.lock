@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "polyptych",
+      "name": "polyptic",
       "devDependencies": {
         "concurrently": "^9.0.0",
         "typescript": "^5.5.0",
@@ -24,9 +24,6 @@
     "packages/agent": {
       "name": "@polyptic/agent",
       "version": "0.1.0",
-      "bin": {
-        "polyptic-agent": "./src/index.ts"
-      },
       "dependencies": {
         "@polyptic/protocol": "workspace:*",
         "ws": "^8.18.0",

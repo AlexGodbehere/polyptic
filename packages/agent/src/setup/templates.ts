@@ -170,7 +170,6 @@ After=graphical-session.target
 export interface AgentServiceParams {
   agentBin: string;
   configPath: string;
-  backend: string;
 }
 
 export function agentServiceUnit(p: AgentServiceParams): string {

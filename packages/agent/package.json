@@ -5,9 +5,6 @@
   "type": "module",
   "description": "Polyptic per-client agent — dumb reconciler that registers a machine's outputs and points a player at each screen.",
   "main": "./src/index.ts",
-  "bin": {
-    "polyptic-agent": "./src/index.ts"
-  },
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",

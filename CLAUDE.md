@@ -14,7 +14,7 @@ Polyptic is a **generic, self-hostable** system to centrally orchestrate **walls
 6. **Buy the substrate, build the brain.** Device stack (Ubuntu, sway/greetd/systemd, Chromium) is borrowed. Only `server` + `agent` + `player` are ours.
 
 ## Two web apps (don't conflate)
-- **Admin UI** — operator-facing: layout editor, scenes, live preview, device enrollment.
+- **Console** (`packages/console`, **Vue 3 + Vite + Vue Router + Pinia + Vue Flow**) — the operator app: the murals canvas (Vue Flow), machines / content / scenes / settings, sign-in. (D28; the old SolidJS `packages/admin` is being retired by 3e.)
 - **Player** — headless page shown fullscreen on each wall screen; connects over WS, renders its screen's slice. This is what makes changes instant (DOM diff, no reload).
 
 ## Two WS channels
@@ -26,7 +26,7 @@ Polyptic is a **generic, self-hostable** system to centrally orchestrate **walls
 - **`@polyptic/protocol`** — shared zod contracts. **All cross-process messages are defined and validated here.** Change the contract here first.
 - **`@polyptic/server`** — Fastify + Postgres + `ws`; REST + WebSocket; Prometheus `/metrics`.
 - **`@polyptic/agent`** — Bun single binary; controls host via IPC sockets + child processes; `DisplayBackend` interface (`wayland-sway` | `x11-i3`, auto-detected).
-- **`@polyptic/player`** — SolidJS + Vite. (Admin UI also SolidJS.)
+- **`@polyptic/console`** — Vue 3 + Vite + Vue Router + Pinia + Vue Flow (the operator console; D28). **`@polyptic/player`** — SolidJS + Vite (migrates to Vue at 3b). `@polyptic/admin` (SolidJS) — legacy, retired by 3e.
 
 ## Repo layout
 ```

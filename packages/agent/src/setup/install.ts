@@ -93,7 +93,7 @@ export function runInstall(sys: Sys, opts: SetupOptions, log: Logger): SetupResu
   });
   sys.writeFile(
     `${UNIT_DIR}/${AGENT_SERVICE}`,
-    agentServiceUnit({ agentBin: opts.agentBin, configPath: opts.configPath, backend: opts.backend }),
+    agentServiceUnit({ agentBin: opts.agentBin, configPath: opts.configPath }),
     { mode: 0o644, desc: AGENT_SERVICE },
   );
   assumptions.push(

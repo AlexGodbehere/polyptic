@@ -60,10 +60,3 @@ export async function runSetupCli(argv: string[]): Promise<number> {
     return 1;
   }
 }
-
-// Allow running the setup module directly (`bun src/setup/index.ts ...`) in addition to the
-// `polyptic-agent setup` subcommand path. import.meta.main is true only when this file is the
-// program entry, so importing it from index.ts is side-effect free.
-if (import.meta.main) {
-  void runSetupCli(process.argv.slice(2)).then((code) => process.exit(code));
-}
