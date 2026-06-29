@@ -43,6 +43,11 @@ export type Output = z.infer<typeof Output>;
 export const DisplayBackend = z.enum(["wayland-sway", "x11-i3", "dev-open"]);
 export type DisplayBackend = z.infer<typeof DisplayBackend>;
 
+/** Enrollment lifecycle of a machine (Phase 2b). New machines arrive `pending`; an operator
+ * approves them. Existing/auto-registered machines default to `approved`. */
+export const EnrollmentStatus = z.enum(["pending", "approved", "rejected"]);
+export type EnrollmentStatus = z.infer<typeof EnrollmentStatus>;
+
 /** A client machine. Plumbing — users address screens, not machines. */
 export const Machine = z.object({
   id: z.string(), // stable; sourced from /etc/machine-id
@@ -50,6 +55,7 @@ export const Machine = z.object({
   agentVersion: z.string().optional(),
   backend: DisplayBackend.optional(),
   outputs: z.array(Output).default([]),
+  status: EnrollmentStatus.default("approved"),
   lastSeen: z.string().datetime().optional(),
 });
 export type Machine = z.infer<typeof Machine>;
@@ -145,8 +151,11 @@ export const AgentHello = z.object({
   agentVersion: z.string(),
   backend: DisplayBackend,
   outputs: z.array(Output),
-  /** Present only on first enrollment; burned after claim. */
+  /** First contact only: the operator-configured enrollment secret. The server validates it,
+   * creates the machine as `pending`, and replies `server/enrolled` with a durable credential. */
   bootstrapToken: z.string().optional(),
+  /** Subsequent connections: the durable per-machine credential issued by `server/enrolled`. */
+  credential: z.string().optional(),
 });
 
 export const AgentStatus = z.object({
@@ -189,10 +198,37 @@ export const ServerToAgentCapture = z.object({
   connector: z.string().optional(), // omit = all outputs
 });
 
+/** Issued after a valid first-contact enrollment: the durable credential the agent persists and
+ * presents on every reconnect (instead of the bootstrap token). `status` tells the agent whether
+ * it still needs operator approval. */
+export const ServerToAgentEnrolled = z.object({
+  t: z.literal("server/enrolled"),
+  machineId: z.string(),
+  credential: z.string(),
+  status: EnrollmentStatus,
+});
+
+/** The machine is recognised but still awaiting operator approval — keep the connection open; no
+ * screens are admitted yet. The agent receives `server/apply` once approved. */
+export const ServerToAgentPending = z.object({
+  t: z.literal("server/pending"),
+  reason: z.string().optional(),
+});
+
+/** Authentication failed (bad/absent token or credential, or the machine was rejected). The server
+ * closes the connection after this frame. */
+export const ServerToAgentRejected = z.object({
+  t: z.literal("server/rejected"),
+  reason: z.string(),
+});
+
 export const ServerToAgentMessage = z.discriminatedUnion("t", [
   ServerToAgentApply,
   ServerToAgentIdent,
   ServerToAgentCapture,
+  ServerToAgentEnrolled,
+  ServerToAgentPending,
+  ServerToAgentRejected,
 ]);
 export type ServerToAgentMessage = z.infer<typeof ServerToAgentMessage>;
 
@@ -258,6 +294,8 @@ export const MachineView = z.object({
   agentVersion: z.string().optional(),
   backend: DisplayBackend.optional(),
   online: z.boolean(), // is the agent's WS currently connected?
+  status: EnrollmentStatus, // pending machines await operator approval
+  outputCount: z.number().int().nonnegative(), // outputs the agent reported (shown for pending machines with no screens yet)
   lastSeen: z.string().datetime().optional(),
   screens: z.array(ScreenView),
 });
