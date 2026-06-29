@@ -10,6 +10,8 @@ import type { EnrollmentStatus } from "@polyptych/protocol";
 import type {
   PersistedContent,
   PersistedMachine,
+  PersistedMural,
+  PersistedPlacement,
   PersistedScreen,
   PersistedState,
   Store,
@@ -23,6 +25,9 @@ export class MemoryStore implements Store {
   private readonly machines = new Map<string, PersistedMachine>();
   private readonly screens = new Map<string, PersistedScreen>();
   private readonly content = new Map<string, PersistedContent>();
+  private readonly murals = new Map<string, PersistedMural>();
+  /** Keyed by screenId — a screen is placed on at most one mural at a time. */
+  private readonly placements = new Map<string, PersistedPlacement>();
   private revision = 0;
 
   async migrate(): Promise<void> {
@@ -35,6 +40,8 @@ export class MemoryStore implements Store {
       machines: [...this.machines.values()].map(clone),
       screens: [...this.screens.values()].map(clone),
       content: [...this.content.values()].map(clone),
+      murals: [...this.murals.values()].map(clone),
+      placements: [...this.placements.values()].map(clone),
     };
   }
 
@@ -57,6 +64,36 @@ export class MemoryStore implements Store {
 
   async setRevision(revision: number): Promise<void> {
     this.revision = revision;
+  }
+
+  // ── Murals & placement (Phase 3) ────────────────────────────────────────────
+
+  async upsertMural(mural: PersistedMural): Promise<void> {
+    this.murals.set(mural.id, clone(mural));
+  }
+
+  async deleteMural(id: string): Promise<void> {
+    this.murals.delete(id);
+    // Drop any placements that referenced the mural (the control plane also unplaces individually).
+    for (const [screenId, placement] of this.placements) {
+      if (placement.muralId === id) this.placements.delete(screenId);
+    }
+  }
+
+  async listMurals(): Promise<PersistedMural[]> {
+    return [...this.murals.values()].map(clone);
+  }
+
+  async upsertPlacement(placement: PersistedPlacement): Promise<void> {
+    this.placements.set(placement.screenId, clone(placement));
+  }
+
+  async deletePlacement(screenId: string): Promise<void> {
+    this.placements.delete(screenId);
+  }
+
+  async listPlacements(): Promise<PersistedPlacement[]> {
+    return [...this.placements.values()].map(clone);
   }
 
   async close(): Promise<void> {

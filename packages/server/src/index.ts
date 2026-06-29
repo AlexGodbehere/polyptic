@@ -22,7 +22,11 @@ import { attachWebSockets } from "./ws";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? "0.0.0.0";
-const CORS_ORIGIN = (process.env.CORS_ORIGIN ?? "http://localhost:5173,http://localhost:5174")
+const CORS_ORIGIN = (
+  process.env.CORS_ORIGIN ??
+  // 5173 player, 5174 old SolidJS admin, 5175 Vue console (Phase 3a).
+  "http://localhost:5173,http://localhost:5174,http://localhost:5175"
+)
   .split(",")
   .map((o) => o.trim())
   .filter((o) => o.length > 0);
@@ -50,7 +54,8 @@ const broadcaster = new AdminBroadcaster({ control, playerHub: hub, presence, ad
 
 await fastify.register(cors, {
   origin: CORS_ORIGIN,
-  methods: ["GET", "POST", "OPTIONS"],
+  // PUT/DELETE added in Phase 3a for the console's placement + mural routes.
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
 });
 
 registerRestRoutes(fastify, control, hub, agentHub, broadcaster);

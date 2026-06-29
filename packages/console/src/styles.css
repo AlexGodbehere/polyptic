@@ -1,0 +1,247 @@
+/*
+ * Console design tokens — ported verbatim from docs/design/console.dc.html (the "Console v2"
+ * prototype). Light is the default (:root); [data-theme="dark"] on <html> flips the palette.
+ * Geist is loaded via the <link> in index.html.
+ */
+
+:root {
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --card: #ffffff;
+  --muted-bg: #f4f4f5;
+  --line: #e4e4e7;
+  --line2: #d4d4d8;
+  --fg: #09090b;
+  --fg2: #27272a;
+  --muted: #71717a;
+  --muted2: #a1a1aa;
+  --primary: #18181b;
+  --primary-fg: #fafafa;
+  --accent: #2563eb;
+  --accent-soft: rgba(37, 99, 235, 0.09);
+  --accent-line: rgba(37, 99, 235, 0.4);
+  --accent-fg: #1d4ed8;
+  --ok: #16a34a;
+  --ok-soft: rgba(22, 163, 74, 0.1);
+  --warn: #d97706;
+  --warn-soft: rgba(217, 119, 6, 0.12);
+  --bad: #dc2626;
+  --bad-soft: rgba(220, 38, 38, 0.1);
+  --scr-live: linear-gradient(135deg, #eef4ff, #e3ecfb);
+  --scr-neutral: #f4f4f5;
+  --scr-bad-bg: #fef2f2;
+  --scr-bad-line: #fecaca;
+  --scr-empty-bg: #fafafa;
+  --scr-empty-line: #d4d4d8;
+  --scr-off-bg: #f1f1f2;
+  --seam: rgba(2, 6, 23, 0.14);
+  --label-bg: rgba(255, 255, 255, 0.9);
+  --dot: #e4e4e7;
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow: 0 4px 16px rgba(16, 24, 40, 0.1);
+  --shadow-lg: 0 16px 40px rgba(16, 24, 40, 0.16);
+}
+
+[data-theme="dark"] {
+  --bg: #09090b;
+  --surface: #0d0d10;
+  --card: #18181b;
+  --muted-bg: #18181b;
+  --line: #27272a;
+  --line2: #3f3f46;
+  --fg: #fafafa;
+  --fg2: #e4e4e7;
+  --muted: #a1a1aa;
+  --muted2: #71717a;
+  --primary: #fafafa;
+  --primary-fg: #18181b;
+  --accent: #3b82f6;
+  --accent-soft: rgba(59, 130, 246, 0.16);
+  --accent-line: rgba(59, 130, 246, 0.45);
+  --accent-fg: #93c5fd;
+  --ok: #22c55e;
+  --ok-soft: rgba(34, 197, 94, 0.15);
+  --warn: #f59e0b;
+  --warn-soft: rgba(245, 158, 11, 0.15);
+  --bad: #ef4444;
+  --bad-soft: rgba(239, 68, 68, 0.15);
+  --scr-live: linear-gradient(135deg, #172134, #141b2c);
+  --scr-neutral: #1c1c20;
+  --scr-bad-bg: #1f1416;
+  --scr-bad-line: rgba(239, 68, 68, 0.4);
+  --scr-empty-bg: #111114;
+  --scr-empty-line: #3f3f46;
+  --scr-off-bg: #141417;
+  --seam: rgba(0, 0, 0, 0.5);
+  --label-bg: rgba(9, 9, 11, 0.6);
+  --dot: #1d1d21;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.62);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: "Geist", system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#app {
+  height: 100%;
+}
+
+input,
+button,
+textarea,
+select {
+  font-family: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line2);
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+/* ── Shared primitives used across console views ───────────────────────────── */
+
+.input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 11px 13px;
+  font-size: 14px;
+  color: var(--fg);
+  outline: none;
+}
+.input:focus {
+  border-color: var(--accent);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 16px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  transition: background 0.12s ease, opacity 0.12s ease, border-color 0.12s ease;
+}
+.btn-primary {
+  background: var(--primary);
+  color: var(--primary-fg);
+}
+.btn-primary:hover {
+  opacity: 0.92;
+}
+.btn-ghost {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--fg2);
+  font-weight: 500;
+  box-shadow: var(--shadow-sm);
+}
+.btn-ghost:hover {
+  background: var(--muted-bg);
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  box-shadow: var(--shadow-sm);
+}
+
+.pill-group {
+  display: inline-flex;
+  background: var(--muted-bg);
+  border-radius: 9px;
+  padding: 3px;
+  gap: 2px;
+}
+.pill {
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+}
+.pill.active {
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: var(--shadow-sm);
+}
+
+/* ── Keyframes (ported from the design) ────────────────────────────────────── */
+
+@keyframes ppulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+@keyframes pflash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px var(--accent), 0 0 26px rgba(59, 130, 246, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+  }
+}
+@keyframes pin {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes fadein {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

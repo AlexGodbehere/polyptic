@@ -132,6 +132,8 @@ export function buildAdminState(
     t: "admin/state",
     revision: control.state.revision,
     machines,
+    murals: control.getMurals(),
+    placements: control.getPlacements(),
   });
 }
 

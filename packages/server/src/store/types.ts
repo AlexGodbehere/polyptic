@@ -48,12 +48,34 @@ export interface PersistedContent {
   surfaces: Surface[];
 }
 
+/** A mural row (Phase 3): a named, switchable spatial canvas. */
+export interface PersistedMural {
+  id: string;
+  name: string;
+}
+
+/**
+ * A placement row (Phase 3): a screen positioned on exactly one mural at `{x,y,w,h}` canvas pixels.
+ * `screenId` is the primary key — a screen is placed on at most one mural at a time.
+ */
+export interface PersistedPlacement {
+  muralId: string;
+  screenId: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 /** The full snapshot returned by `load()` — everything needed to rebuild the in-memory state. */
 export interface PersistedState {
   revision: number;
   machines: PersistedMachine[];
   screens: PersistedScreen[];
   content: PersistedContent[];
+  /** Phase 3 — murals and placements. */
+  murals: PersistedMural[];
+  placements: PersistedPlacement[];
 }
 
 /**
@@ -75,6 +97,21 @@ export interface Store {
   upsertContent(content: PersistedContent): Promise<void>;
   /** Persist the global revision counter. */
   setRevision(revision: number): Promise<void>;
+
+  // ── Murals & placement (Phase 3) ──────────────────────────────────────────
+  /** Insert-or-update a mural row (id + name). */
+  upsertMural(mural: PersistedMural): Promise<void>;
+  /** Delete a mural row (and any placements on it). No-op if absent. */
+  deleteMural(id: string): Promise<void>;
+  /** All persisted murals. */
+  listMurals(): Promise<PersistedMural[]>;
+  /** Insert-or-update a placement, keyed by screenId (placing elsewhere moves the screen). */
+  upsertPlacement(placement: PersistedPlacement): Promise<void>;
+  /** Remove a screen's placement (unplace it). No-op if absent. */
+  deletePlacement(screenId: string): Promise<void>;
+  /** All persisted placements. */
+  listPlacements(): Promise<PersistedPlacement[]>;
+
   /** Release any underlying resources (DB pool). */
   close(): Promise<void>;
 }

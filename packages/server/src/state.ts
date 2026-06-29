@@ -26,7 +26,9 @@ import type {
   DesiredState,
   DisplayBackend,
   Machine,
+  Mural,
   Output,
+  Placement,
   Screen,
   ScreenSlice,
   Surface,
@@ -85,6 +87,12 @@ export class ControlPlane {
   /** machineId → sha256(credential) hex. Kept off the wire `Machine`; persisted via the DTO. */
   private readonly credentialHashes = new Map<string, string>();
   private screenCounter = 0;
+
+  /** Phase 3 — the named, switchable canvases. */
+  private readonly murals = new Map<string, Mural>();
+  /** Phase 3 — placements keyed by screenId (a screen is placed on at most one mural at a time). */
+  private readonly placements = new Map<string, Placement>();
+  private muralCounter = 0;
 
   constructor(private readonly store: Store) {}
 
@@ -163,6 +171,55 @@ export class ControlPlane {
         };
       }
     }
+
+    // ── Murals & placement (Phase 3) ──────────────────────────────────────────
+    for (const m of persisted.murals) {
+      this.murals.set(m.id, { id: m.id, name: m.name });
+    }
+    // Resume the mural counter past the highest persisted "mural-N" so seeded/new ids stay unique.
+    let maxMural = 0;
+    for (const m of this.murals.values()) {
+      const match = /^mural-(\d+)$/.exec(m.id);
+      if (match) {
+        const n = Number(match[1]);
+        if (Number.isFinite(n)) maxMural = Math.max(maxMural, n);
+      }
+    }
+    this.muralCounter = maxMural;
+
+    for (const p of persisted.placements) {
+      this.placements.set(p.screenId, {
+        muralId: p.muralId,
+        screenId: p.screenId,
+        x: p.x,
+        y: p.y,
+        w: p.w,
+        h: p.h,
+      });
+    }
+
+    // Seed a default mural the first time a deployment boots, so the Wall view always has a canvas.
+    if (this.murals.size === 0) {
+      const id = this.nextMuralId();
+      const mural: Mural = { id, name: "Wall" };
+      this.murals.set(id, mural);
+      await this.store.upsertMural({ id: mural.id, name: mural.name });
+    }
+  }
+
+  private nextMuralId(): string {
+    this.muralCounter += 1;
+    return `mural-${this.muralCounter}`;
+  }
+
+  /** The native resolution to default a placement's w/h to: the screen's output, then its slice canvas. */
+  private screenResolution(screen: Screen): { w: number; h: number } {
+    const machine = this.machines.get(screen.machineId);
+    const output = machine?.outputs.find((o) => o.connector === screen.connector);
+    if (output) return { w: output.width, h: output.height };
+    const slice = this.state.slices[screen.id];
+    if (slice) return { w: slice.canvas.w, h: slice.canvas.h };
+    return { w: DEFAULT_CANVAS.w, h: DEFAULT_CANVAS.h };
   }
 
   private bumpRevision(): number {
@@ -471,5 +528,106 @@ export class ControlPlane {
       connector: screen.connector,
     });
     return screen;
+  }
+
+  // ── Murals & placement (Phase 3) ────────────────────────────────────────────
+  //
+  // Murals and placements are spatial layout metadata for the console — they do NOT affect any
+  // player's render slice, so (like renameScreen) these mutations write-through but do NOT bump the
+  // revision. The admin/state broadcast re-reads the current murals/placements regardless.
+
+  getMurals(): Mural[] {
+    return [...this.murals.values()];
+  }
+
+  getMural(id: string): Mural | undefined {
+    return this.murals.get(id);
+  }
+
+  getPlacements(): Placement[] {
+    return [...this.placements.values()];
+  }
+
+  getPlacement(screenId: string): Placement | undefined {
+    return this.placements.get(screenId);
+  }
+
+  /** Create a new mural with a server-assigned id. Write-through. */
+  async createMural(name: string): Promise<Mural> {
+    const id = this.nextMuralId();
+    const mural: Mural = { id, name };
+    this.murals.set(id, mural);
+    await this.store.upsertMural({ id, name });
+    return mural;
+  }
+
+  /** Rename a mural. Write-through. Returns the updated mural, or null if unknown. */
+  async renameMural(id: string, name: string): Promise<Mural | null> {
+    const mural = this.murals.get(id);
+    if (mural === undefined) return null;
+    mural.name = name;
+    await this.store.upsertMural({ id: mural.id, name: mural.name });
+    return mural;
+  }
+
+  /**
+   * Delete a mural. Every screen placed on it is unplaced (its placement removed and written through)
+   * so those screens fall back to the unplaced tray. Write-through. Returns false if the mural is
+   * unknown.
+   */
+  async deleteMural(id: string): Promise<boolean> {
+    const mural = this.murals.get(id);
+    if (mural === undefined) return false;
+
+    const placedHere = [...this.placements.values()].filter((p) => p.muralId === id);
+    for (const p of placedHere) {
+      this.placements.delete(p.screenId);
+      await this.store.deletePlacement(p.screenId);
+    }
+
+    this.murals.delete(id);
+    await this.store.deleteMural(id);
+    return true;
+  }
+
+  /**
+   * Place (or move) a screen on a mural at `{x,y}`; `w`/`h` default to the screen's native resolution
+   * (preserving an existing placement's size when omitted, e.g. on a drag-move). A screen is placed
+   * on at most one mural, so placing it elsewhere MOVES it. Write-through. Returns the placement, or
+   * null if the screen or the mural is unknown.
+   */
+  async placeScreen(
+    screenId: string,
+    muralId: string,
+    x: number,
+    y: number,
+    w?: number,
+    h?: number,
+  ): Promise<Placement | null> {
+    const screen = this.getScreen(screenId);
+    if (screen === undefined) return null;
+    if (!this.murals.has(muralId)) return null;
+
+    const existing = this.placements.get(screenId);
+    const res = this.screenResolution(screen);
+    const placement: Placement = {
+      muralId,
+      screenId,
+      x,
+      y,
+      w: w ?? existing?.w ?? res.w,
+      h: h ?? existing?.h ?? res.h,
+    };
+    this.placements.set(screenId, placement);
+    await this.store.upsertPlacement(placement);
+    return placement;
+  }
+
+  /** Remove a screen's placement (return it to the unplaced tray). Write-through. False if unplaced. */
+  async unplaceScreen(screenId: string): Promise<boolean> {
+    if (!this.placements.has(screenId)) return false;
+    this.placements.delete(screenId);
+    await this.store.deletePlacement(screenId);
+    return true;
   }
 }

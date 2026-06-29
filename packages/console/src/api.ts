@@ -1,0 +1,101 @@
+/**
+ * REST client for the control plane (http://localhost:8080/api/v1).
+ *
+ * Every outgoing body is validated against the shared contract's zod schema before it leaves the
+ * browser — the same parse-at-the-edge discipline used on the wire (see @polyptych/protocol). The
+ * route paths follow the existing server conventions (POST /screens/:id/rename, /ident, /demo/web)
+ * extended for Phase 3 murals & placement.
+ */
+import {
+  CreateMuralBody,
+  IdentBody,
+  PlaceScreenBody,
+  RenameMuralBody,
+  RenameScreenBody,
+} from "@polyptych/protocol";
+
+const BASE = "http://localhost:8080/api/v1";
+
+/** A non-2xx REST response, with the parsed error payload (if any) for diagnostics. */
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly payload?: unknown,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+async function send<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    let payload: unknown;
+    try {
+      payload = await res.json();
+    } catch {
+      payload = undefined;
+    }
+    throw new ApiError(res.status, `${method} ${path} -> ${res.status}`, payload);
+  }
+
+  if (res.status === 204) return undefined as T;
+  const text = await res.text();
+  return (text ? (JSON.parse(text) as T) : (undefined as T));
+}
+
+// ── Murals ────────────────────────────────────────────────────────────────────
+
+/** POST /api/v1/murals { name } — create a new mural. */
+export function createMural(name: string): Promise<unknown> {
+  return send("POST", "/murals", CreateMuralBody.parse({ name }));
+}
+
+/** POST /api/v1/murals/:muralId/rename { name }. */
+export function renameMural(muralId: string, name: string): Promise<unknown> {
+  return send("POST", `/murals/${encodeURIComponent(muralId)}/rename`, RenameMuralBody.parse({ name }));
+}
+
+/** DELETE /api/v1/murals/:muralId. */
+export function deleteMural(muralId: string): Promise<unknown> {
+  return send("DELETE", `/murals/${encodeURIComponent(muralId)}`);
+}
+
+// ── Placement ───────────────────────────────────────────────────────────────
+
+/** PUT /api/v1/screens/:screenId/placement { muralId, x, y, w?, h? } — place or move on a mural. */
+export function placeScreen(screenId: string, body: PlaceScreenBody): Promise<unknown> {
+  return send("PUT", `/screens/${encodeURIComponent(screenId)}/placement`, PlaceScreenBody.parse(body));
+}
+
+/** DELETE /api/v1/screens/:screenId/placement — return the screen to the unplaced tray. */
+export function unplaceScreen(screenId: string): Promise<unknown> {
+  return send("DELETE", `/screens/${encodeURIComponent(screenId)}/placement`);
+}
+
+// ── Screen registry / content (existing Phase 2 routes) ──────────────────────
+
+/** POST /api/v1/screens/:screenId/rename { friendlyName }. */
+export function renameScreen(screenId: string, friendlyName: string): Promise<unknown> {
+  return send(
+    "POST",
+    `/screens/${encodeURIComponent(screenId)}/rename`,
+    RenameScreenBody.parse({ friendlyName }),
+  );
+}
+
+/** POST /api/v1/screens/:screenId/ident { on, ttlMs? } — flash the screen on the wall. */
+export function identScreen(screenId: string, body: IdentBody): Promise<unknown> {
+  return send("POST", `/screens/${encodeURIComponent(screenId)}/ident`, IdentBody.parse(body));
+}
+
+/** POST /api/v1/demo/web { screenId, url } — assign a single full-canvas web surface. */
+export function setScreenContentUrl(screenId: string, url: string): Promise<unknown> {
+  return send("POST", "/demo/web", { screenId, url });
+}

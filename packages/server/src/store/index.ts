@@ -11,7 +11,15 @@ import { PostgresStore } from "./postgres";
 
 import type { Store } from "./types";
 
-export type { PersistedContent, PersistedMachine, PersistedScreen, PersistedState, Store } from "./types";
+export type {
+  PersistedContent,
+  PersistedMachine,
+  PersistedMural,
+  PersistedPlacement,
+  PersistedScreen,
+  PersistedState,
+  Store,
+} from "./types";
 export { MemoryStore } from "./memory";
 export { PostgresStore } from "./postgres";
 

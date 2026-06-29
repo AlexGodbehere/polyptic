@@ -20,7 +20,10 @@
 import { z } from "zod";
 
 import {
+  CreateMuralBody,
   IdentBody,
+  PlaceScreenBody,
+  RenameMuralBody,
   RenameScreenBody,
   ServerToAgentApply,
   ServerToAgentRejected,
@@ -37,6 +40,7 @@ import type { AdminBroadcaster } from "./admin";
 
 const ScreenParams = z.object({ screenId: z.string().min(1) });
 const MachineParams = z.object({ machineId: z.string().min(1) });
+const MuralParams = z.object({ id: z.string().min(1) });
 const SurfacesBody = z.object({ surfaces: z.array(Surface) });
 const DemoWebBody = z.object({ screenId: z.string().min(1), url: z.string().url() });
 const RejectBody = z.object({ reason: z.string().optional() });
@@ -323,5 +327,133 @@ export function registerRestRoutes(
       delivered,
       closed,
     };
+  });
+
+  // ── Phase 3 routes (murals & placement) ───────────────────────────────────────
+  //
+  // Murals + placement are spatial layout metadata for the console, not part of any player's render
+  // slice, so these routes do NOT push server/render or bump the revision — they mutate, persist, and
+  // broadcast a fresh admin/state (which carries murals[] + placements[]).
+
+  // GET /api/v1/murals -> Mural[]
+  fastify.get("/api/v1/murals", async () => control.getMurals());
+
+  // POST /api/v1/murals  { name }  -> Mural
+  fastify.post("/api/v1/murals", async (request, reply) => {
+    const body = CreateMuralBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ error: "invalid body", issues: body.error.issues });
+    }
+
+    const mural = await control.createMural(body.data.name);
+    fastify.log.info({ event: "mural.create", muralId: mural.id, name: mural.name }, "mural created");
+    broadcaster.broadcast();
+    return reply.code(201).send({ ok: true, mural });
+  });
+
+  // POST /api/v1/murals/:id/rename  { name }
+  fastify.post("/api/v1/murals/:id/rename", async (request, reply) => {
+    const params = MuralParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+    const body = RenameMuralBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ error: "invalid body", issues: body.error.issues });
+    }
+
+    const mural = await control.renameMural(params.data.id, body.data.name);
+    if (!mural) {
+      return reply.code(404).send({ error: `unknown mural: ${params.data.id}` });
+    }
+
+    fastify.log.info({ event: "mural.rename", muralId: mural.id, name: mural.name }, "mural renamed");
+    broadcaster.broadcast();
+    return { ok: true, mural };
+  });
+
+  // DELETE /api/v1/murals/:id  -> delete the mural; unplace its screens
+  fastify.delete("/api/v1/murals/:id", async (request, reply) => {
+    const params = MuralParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+
+    const ok = await control.deleteMural(params.data.id);
+    if (!ok) {
+      return reply.code(404).send({ error: `unknown mural: ${params.data.id}` });
+    }
+
+    fastify.log.info({ event: "mural.delete", muralId: params.data.id }, "mural deleted");
+    broadcaster.broadcast();
+    return { ok: true, muralId: params.data.id };
+  });
+
+  // PUT /api/v1/screens/:screenId/placement  { muralId, x, y, w?, h? }  -> place or move a screen
+  fastify.put("/api/v1/screens/:screenId/placement", async (request, reply) => {
+    const params = ScreenParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+    const body = PlaceScreenBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ error: "invalid body", issues: body.error.issues });
+    }
+
+    // Distinguish an unknown screen from an unknown mural for a clearer 404.
+    if (!control.getScreen(params.data.screenId)) {
+      return reply.code(404).send({ error: `unknown screen: ${params.data.screenId}` });
+    }
+    if (!control.getMural(body.data.muralId)) {
+      return reply.code(404).send({ error: `unknown mural: ${body.data.muralId}` });
+    }
+
+    const placement = await control.placeScreen(
+      params.data.screenId,
+      body.data.muralId,
+      body.data.x,
+      body.data.y,
+      body.data.w,
+      body.data.h,
+    );
+    // placeScreen only returns null when the screen/mural is unknown, both already handled above.
+    if (!placement) {
+      return reply.code(404).send({ error: `unknown screen: ${params.data.screenId}` });
+    }
+
+    fastify.log.info(
+      {
+        event: "screen.place",
+        screenId: placement.screenId,
+        muralId: placement.muralId,
+        x: placement.x,
+        y: placement.y,
+        w: placement.w,
+        h: placement.h,
+      },
+      "screen placed",
+    );
+    broadcaster.broadcast();
+    return { ok: true, placement };
+  });
+
+  // DELETE /api/v1/screens/:screenId/placement  -> unplace a screen (back to the tray)
+  fastify.delete("/api/v1/screens/:screenId/placement", async (request, reply) => {
+    const params = ScreenParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+
+    if (!control.getScreen(params.data.screenId)) {
+      return reply.code(404).send({ error: `unknown screen: ${params.data.screenId}` });
+    }
+
+    const ok = await control.unplaceScreen(params.data.screenId);
+    fastify.log.info(
+      { event: "screen.unplace", screenId: params.data.screenId, wasPlaced: ok },
+      "screen unplaced",
+    );
+    broadcaster.broadcast();
+    return { ok: true, screenId: params.data.screenId, wasPlaced: ok };
   });
 }

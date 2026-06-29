@@ -36,22 +36,23 @@ bun run dev        # build the contract, then run the whole stack
 ```
 
 `bun run dev` first builds the shared contract (`@polyptych/protocol`) and then starts
-four processes together under [`concurrently`](https://www.npmjs.com/package/concurrently),
+five processes together under [`concurrently`](https://www.npmjs.com/package/concurrently),
 colour-coded by name:
 
-| name (colour)    | process               | what it does                                                              |
-| ---------------- | --------------------- | ------------------------------------------------------------------------- |
-| `server` (green)   | `@polyptych/server` | HTTP + WS on **:8080**; loads the registry from Postgres; REST API + `/admin` |
-| `player` (cyan)    | `@polyptych/player` | Vite dev server on **:5173**; the per-screen renderer (SolidJS)           |
-| `admin`  (magenta) | `@polyptych/admin`  | Vite dev server on **:5174**; the operator Admin UI (SolidJS)             |
-| `agent`  (yellow)  | `@polyptych/agent`  | dials the server, registers one screen, opens the player page             |
+| name (colour)      | process               | what it does                                                              |
+| ------------------ | --------------------- | ------------------------------------------------------------------------- |
+| `server` (green)   | `@polyptych/server`   | HTTP + WS on **:8080**; loads the registry from Postgres; REST API + `/admin` |
+| `player` (cyan)    | `@polyptych/player`   | Vite dev server on **:5173**; the per-screen renderer (SolidJS)           |
+| `admin`  (magenta) | `@polyptych/admin`    | Vite dev server on **:5174**; the legacy operator Admin UI (SolidJS, retired at 3e) |
+| `console` (blue)   | `@polyptych/console`  | Vite dev server on **:5175**; the new Vue operator console (Phase 3a: the Wall view) |
+| `agent`  (yellow)  | `@polyptych/agent`    | dials the server, registers one screen, opens the player page             |
 
 Stop the stack with **Ctrl-C**. Postgres keeps running in Docker (that's what makes the
 [persistence check](#the-persistence-check--survives-a-restart) work); stop it with
 `bun run db:down`.
 
-> **Ports:** server `8080`, player `5173`, admin `5174`, Postgres `5432`. If any is busy,
-> free it before you start (the stack has no fallback ports).
+> **Ports:** server `8080`, player `5173`, admin `5174`, console `5175`, Postgres `5432`. If any
+> is busy, free it before you start (the stack has no fallback ports).
 
 ### What to expect
 
@@ -261,10 +262,62 @@ player tab opens; **Reject** a machine → its agent is dropped. The same action
 
 ---
 
+## Phase 3a — the Vue console
+
+Phase 3a introduces the new **Vue operator console** (`@polyptych/console`) and the spatial **Wall**
+view. `bun run dev` now launches it alongside everything else: it runs on **<http://localhost:5175>**
+(blue in the `concurrently` output). The legacy SolidJS Admin UI on **:5174** stays put for now — it is
+retired at Phase 3e — so during 3a you have both: `:5174` for machine enrollment/approval, `:5175` for
+the Wall.
+
+Open **<http://localhost:5175>** and you land on the **Wall** — a [Vue Flow](https://vueflow.dev)
+spatial canvas (pan, zoom, drag, snap-to-grid). The server seeds one mural named **"Wall"** on first
+boot; use the **mural switcher** to create more and pick the active one. Down the side, an **Unplaced
+screens** tray lists every screen with no placement: **drag a screen from the tray onto the canvas** to
+place it on the active mural (its box defaults to the screen's output resolution). Drag a placed screen
+to move it; it snaps to the grid.
+
+Select a screen (shift-click for multi-select; *combining* placed screens into one surface is Phase 3b)
+to open the right-hand **inspector**, which drives the same server actions the Admin UI and `curl`
+examples do:
+
+- **rename** the screen's friendly name (`POST /api/v1/screens/:id/rename`);
+- **Ident** — flash the name on the physical panel (`POST /api/v1/screens/:id/ident`);
+- read its **status / "driven by"** machine;
+- **assign content** — type a URL and the screen shows it (`POST /api/v1/demo/web {screenId,url}`,
+  the existing instant path — the player is unchanged in 3a).
+
+The console connects to the server's `/admin` WebSocket (the same channel the Admin UI uses) and now
+reads the extra `murals[]` + `placements[]` carried in `admin/state`; it re-renders live as murals are
+created/renamed/deleted and screens are placed/moved/unplaced. The mural and placement REST surface it
+calls is documented under [Phase 3a — murals & placement](#phase-3a--murals--placement) below.
+
+The other console nav routes (Machines, Content, Scenes, Settings, combined surfaces, the content
+library) are **"coming soon" placeholders** in 3a — only the Wall is wired up.
+
+---
+
 ## REST routes
 
 All bodies/params are validated against the `@polyptych/protocol` zod schemas. CORS is
 enabled for the player and admin origins.
+
+### Phase 3a — murals & placement
+
+The Wall view's spatial model. A mutation persists through the Store and broadcasts a fresh
+`admin/state` (now carrying `murals[]` + `placements[]`) so every console/admin client stays live.
+
+| method & path                                  | body                                         | effect                                                                                              |
+| ---------------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `POST   /api/v1/murals`                        | `{ "name": string }`                         | create a mural; appears in `admin/state.murals`                                                      |
+| `POST   /api/v1/murals/:muralId/rename`        | `{ "name": string }`                         | rename a mural; `404` unknown mural                                                                  |
+| `DELETE /api/v1/murals/:muralId`               | —                                            | delete a mural and **unplace its screens** (their placements are removed); `404` unknown mural       |
+| `PUT    /api/v1/screens/:screenId/placement`   | `{ "muralId", "x", "y", "w"?, "h"? }`        | place or move a screen on a mural (canvas pixels); **`w`/`h` default to the screen's resolution**; `404` unknown screen |
+| `DELETE /api/v1/screens/:screenId/placement`   | —                                            | unplace a screen (back to the Unplaced tray); `404` unknown screen                                   |
+
+These are exactly what `packages/e2e/murals.e2e.test.ts` drives end-to-end against the real server:
+a default **"Wall"** mural is seeded, `POST /murals` adds one, `PUT …/placement` places a screen with
+defaulted `w`/`h`, `DELETE …/placement` unplaces it, and `DELETE /murals/:id` cascades to unplace.
 
 ### Phase 2a — registry & admin actions
 
