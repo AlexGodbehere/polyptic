@@ -4,10 +4,14 @@
  * Tracks live player WebSockets keyed by screenId so a render push reaches exactly the
  * player(s) showing that screen (a screen may have >1 socket open during reconnects).
  * Content goes server → player directly (never through the agent) for speed.
+ *
+ * The agent socket registry (`AgentHub`) lives here too: it keys live agent WebSockets by machineId
+ * so an operator's approve/reject can reach a connected agent NOW — a live `server/apply` on approve,
+ * a `server/rejected` + socket close on reject.
  */
 import { WebSocket } from "ws";
 
-import type { ServerToPlayerMessage } from "@polyptych/protocol";
+import type { ServerToAgentMessage, ServerToPlayerMessage } from "@polyptych/protocol";
 
 export class PlayerHub {
   private readonly byScreen = new Map<string, Set<WebSocket>>();
@@ -45,5 +49,65 @@ export class PlayerHub {
       }
     }
     return delivered;
+  }
+}
+
+/**
+ * Agent socket registry — keyed by machineId so the control plane can push to a connected agent on
+ * demand (operator approve → live `server/apply`; operator reject → `server/rejected` + close).
+ * A machine may transiently hold >1 socket during a reconnect, so each id maps to a set.
+ */
+export class AgentHub {
+  private readonly byMachine = new Map<string, Set<WebSocket>>();
+
+  add(machineId: string, socket: WebSocket): void {
+    let set = this.byMachine.get(machineId);
+    if (!set) {
+      set = new Set<WebSocket>();
+      this.byMachine.set(machineId, set);
+    }
+    set.add(socket);
+  }
+
+  remove(machineId: string, socket: WebSocket): void {
+    const set = this.byMachine.get(machineId);
+    if (!set) return;
+    set.delete(socket);
+    if (set.size === 0) this.byMachine.delete(machineId);
+  }
+
+  count(machineId: string): number {
+    return this.byMachine.get(machineId)?.size ?? 0;
+  }
+
+  /** Send a validated server→agent message to every open socket for a machine. Returns count delivered. */
+  send(machineId: string, message: ServerToAgentMessage): number {
+    const set = this.byMachine.get(machineId);
+    if (!set || set.size === 0) return 0;
+    const data = JSON.stringify(message);
+    let delivered = 0;
+    for (const socket of set) {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(data);
+        delivered += 1;
+      }
+    }
+    return delivered;
+  }
+
+  /** Close every socket for a machine (after an operator reject). Returns count closed. */
+  close(machineId: string): number {
+    const set = this.byMachine.get(machineId);
+    if (!set || set.size === 0) return 0;
+    let closed = 0;
+    for (const socket of set) {
+      try {
+        socket.close();
+        closed += 1;
+      } catch {
+        /* already closing */
+      }
+    }
+    return closed;
   }
 }

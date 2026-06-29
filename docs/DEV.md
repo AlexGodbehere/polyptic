@@ -157,6 +157,110 @@ only `docker compose -f deploy/docker-compose.yml down -v` wipes the volume.)
 
 ---
 
+## Phase 2b — Enrollment & approval
+
+Phase 2b puts a **claim step** between an agent dialing in and its screens going live, and gives every
+machine a durable per-machine **credential** that it presents on each reconnect. There are two modes,
+selected by a single server env var — **`POLYPTYCH_BOOTSTRAP_TOKEN`**.
+
+> **mTLS is not part of 2b.** Hardening the agent↔server *transport* to mutual-TLS client certs (D12)
+> is deferred to the deploy / transport layer. Phase 2b is the **app-level** identity only:
+> enrollment, the durable credential, and operator approval.
+
+### OPEN MODE — the dev default (unchanged Phase 2a behaviour)
+
+If `POLYPTYCH_BOOTSTRAP_TOKEN` is **unset**, the server runs in **open mode**. Any agent that dials in
+is **auto-registered and auto-approved** (`status: approved`), its screens are created, and it receives
+`server/apply` immediately — exactly as in Phase 2a. This is what plain `bun run dev` does, so every
+demo above keeps working with no extra setup.
+
+To make open mode impossible to miss, the server logs a prominent **warning** at boot:
+
+```
+WARN  enrollment is OPEN (POLYPTYCH_BOOTSTRAP_TOKEN unset) — every agent is auto-approved. Do not run like this in production.
+```
+
+### GATED MODE — enrollment on
+
+Set `POLYPTYCH_BOOTSTRAP_TOKEN` on the **server** to turn enrollment on, and set the **same** token on
+each **agent** so it can make first contact:
+
+```sh
+# one shared secret for this demo — any non-empty string
+export POLYPTYCH_BOOTSTRAP_TOKEN="dev-secret-please-change"
+bun run dev
+```
+
+Setting it in the shell before `bun run dev` (or via `deploy/.env.example` → `.env`, see
+[Configuration](#configuration)) means the bundled **`dev-mac`** agent inherits the same token — so in
+gated mode even that first built-in agent comes up **PENDING** until you approve it. Nothing reaches a
+screen until an operator says so.
+
+> **Switching an existing OPEN deployment to gated:** give each already-running agent the bootstrap
+> token once. On its next `agent/hello` the server re-issues it a durable credential (and admits it if it
+> was already approved). A machine that presents *neither* a valid token *nor* a credential is rejected
+> by design — so don't flip to gated without handing the token to your existing agents first.
+
+A first connection no longer goes straight to content. The flow:
+
+1. The agent sends `agent/hello` carrying the **bootstrap token** (from its own
+   `POLYPTYCH_BOOTSTRAP_TOKEN`). The server checks the token, creates the machine as **`pending`**,
+   records the outputs it reported, mints a random durable **credential**, and replies
+   `server/enrolled` (carrying that credential) then `server/pending`. **No screens are created and no
+   `server/apply` is sent** — the player does not open.
+2. The machine appears in the **Admin UI** (<http://localhost:5174>) as **online + PENDING**, showing
+   the number of outputs it reported but **no screens** yet.
+3. An operator clicks **Approve**. The server flips the machine to **`approved`**, creates its screens
+   from the persisted outputs, and — because the agent is still connected — **live-admits** it by
+   sending `server/apply` there and then. The agent's `dev-open` backend opens the player tab and the
+   screen goes live. (Approve also works while the agent is offline; the machine is admitted on its
+   next reconnect.)
+4. On every later reconnect the agent presents its **credential** instead of the token. An approved
+   machine is admitted straight away; a still-pending one just gets `server/pending` again and keeps
+   waiting.
+
+**Turned away.** An agent that presents **neither** a valid token **nor** a valid credential — or one
+whose machine you **Reject** — receives `server/rejected {reason}` and the server **closes** the
+socket. Clicking **Reject** on a machine drops its agent on the spot (if connected) and it is never
+admitted.
+
+### Where the credential lives
+
+- **Agent side (the raw secret):** the agent persists the credential it received in `server/enrolled`
+  to **`${POLYPTYCH_STATE_DIR or ~/.polyptych}/credential-<machineId>`** (one file per machine id). On
+  the next boot it reads that file and reconnects with the credential — no token needed. Delete the
+  file to force a fresh enrollment: the agent falls back to the bootstrap token and the server
+  **re-issues** a credential for the existing machine, carrying its current status.
+- **Server side (hash only):** the server stores **only** `sha256(credential)` on the machine — never
+  the raw secret. On reconnect it hashes what the agent sends and compares. A leaked registry database
+  cannot be used to impersonate an agent.
+
+The credential is a random **32-byte hex** string (`node:crypto` `randomBytes`).
+
+### Try it (gated)
+
+```sh
+# 1. server + the dev stack in gated mode (the bundled dev-mac agent is itself gated):
+export POLYPTYCH_BOOTSTRAP_TOKEN="dev-secret-please-change"
+bun run dev
+
+# 2. in another terminal, a second fresh agent carrying the SAME token:
+cd packages/agent && \
+  POLYPTYCH_MACHINE_ID=machine-b POLYPTYCH_CONNECTOR=HDMI-2 \
+  POLYPTYCH_BOOTSTRAP_TOKEN="dev-secret-please-change" bun run dev
+
+# 3. an impostor with the WRONG token — rejected and disconnected, never shows up:
+cd packages/agent && \
+  POLYPTYCH_MACHINE_ID=impostor POLYPTYCH_CONNECTOR=HDMI-9 \
+  POLYPTYCH_BOOTSTRAP_TOKEN="nope" bun run dev
+```
+
+In the Admin UI, `dev-mac` and `machine-b` both show **PENDING** with their reported output count and
+no screens; `impostor` never appears. Click **Approve** on `machine-b` → its screen is created and its
+player tab opens; **Reject** a machine → its agent is dropped. The same actions over REST are below.
+
+---
+
 ## REST routes
 
 All bodies/params are validated against the `@polyptych/protocol` zod schemas. CORS is
@@ -170,6 +274,26 @@ enabled for the player and admin origins.
 | `POST /api/v1/screens/:screenId/rename`      | `{ "friendlyName": string }`  | rename + persist + broadcast `admin/state`; `404` unknown screen       |
 | `POST /api/v1/screens/:screenId/ident`       | `{ "on": bool, "ttlMs"? }`    | `server/ident-pulse` to that screen's player(s); auto-off after `ttlMs` |
 | `POST /api/v1/machines/:machineId/ident`     | `{ "on": bool, "ttlMs"? }`    | ident every screen on that machine; `404` unknown machine              |
+
+### Phase 2b — enrollment actions
+
+| method & path                                | body                    | effect                                                                                                                                  |
+| -------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/v1/machines/:machineId/approve`   | —                       | `pending → approved`; create screens from the machine's persisted outputs; **live-admit** (`server/apply`) if the agent is connected now; broadcast `admin/state`. `404` unknown machine |
+| `POST /api/v1/machines/:machineId/reject`    | `{ "reason"?: string }` | `→ rejected`; if connected, send `server/rejected` + close the agent WS; never admit; broadcast `admin/state`. `404` unknown machine    |
+
+With the stack in **gated mode** and a machine showing pending, drive the same actions the Admin UI
+buttons do:
+
+```sh
+# approve machine-b → its screens are created and (if online) it is admitted live
+curl -X POST localhost:8080/api/v1/machines/machine-b/approve
+
+# or turn one away (optional reason)
+curl -X POST localhost:8080/api/v1/machines/machine-b/reject \
+  -H 'content-type: application/json' \
+  -d '{"reason":"not one of ours"}'
+```
 
 ### Phase 1 — content (the "instant" path, still works)
 
@@ -228,10 +352,12 @@ open "http://localhost:5173/?screen=screen-1"   # Linux: xdg-open, or paste into
 | `STORE`                 | `postgres`                                                     | registry backend: `postgres` (durable) or `memory` (test)      |
 | `DATABASE_URL`          | `postgres://polyptych:polyptych@localhost:5432/polyptych`     | Postgres connection used when `STORE=postgres`                 |
 | `PORT`                  | `8080`                                                         | server HTTP + WS port                                          |
+| `POLYPTYCH_BOOTSTRAP_TOKEN` | _(unset → **open mode**)_                                 | **server + agent.** Set on the **server** to gate enrollment; set the **same** value on each **agent** for first-contact. Unset on the server = open mode (auto-approve, with the boot warning). |
 | `PLAYER_BASE_URL`       | `http://localhost:5173`                                       | base the server uses to build each `playerUrl`                 |
 | `POLYPTYCH_MACHINE_ID`  | `/etc/machine-id` if present, else `dev-mac`                  | the agent's machine identity (used for the multi-machine demo) |
 | `POLYPTYCH_CONNECTOR`   | `HDMI-1`                                                       | the agent's output connector (used for the multi-machine demo) |
 | `POLYPTYCH_BACKEND`     | _(auto → `dev-open`)_                                          | force the agent's display backend                              |
+| `POLYPTYCH_STATE_DIR`   | `~/.polyptych`                                                | **agent.** Directory where the agent persists its durable credential, as `credential-<machineId>` |
 
 The dev canvas defaults to **1920×1080**.
 
@@ -271,4 +397,13 @@ the top of `deploy/docker-compose.yml`.
 > Admin UI; click **ident** → the player flashes the name; **rename** a screen → it
 > **persists across a server restart**.
 
-See [`ROADMAP.md`](./ROADMAP.md) for what comes next (Phase 2b: enrollment/claim + mTLS).
+## Phase 2b — Definition of Done
+
+> Set `POLYPTYCH_BOOTSTRAP_TOKEN` (gated mode) and bring up the stack; a fresh agent shows as
+> **PENDING** in the Admin UI; click **Approve** → its screens appear and the player opens; an
+> **unknown / wrong-token** agent (and any machine you **Reject**) is turned away and disconnected.
+> The agent keeps a durable credential at `${POLYPTYCH_STATE_DIR or ~/.polyptych}/credential-<machineId>`
+> and the server stores only its `sha256` hash. (mTLS transport hardening is deferred — see
+> [`ROADMAP.md`](./ROADMAP.md).)
+
+See [`ROADMAP.md`](./ROADMAP.md) for what comes next (Phase 3: murals — the spatial screen canvas).

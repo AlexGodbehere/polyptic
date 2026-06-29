@@ -15,6 +15,18 @@
  *   - `POLYPTYCH_CONNECTOR`  overrides the advertised output connector (else "HDMI-1").
  * Together these let two agents on one box present distinct machine + screen identities,
  * so the persistent registry and the Admin UI have multiple machines to show.
+ *
+ * Phase 2b — enrollment + durable credential (app-level identity; mTLS is a later layer):
+ *   - `POLYPTYCH_BOOTSTRAP_TOKEN` (if set) is sent on `agent/hello` for first-contact enrollment.
+ *   - A durable per-machine `credential` is persisted locally (see ./credential.ts) and presented
+ *     on every reconnect. The server stores only `sha256(credential)`.
+ *   In the server's OPEN mode (no bootstrap token configured) both are simply ignored and the
+ *   agent behaves exactly as in Phase 2a. In GATED mode the server may reply:
+ *     - `server/enrolled` → persist the issued credential, then await admission,
+ *     - `server/pending`  → recognised but awaiting operator approval (keep the WS open),
+ *     - `server/rejected` → auth failed / machine rejected; the server closes the WS and the
+ *        agent retries on a long backoff (never hammers),
+ *     - `server/apply`    → admitted (Phase 2a behaviour, unchanged).
  */
 import WebSocket from "ws";
 import {
@@ -29,6 +41,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { selectBackend } from "./backends/select";
 import type { DisplayBackend } from "./backends/types";
+import { credentialPath, loadCredential, saveCredential } from "./credential";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
@@ -38,6 +51,8 @@ const SERVER_URL = process.env.POLYPTYCH_SERVER_URL ?? "ws://localhost:8080/agen
 const HEARTBEAT_MS = 10_000;
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 10_000;
+/** After a `server/rejected`, retry slowly so a rejected/unapproved machine never hammers. */
+const REJECT_BACKOFF_MS = 60_000;
 
 /** Default advertised connector when `POLYPTYCH_CONNECTOR` is unset. */
 const DEFAULT_CONNECTOR = "HDMI-1";
@@ -46,6 +61,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 function log(msg: string): void {
   console.log(`[${new Date().toISOString()}] [agent] ${msg}`);
+}
+
+function logError(msg: string): void {
+  console.error(`[${new Date().toISOString()}] [agent] ERROR: ${msg}`);
 }
 
 /**
@@ -81,6 +100,12 @@ function resolveOutputs(connector: string): Output[] {
   return [{ connector, width: 1920, height: 1080 }];
 }
 
+/** The operator-configured enrollment secret, if any (server GATED mode). */
+function readBootstrapToken(): string | undefined {
+  const token = process.env.POLYPTYCH_BOOTSTRAP_TOKEN?.trim();
+  return token && token.length > 0 ? token : undefined;
+}
+
 function readAgentVersion(): string {
   try {
     const raw = readFileSync(join(here, "..", "package.json"), "utf8");
@@ -96,6 +121,9 @@ function readAgentVersion(): string {
 type ApplyMsg = Extract<ServerToAgentMessage, { t: "server/apply" }>;
 type IdentMsg = Extract<ServerToAgentMessage, { t: "server/ident" }>;
 type CaptureMsg = Extract<ServerToAgentMessage, { t: "server/capture" }>;
+type EnrolledMsg = Extract<ServerToAgentMessage, { t: "server/enrolled" }>;
+type PendingMsg = Extract<ServerToAgentMessage, { t: "server/pending" }>;
+type RejectedMsg = Extract<ServerToAgentMessage, { t: "server/rejected" }>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Agent
@@ -107,6 +135,11 @@ class Agent {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private attempt = 0;
   private closing = false;
+  /** Set when the server `server/rejected` us; drives a long reconnect backoff (no hammering). */
+  private rejected = false;
+
+  /** Durable app-level identity. Loaded from disk at boot; (re)issued via `server/enrolled`. */
+  private credential: string | null;
 
   private lastAppliedRevision = 0;
   /** connector → player URL currently placed (dedupes repeat opens on reconnect/re-apply). */
@@ -120,7 +153,11 @@ class Agent {
     private readonly agentVersion: string,
     private readonly backend: DisplayBackend,
     private readonly outputs: Output[],
-  ) {}
+    private readonly bootstrapToken: string | undefined,
+    credential: string | null,
+  ) {
+    this.credential = credential;
+  }
 
   start(): void {
     this.connect();
@@ -145,6 +182,9 @@ class Agent {
 
     ws.on("open", () => {
       this.attempt = 0;
+      // A fresh connection: clear the stale "rejected" flag. If the server rejects us again it
+      // re-sets the flag before close, so the long backoff persists across rejection cycles.
+      this.rejected = false;
       log("agent channel open — enrolling");
       this.sendHello();
       this.startHeartbeat();
@@ -172,10 +212,18 @@ class Agent {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
-    const backoff = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** this.attempt);
-    const delay = backoff + Math.floor(Math.random() * 250);
-    this.attempt += 1;
-    log(`reconnecting in ${delay}ms (attempt ${this.attempt})`);
+    let delay: number;
+    if (this.rejected) {
+      // Rejected/unapproved: back off hard so we don't hammer the control plane. An operator
+      // approving the machine (or a new credential) will be picked up on the next slow retry.
+      delay = REJECT_BACKOFF_MS + Math.floor(Math.random() * 1_000);
+      log(`reconnecting in ${delay}ms after rejection (slow retry — awaiting approval)`);
+    } else {
+      const backoff = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** this.attempt);
+      delay = backoff + Math.floor(Math.random() * 250);
+      this.attempt += 1;
+      log(`reconnecting in ${delay}ms (attempt ${this.attempt})`);
+    }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
@@ -202,6 +250,15 @@ class Agent {
         break;
       case "server/capture":
         await this.onCapture(msg);
+        break;
+      case "server/enrolled":
+        this.onEnrolled(msg);
+        break;
+      case "server/pending":
+        this.onPending(msg);
+        break;
+      case "server/rejected":
+        this.onRejected(msg);
         break;
     }
   }
@@ -288,17 +345,64 @@ class Agent {
     }
   }
 
+  /**
+   * `server/enrolled` — the server issued (or re-issued) this machine's durable credential.
+   * Persist the RAW credential locally so future reconnects authenticate without the bootstrap
+   * token. The connection stays open; admission follows via `server/apply` (if approved) or we
+   * sit in `server/pending` until an operator approves.
+   */
+  private onEnrolled(msg: EnrolledMsg): void {
+    this.credential = msg.credential;
+    try {
+      saveCredential(this.machineId, msg.credential);
+      log(`enrolled (status=${msg.status}) — credential persisted to ${credentialPath(this.machineId)}`);
+    } catch (err) {
+      logError(
+        `enrolled (status=${msg.status}) but FAILED to persist credential to ${credentialPath(this.machineId)}: ${(err as Error).message} — will re-enroll on next reconnect`,
+      );
+    }
+  }
+
+  /** `server/pending` — recognised but awaiting operator approval. Keep the WS open; no apply yet. */
+  private onPending(msg: PendingMsg): void {
+    log(
+      `awaiting operator approval${msg.reason ? ` — ${msg.reason}` : ""} (connection kept open; will receive server/apply once approved)`,
+    );
+  }
+
+  /**
+   * `server/rejected` — authentication failed (bad/absent token & credential) or the machine was
+   * rejected by an operator. The server closes the WS after this frame; we must NOT crash. Flag a
+   * long reconnect backoff so a rejected machine retries slowly instead of hammering.
+   */
+  private onRejected(msg: RejectedMsg): void {
+    this.rejected = true;
+    logError(
+      `enrollment rejected by server: ${msg.reason}. ` +
+        `Provide a valid POLYPTYCH_BOOTSTRAP_TOKEN or wait for operator approval. ` +
+        `Retrying slowly (~${Math.round(REJECT_BACKOFF_MS / 1000)}s).`,
+    );
+    // The server closes the connection; the `close` handler will scheduleReconnect() with the
+    // long backoff because `this.rejected` is now set.
+  }
+
   // ── outbound ─────────────────────────────────────────────────────────────────
 
   private sendHello(): void {
-    this.send({
+    // Both `bootstrapToken` and `credential` are optional. The server ignores them in OPEN mode
+    // (Phase 2a behaviour) and uses them to enrol in GATED mode. `undefined` values are dropped by
+    // JSON.stringify, so an agent with neither sends a plain Phase-2a hello.
+    const hello: AgentMessage = {
       t: "agent/hello",
       protocol: PROTOCOL_VERSION,
       machineId: this.machineId,
       agentVersion: this.agentVersion,
       backend: this.backend.id,
       outputs: this.outputs,
-    });
+      bootstrapToken: this.bootstrapToken,
+      credential: this.credential ?? undefined,
+    };
+    this.send(hello);
   }
 
   private sendStatus(): void {
@@ -355,12 +459,27 @@ function main(): void {
   const outputs = resolveOutputs(connector);
   const agentVersion = readAgentVersion();
   const backend = selectBackend();
+  const bootstrapToken = readBootstrapToken();
+  const credential = loadCredential(machineId);
 
   log(
     `polyptych-agent v${agentVersion} · machineId=${machineId} · connector=${connector} · backend=${backend.id}`,
   );
+  log(
+    `enrollment: ${credential ? "stored credential found" : "no stored credential"}${
+      bootstrapToken ? " · bootstrap token present" : ""
+    } (open mode ignores both)`,
+  );
 
-  const agent = new Agent(SERVER_URL, machineId, agentVersion, backend, outputs);
+  const agent = new Agent(
+    SERVER_URL,
+    machineId,
+    agentVersion,
+    backend,
+    outputs,
+    bootstrapToken,
+    credential,
+  );
   agent.start();
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {

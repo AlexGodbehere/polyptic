@@ -120,6 +120,9 @@ export function buildAdminState(
       agentVersion: machine.agentVersion,
       backend: machine.backend,
       online: presence.isMachineOnline(machine.id),
+      status: machine.status,
+      // Outputs the agent reported — shown for pending machines that have no screens yet.
+      outputCount: machine.outputs.length,
       lastSeen: machine.lastSeen,
       screens: machineScreens,
     } satisfies MachineView;

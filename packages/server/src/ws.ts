@@ -1,10 +1,17 @@
 /**
  * The three WebSocket channels, multiplexed onto Fastify's underlying HTTP server.
  *
- *   /agent   (machine ↔ server): enrollment + status. On `agent/hello` we register the machine
- *            (write-through to the Store), ensure a Screen per output, and reply `server/apply` with
- *            each output's screen id and player URL. The agent then opens those URLs via its backend.
- *            The socket's lifetime marks the machine ONLINE for the admin UI.
+ *   /agent   (machine ↔ server): enrollment + status. On `agent/hello` the server authenticates the
+ *            machine (Phase 2b) and acts on the decision:
+ *              - OPEN MODE (no bootstrap token): register + auto-approve + ensure a Screen per output
+ *                and reply `server/apply` — exactly Phase 2a.
+ *              - GATED first contact (valid token, NEW machine): create it `pending`, issue a durable
+ *                credential via `server/enrolled`, then `server/pending`. No screens, no apply.
+ *              - valid credential + approved: admit (ensure screens, `server/apply`).
+ *              - valid credential / token + pending: `server/pending` (socket stays open).
+ *              - bad/absent token AND credential, or a `rejected` machine: `server/rejected` + CLOSE.
+ *            The socket's lifetime marks the machine ONLINE for the admin UI; it is also tracked by
+ *            machineId in the `AgentHub` so an operator's approve/reject reaches it live.
  *
  *   /player  (screen ↔ server): the instant content path. On `player/hello` we register the socket
  *            under its screenId and reply `server/render` with the screen's current slice. The
@@ -24,6 +31,9 @@ import {
   AgentMessage,
   PlayerMessage,
   ServerToAgentApply,
+  ServerToAgentEnrolled,
+  ServerToAgentPending,
+  ServerToAgentRejected,
   ServerToPlayerRender,
   parseMessage,
 } from "@polyptych/protocol";
@@ -31,14 +41,18 @@ import type { FastifyBaseLogger } from "fastify";
 import type { Server } from "node:http";
 import type { RawData } from "ws";
 
-import type { ControlPlane } from "./state";
-import type { PlayerHub } from "./hub";
+import { hashCredential } from "./enroll";
+import type { Enrollment } from "./enroll";
+import type { ControlPlane, RegisterMachineInput, ScreenAssignment } from "./state";
+import type { AgentHub, PlayerHub } from "./hub";
 import type { AdminBroadcaster, AdminHub, Presence } from "./admin";
 
 interface WsDeps {
   server: Server;
   control: ControlPlane;
+  enrollment: Enrollment;
   hub: PlayerHub;
+  agentHub: AgentHub;
   adminHub: AdminHub;
   presence: Presence;
   broadcaster: AdminBroadcaster;
@@ -46,7 +60,7 @@ interface WsDeps {
 }
 
 export function attachWebSockets(deps: WsDeps): void {
-  const { server, control, hub, adminHub, presence, broadcaster, log } = deps;
+  const { server, control, enrollment, hub, agentHub, adminHub, presence, broadcaster, log } = deps;
 
   const agentWss = new WebSocketServer({ noServer: true });
   const playerWss = new WebSocketServer({ noServer: true });
@@ -73,7 +87,7 @@ export function attachWebSockets(deps: WsDeps): void {
   });
 
   agentWss.on("connection", (ws: WebSocket) =>
-    handleAgent(ws, control, presence, broadcaster, log),
+    handleAgent(ws, control, enrollment, agentHub, presence, broadcaster, log),
   );
   playerWss.on("connection", (ws: WebSocket) =>
     handlePlayer(ws, control, hub, presence, broadcaster, log),
@@ -86,6 +100,8 @@ export function attachWebSockets(deps: WsDeps): void {
 function handleAgent(
   ws: WebSocket,
   control: ControlPlane,
+  enrollment: Enrollment,
+  agentHub: AgentHub,
   presence: Presence,
   broadcaster: AdminBroadcaster,
   log: FastifyBaseLogger,
@@ -93,6 +109,166 @@ function handleAgent(
   log.info({ event: "agent.connected" }, "agent socket opened");
   let machineId: string | null = null;
   let presenceMarked = false;
+  let hubRegistered = false;
+
+  // ── small typed senders, all validated against the contract before they leave ──
+
+  function sendApply(targetMachineId: string, assignments: ScreenAssignment[]): void {
+    const apply = ServerToAgentApply.parse({
+      t: "server/apply",
+      revision: control.state.revision,
+      machineId: targetMachineId,
+      screens: assignments,
+    });
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(apply));
+  }
+
+  function sendEnrolled(targetMachineId: string, credential: string, status: "pending" | "approved"): void {
+    const enrolled = ServerToAgentEnrolled.parse({
+      t: "server/enrolled",
+      machineId: targetMachineId,
+      credential,
+      status,
+    });
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(enrolled));
+  }
+
+  function sendPending(reason?: string): void {
+    const pending = ServerToAgentPending.parse(
+      reason ? { t: "server/pending", reason } : { t: "server/pending" },
+    );
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(pending));
+  }
+
+  function sendRejected(reason: string): void {
+    const rejected = ServerToAgentRejected.parse({ t: "server/rejected", reason });
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(rejected));
+  }
+
+  async function onHello(msg: Extract<AgentMessage, { t: "agent/hello" }>): Promise<void> {
+    const existing = control.getMachine(msg.machineId);
+    const decision = enrollment.authenticate(
+      msg,
+      existing
+        ? { status: existing.status, credentialHash: control.getCredentialHash(msg.machineId) }
+        : undefined,
+    );
+
+    // Reject path: tell the agent why and CLOSE — never mark presence, never admit.
+    if (decision.kind === "reject") {
+      const reason = decision.reason ?? "enrollment rejected";
+      sendRejected(reason);
+      log.info(
+        { event: "agent.rejected", machineId: msg.machineId, reason },
+        "agent enrollment rejected — closing socket",
+      );
+      ws.close();
+      return;
+    }
+
+    // From here the connection is kept: mark presence + register the socket by machineId.
+    machineId = msg.machineId;
+    if (!hubRegistered) {
+      agentHub.add(machineId, ws);
+      hubRegistered = true;
+    }
+    if (!presenceMarked) {
+      presence.agentConnected(machineId);
+      presenceMarked = true;
+    }
+
+    const input: RegisterMachineInput = {
+      machineId: msg.machineId,
+      agentVersion: msg.agentVersion,
+      backend: msg.backend,
+      outputs: msg.outputs,
+    };
+
+    try {
+      switch (decision.kind) {
+        case "open":
+        case "admit": {
+          // OPEN MODE auto-approve, OR an approved machine (re)connecting. If a credential is being
+          // re-issued (token re-enrol of an approved machine), persist its hash + announce it first.
+          const credentialHash = decision.credential ? hashCredential(decision.credential) : undefined;
+          const { changed, assignments } = await control.registerMachine(input, credentialHash);
+          if (decision.credential) {
+            sendEnrolled(msg.machineId, decision.credential, "approved");
+          }
+          sendApply(msg.machineId, assignments);
+          log.info(
+            {
+              event: "agent.hello",
+              mode: enrollment.open ? "open" : "gated",
+              decision: decision.kind,
+              reissued: Boolean(decision.credential),
+              machineId: msg.machineId,
+              agentVersion: msg.agentVersion,
+              backend: msg.backend,
+              outputs: msg.outputs.length,
+              screens: assignments.map((a) => a.screenId),
+              revision: control.state.revision,
+              changed,
+            },
+            "agent admitted",
+          );
+          break;
+        }
+
+        case "enroll-pending": {
+          // GATED first contact: create the machine pending, persist outputs + the new credential
+          // hash, hand the agent its durable credential, then park it pending. No screens, no apply.
+          const credential = decision.credential ?? "";
+          await control.enrollPending(input, hashCredential(credential));
+          sendEnrolled(msg.machineId, credential, "pending");
+          sendPending(decision.reason);
+          log.info(
+            {
+              event: "agent.enrolled",
+              machineId: msg.machineId,
+              outputs: msg.outputs.length,
+              status: "pending",
+            },
+            "new machine enrolled — awaiting operator approval",
+          );
+          break;
+        }
+
+        case "pending": {
+          // Recognised but still pending. A credential present here is a token re-enrol of a pending
+          // machine (lost its credential): persist the new hash + announce it before parking.
+          if (decision.credential) {
+            await control.setMachineCredential(
+              msg.machineId,
+              hashCredential(decision.credential),
+              msg.outputs,
+            );
+            sendEnrolled(msg.machineId, decision.credential, "pending");
+          } else {
+            await control.touchMachine(msg.machineId, msg.outputs);
+          }
+          sendPending(decision.reason);
+          log.info(
+            {
+              event: "agent.pending",
+              machineId: msg.machineId,
+              reissued: Boolean(decision.credential),
+            },
+            "agent pending — awaiting operator approval",
+          );
+          break;
+        }
+      }
+
+      // A machine came online (and possibly new screens / a status change) — refresh the admin view.
+      broadcaster.broadcast();
+    } catch (err) {
+      log.error(
+        { event: "agent.hello.error", machineId: msg.machineId, decision: decision.kind, err: String(err) },
+        "failed to process agent hello",
+      );
+    }
+  }
 
   ws.on("message", (data: RawData) => {
     let msg: AgentMessage;
@@ -104,48 +280,7 @@ function handleAgent(
     }
 
     if (msg.t === "agent/hello") {
-      machineId = msg.machineId;
-      if (!presenceMarked) {
-        presence.agentConnected(machineId);
-        presenceMarked = true;
-      }
-      void (async () => {
-        try {
-          const { changed, assignments } = await control.registerMachine({
-            machineId: msg.machineId,
-            agentVersion: msg.agentVersion,
-            backend: msg.backend,
-            outputs: msg.outputs,
-          });
-          const apply = ServerToAgentApply.parse({
-            t: "server/apply",
-            revision: control.state.revision,
-            machineId: msg.machineId,
-            screens: assignments,
-          });
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(apply));
-          log.info(
-            {
-              event: "agent.hello",
-              machineId: msg.machineId,
-              agentVersion: msg.agentVersion,
-              backend: msg.backend,
-              outputs: msg.outputs.length,
-              screens: assignments.map((a) => a.screenId),
-              revision: control.state.revision,
-              changed,
-            },
-            "agent registered",
-          );
-          // A machine (online) and possibly new screens — refresh the admin view.
-          broadcaster.broadcast();
-        } catch (err) {
-          log.error(
-            { event: "agent.register.error", machineId: msg.machineId, err: String(err) },
-            "failed to register machine",
-          );
-        }
-      })();
+      void onHello(msg);
     } else if (msg.t === "agent/status") {
       log.info(
         { event: "agent.status", machineId: msg.machineId, observedRevision: msg.observedRevision },
@@ -161,6 +296,7 @@ function handleAgent(
   });
 
   ws.on("close", (code) => {
+    if (machineId && hubRegistered) agentHub.remove(machineId, ws);
     if (machineId && presenceMarked) {
       presence.agentDisconnected(machineId);
       broadcaster.broadcast();

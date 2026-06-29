@@ -10,12 +10,20 @@
  *   POST /api/v1/screens/:screenId/rename     -> rename + persist + broadcast; 404 unknown
  *   POST /api/v1/screens/:screenId/ident      -> server/ident-pulse to that screen; 404 unknown
  *   POST /api/v1/machines/:machineId/ident    -> ident every screen on a machine; 404 unknown
+ *
+ * Phase 2b operator routes (enrollment):
+ *   POST /api/v1/machines/:machineId/approve  -> pending→approved; create screens; live server/apply
+ *                                                if the agent is connected; broadcast; 404 unknown
+ *   POST /api/v1/machines/:machineId/reject   -> status→rejected; server/rejected + close if connected;
+ *                                                broadcast; optional body {reason?}; 404 unknown
  */
 import { z } from "zod";
 
 import {
   IdentBody,
   RenameScreenBody,
+  ServerToAgentApply,
+  ServerToAgentRejected,
   ServerToPlayerIdent,
   ServerToPlayerRender,
   Surface,
@@ -24,18 +32,20 @@ import type { FastifyInstance } from "fastify";
 import type { Screen, ScreenSlice } from "@polyptych/protocol";
 
 import type { ControlPlane } from "./state";
-import type { PlayerHub } from "./hub";
+import type { AgentHub, PlayerHub } from "./hub";
 import type { AdminBroadcaster } from "./admin";
 
 const ScreenParams = z.object({ screenId: z.string().min(1) });
 const MachineParams = z.object({ machineId: z.string().min(1) });
 const SurfacesBody = z.object({ surfaces: z.array(Surface) });
 const DemoWebBody = z.object({ screenId: z.string().min(1), url: z.string().url() });
+const RejectBody = z.object({ reason: z.string().optional() });
 
 export function registerRestRoutes(
   fastify: FastifyInstance,
   control: ControlPlane,
   hub: PlayerHub,
+  agentHub: AgentHub,
   broadcaster: AdminBroadcaster,
 ): void {
   function pushRender(screenId: string, slice: ScreenSlice): number {
@@ -230,6 +240,88 @@ export function registerRestRoutes(
       on: body.data.on,
       screens: screens.map((s) => s.id),
       delivered,
+    };
+  });
+
+  // ── Phase 2b operator routes (enrollment) ─────────────────────────────────────
+
+  // POST /api/v1/machines/:machineId/approve  -> pending → approved; create screens; live apply.
+  fastify.post("/api/v1/machines/:machineId/approve", async (request, reply) => {
+    const params = MachineParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+
+    const result = await control.approveMachine(params.data.machineId);
+    if (!result) {
+      return reply.code(404).send({ error: `unknown machine: ${params.data.machineId}` });
+    }
+
+    // Live admit: if the agent is connected NOW, push it server/apply for its (new) screens.
+    const apply = ServerToAgentApply.parse({
+      t: "server/apply",
+      revision: control.state.revision,
+      machineId: params.data.machineId,
+      screens: result.assignments,
+    });
+    const delivered = agentHub.send(params.data.machineId, apply);
+
+    fastify.log.info(
+      {
+        event: "machine.approve",
+        machineId: params.data.machineId,
+        screens: result.assignments.map((a) => a.screenId),
+        revision: control.state.revision,
+        changed: result.changed,
+        delivered,
+      },
+      "machine approved",
+    );
+    broadcaster.broadcast();
+    return {
+      ok: true,
+      machineId: params.data.machineId,
+      status: "approved",
+      screens: result.assignments.map((a) => a.screenId),
+      revision: control.state.revision,
+      delivered,
+    };
+  });
+
+  // POST /api/v1/machines/:machineId/reject  { reason? }  -> status → rejected; close if connected.
+  fastify.post("/api/v1/machines/:machineId/reject", async (request, reply) => {
+    const params = MachineParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+    // Body is optional; tolerate an absent/empty body, only read a {reason?} when present.
+    const parsedBody = RejectBody.safeParse(request.body ?? {});
+    const reason = parsedBody.success ? parsedBody.data.reason : undefined;
+
+    const ok = await control.rejectMachine(params.data.machineId);
+    if (!ok) {
+      return reply.code(404).send({ error: `unknown machine: ${params.data.machineId}` });
+    }
+
+    // If the agent is connected NOW, tell it why and close its socket — it will never be admitted.
+    const rejected = ServerToAgentRejected.parse({
+      t: "server/rejected",
+      reason: reason ?? "rejected by operator",
+    });
+    const delivered = agentHub.send(params.data.machineId, rejected);
+    const closed = agentHub.close(params.data.machineId);
+
+    fastify.log.info(
+      { event: "machine.reject", machineId: params.data.machineId, reason, delivered, closed },
+      "machine rejected",
+    );
+    broadcaster.broadcast();
+    return {
+      ok: true,
+      machineId: params.data.machineId,
+      status: "rejected",
+      delivered,
+      closed,
     };
   });
 }

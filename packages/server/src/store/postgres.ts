@@ -16,7 +16,7 @@
  */
 import postgres from "postgres";
 
-import { DisplayBackend, Geometry, Output, Surface } from "@polyptych/protocol";
+import { DisplayBackend, EnrollmentStatus, Geometry, Output, Surface } from "@polyptych/protocol";
 
 import type {
   PersistedContent,
@@ -34,6 +34,8 @@ interface MachineRow {
   agent_version: string | null;
   backend: string | null;
   outputs: unknown;
+  status: string | null;
+  credential_hash: string | null;
   last_seen: Date | null;
 }
 
@@ -70,14 +72,19 @@ export class PostgresStore implements Store {
     const sql = this.sql;
     await sql`
       CREATE TABLE IF NOT EXISTS machines (
-        id            text PRIMARY KEY,
-        label         text NOT NULL,
-        agent_version text,
-        backend       text,
-        outputs       jsonb NOT NULL DEFAULT '[]'::jsonb,
-        last_seen     timestamptz
+        id              text PRIMARY KEY,
+        label           text NOT NULL,
+        agent_version   text,
+        backend         text,
+        outputs         jsonb NOT NULL DEFAULT '[]'::jsonb,
+        status          text NOT NULL DEFAULT 'approved',
+        credential_hash text,
+        last_seen       timestamptz
       )
     `;
+    // Idempotent migration for databases created before Phase 2b: existing rows default to 'approved'.
+    await sql`ALTER TABLE machines ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'approved'`;
+    await sql`ALTER TABLE machines ADD COLUMN IF NOT EXISTS credential_hash text`;
     await sql`
       CREATE TABLE IF NOT EXISTS screens (
         id            text PRIMARY KEY,
@@ -108,7 +115,7 @@ export class PostgresStore implements Store {
   async load(): Promise<PersistedState> {
     const sql = this.sql;
     const [machineRows, screenRows, contentRows, metaRows] = await Promise.all([
-      sql<MachineRow[]>`SELECT id, label, agent_version, backend, outputs, last_seen FROM machines`,
+      sql<MachineRow[]>`SELECT id, label, agent_version, backend, outputs, status, credential_hash, last_seen FROM machines`,
       sql<ScreenRow[]>`SELECT id, friendly_name, machine_id, connector FROM screens`,
       sql<ContentRow[]>`SELECT screen_id, canvas, surfaces FROM screen_content`,
       sql<MetaRow[]>`SELECT revision FROM meta WHERE id = 1`,
@@ -117,12 +124,16 @@ export class PostgresStore implements Store {
     const machines: PersistedMachine[] = machineRows.map((row) => {
       const outputs = Output.array().safeParse(row.outputs);
       const backend = DisplayBackend.safeParse(row.backend);
+      const status = EnrollmentStatus.safeParse(row.status);
       return {
         id: row.id,
         label: row.label,
         agentVersion: row.agent_version ?? undefined,
         backend: backend.success ? backend.data : undefined,
         outputs: outputs.success ? outputs.data : [],
+        // Legacy rows (NULL) and anything unrecognised degrade to `approved`.
+        status: status.success ? status.data : "approved",
+        credentialHash: row.credential_hash ?? undefined,
         lastSeen: row.last_seen ? row.last_seen.toISOString() : undefined,
       };
     });
@@ -152,22 +163,31 @@ export class PostgresStore implements Store {
   async upsertMachine(machine: PersistedMachine): Promise<void> {
     const sql = this.sql;
     await sql`
-      INSERT INTO machines (id, label, agent_version, backend, outputs, last_seen)
+      INSERT INTO machines (id, label, agent_version, backend, outputs, status, credential_hash, last_seen)
       VALUES (
         ${machine.id},
         ${machine.label},
         ${machine.agentVersion ?? null},
         ${machine.backend ?? null},
         ${sql.json(machine.outputs)},
+        ${machine.status ?? "approved"},
+        ${machine.credentialHash ?? null},
         ${machine.lastSeen ? new Date(machine.lastSeen) : null}
       )
       ON CONFLICT (id) DO UPDATE SET
-        label         = EXCLUDED.label,
-        agent_version = EXCLUDED.agent_version,
-        backend       = EXCLUDED.backend,
-        outputs       = EXCLUDED.outputs,
-        last_seen     = EXCLUDED.last_seen
+        label           = EXCLUDED.label,
+        agent_version   = EXCLUDED.agent_version,
+        backend         = EXCLUDED.backend,
+        outputs         = EXCLUDED.outputs,
+        status          = EXCLUDED.status,
+        credential_hash = EXCLUDED.credential_hash,
+        last_seen       = EXCLUDED.last_seen
     `;
+  }
+
+  async setMachineStatus(id: string, status: EnrollmentStatus): Promise<void> {
+    const sql = this.sql;
+    await sql`UPDATE machines SET status = ${status} WHERE id = ${id}`;
   }
 
   async upsertScreen(screen: PersistedScreen): Promise<void> {

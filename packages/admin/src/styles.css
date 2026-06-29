@@ -131,6 +131,30 @@ body {
   opacity: 0.4;
 }
 
+/* Machines-awaiting-approval pill — surfaces pending enrollments at a glance. */
+.pending-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(242, 193, 78, 0.14);
+  border: 1px solid rgba(242, 193, 78, 0.42);
+  color: #ffe6a8;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.pending-pill::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pending);
+  animation: blink 1s steps(2, jump-none) infinite;
+}
+
 /* ── Status dots ─────────────────────────────────────────────────────────── */
 .dot {
   flex: none;
@@ -433,4 +457,129 @@ body {
   font-size: 13px;
   color: var(--text-faint);
   max-width: 38ch;
+}
+
+/* ── Enrollment status (Phase 2b) ──────────────────────────────────────────── */
+/* Card-state treatments. Declared AFTER `.machine--offline` so a rejected machine wins on opacity
+ * even when it is also offline. */
+.machine--pending {
+  border-color: rgba(242, 193, 78, 0.5);
+  box-shadow:
+    inset 0 0 0 1px rgba(242, 193, 78, 0.16),
+    0 0 26px rgba(242, 193, 78, 0.07);
+}
+
+.machine--rejected {
+  opacity: 0.62;
+  border-color: rgba(224, 83, 61, 0.34);
+}
+
+.machine--rejected .machine-head {
+  background: linear-gradient(180deg, rgba(224, 83, 61, 0.05), transparent);
+}
+
+.machine-label-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* The prominent per-machine enrollment badge. */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.status-badge--approved {
+  background: rgba(56, 224, 138, 0.12);
+  border: 1px solid rgba(56, 224, 138, 0.34);
+  color: #8ff0bd;
+  text-transform: capitalize;
+}
+
+.status-badge--pending {
+  background: rgba(242, 193, 78, 0.15);
+  border: 1px solid rgba(242, 193, 78, 0.45);
+  color: #ffe6a8;
+}
+
+.status-badge--rejected {
+  background: rgba(224, 83, 61, 0.15);
+  border: 1px solid rgba(224, 83, 61, 0.45);
+  color: #ffb3a6;
+  text-transform: capitalize;
+}
+
+/* The pending / rejected enrollment gate that replaces the screens list in the card body. */
+.machine-gate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 16px 18px;
+}
+
+.machine-gate-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 280px;
+}
+
+.machine-gate-text strong {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.machine-gate-text span {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.machine-gate--pending .machine-gate-text strong {
+  color: #ffe6a8;
+}
+
+.machine-gate--rejected .machine-gate-text strong {
+  color: #ffb3a6;
+}
+
+.machine-gate-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+/* Approve / reject action buttons (extend the shared `.btn`). */
+.btn--approve:not(:disabled) {
+  border-color: rgba(56, 224, 138, 0.45);
+  background: rgba(56, 224, 138, 0.14);
+  color: #b6f5d4;
+}
+
+.btn--approve:hover:not(:disabled) {
+  background: rgba(56, 224, 138, 0.24);
+  border-color: rgba(56, 224, 138, 0.65);
+}
+
+.btn--reject:not(:disabled) {
+  border-color: rgba(224, 83, 61, 0.45);
+  background: rgba(224, 83, 61, 0.12);
+  color: #ffc2b6;
+}
+
+.btn--reject:hover:not(:disabled) {
+  background: rgba(224, 83, 61, 0.22);
+  border-color: rgba(224, 83, 61, 0.65);
 }

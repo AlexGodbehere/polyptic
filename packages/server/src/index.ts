@@ -13,7 +13,8 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 
 import { AdminBroadcaster, AdminHub, Presence } from "./admin";
-import { PlayerHub } from "./hub";
+import { Enrollment } from "./enroll";
+import { AgentHub, PlayerHub } from "./hub";
 import { registerRestRoutes } from "./rest";
 import { ControlPlane } from "./state";
 import { createStore } from "./store";
@@ -38,7 +39,11 @@ await store.migrate();
 const control = new ControlPlane(store);
 await control.init();
 
+// ── Enrollment policy (Phase 2b): OPEN MODE when POLYPTYCH_BOOTSTRAP_TOKEN is unset. ──
+const enrollment = Enrollment.fromEnv();
+
 const hub = new PlayerHub();
+const agentHub = new AgentHub();
 const adminHub = new AdminHub();
 const presence = new Presence();
 const broadcaster = new AdminBroadcaster({ control, playerHub: hub, presence, adminHub, log: fastify.log });
@@ -48,8 +53,34 @@ await fastify.register(cors, {
   methods: ["GET", "POST", "OPTIONS"],
 });
 
-registerRestRoutes(fastify, control, hub, broadcaster);
-attachWebSockets({ server: fastify.server, control, hub, adminHub, presence, broadcaster, log: fastify.log });
+registerRestRoutes(fastify, control, hub, agentHub, broadcaster);
+attachWebSockets({
+  server: fastify.server,
+  control,
+  enrollment,
+  hub,
+  agentHub,
+  adminHub,
+  presence,
+  broadcaster,
+  log: fastify.log,
+});
+
+// Prominent boot banner: OPEN MODE auto-approves every agent (dev default) — make it loud.
+if (enrollment.open) {
+  fastify.log.warn(
+    { event: "enrollment.open" },
+    "⚠️  ENROLLMENT IS OPEN: POLYPTYCH_BOOTSTRAP_TOKEN is unset — every agent that connects is " +
+      "auto-registered AND auto-approved (Phase 2a behaviour). Set POLYPTYCH_BOOTSTRAP_TOKEN to " +
+      "require a bootstrap token + operator approval (gated enrollment).",
+  );
+} else {
+  fastify.log.info(
+    { event: "enrollment.gated" },
+    "enrollment GATED: agents must present the bootstrap token (first contact) or a durable " +
+      "credential; new machines appear pending and await operator approval.",
+  );
+}
 
 async function shutdown(signal: string): Promise<void> {
   fastify.log.info({ event: "server.shutdown", signal }, "shutting down");
@@ -79,6 +110,7 @@ try {
       corsOrigin: CORS_ORIGIN,
       playerBaseUrl: PLAYER_BASE_URL,
       store: storeKind,
+      enrollment: enrollment.open ? "open" : "gated",
       revision: control.state.revision,
       screens: control.getScreens().length,
       machines: control.getMachines().length,

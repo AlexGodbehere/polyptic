@@ -6,6 +6,7 @@
  * deep-cloned on the way in and out so callers can never mutate the store's copy by reference —
  * mirroring the isolation a real database gives you.
  */
+import type { EnrollmentStatus } from "@polyptych/protocol";
 import type {
   PersistedContent,
   PersistedMachine,
@@ -39,6 +40,11 @@ export class MemoryStore implements Store {
 
   async upsertMachine(machine: PersistedMachine): Promise<void> {
     this.machines.set(machine.id, clone(machine));
+  }
+
+  async setMachineStatus(id: string, status: EnrollmentStatus): Promise<void> {
+    const machine = this.machines.get(id);
+    if (machine) machine.status = status;
   }
 
   async upsertScreen(screen: PersistedScreen): Promise<void> {

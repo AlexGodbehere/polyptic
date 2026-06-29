@@ -5,14 +5,21 @@
  * registry. It knows nothing about sockets or HTTP — it is state + mutations + write-through.
  *
  * Persistence (Phase 2a): on `init()` it LOADs the persisted registry from the Store into the
- * in-memory working copy and RESUMES the revision; every mutation (registerMachine,
- * setScreenSurfaces, setDemoWeb, renameScreen) WRITES THROUGH to the Store before returning, so a
- * rename — and everything else — survives a server restart. The in-memory copy + revision semantics
- * are unchanged from Phase 1; the Store is added underneath.
+ * in-memory working copy and RESUMES the revision; every mutation WRITES THROUGH to the Store before
+ * returning, so a rename — and everything else — survives a server restart.
+ *
+ * Enrollment (Phase 2b): a machine now carries an `EnrollmentStatus` and (off-band, never on the
+ * wire `Machine`) a credential hash. Three registration paths replace the single Phase 2a one:
+ *   - `registerMachine`  — OPEN MODE / admit: status `approved`, ensure a Screen per output, apply.
+ *   - `enrollPending`    — GATED first contact: status `pending`, persist outputs, NO screens.
+ *   - `approveMachine`   — operator approval: flip to `approved` + create screens from the persisted
+ *                          outputs, returning assignments for a live `server/apply`.
+ * `rejectMachine` flips status to `rejected`. The credential hash is held in a side map (the wire
+ * `Machine` never carries it) and flows to/from storage via the `PersistedMachine` DTO.
  *
  * Screen ids are assigned sequentially ("screen-1", "screen-2", …) GLOBALLY across machines in
- * registration order. The mapping is stable per (machineId, connector): a reconnecting machine
- * reuses its existing screen ids, and the counter resumes past the highest persisted id on boot.
+ * registration/approval order. The mapping is stable per (machineId, connector): a reconnecting
+ * machine reuses its existing screen ids, and the counter resumes past the highest persisted id.
  */
 import { WebSurface } from "@polyptych/protocol";
 import type {
@@ -57,15 +64,12 @@ export interface RegisterMachineResult {
   assignments: ScreenAssignment[];
 }
 
-function toPersistedMachine(machine: Machine): PersistedMachine {
-  return {
-    id: machine.id,
-    label: machine.label,
-    agentVersion: machine.agentVersion,
-    backend: machine.backend,
-    outputs: machine.outputs,
-    lastSeen: machine.lastSeen,
-  };
+/** Internal result of ensuring a Screen (+ slice) exists for each of a machine's outputs. */
+interface EnsureScreensResult {
+  assignments: ScreenAssignment[];
+  newScreens: Screen[];
+  touchedSlices: ScreenSlice[];
+  changed: boolean;
 }
 
 export class ControlPlane {
@@ -78,9 +82,25 @@ export class ControlPlane {
   };
 
   private readonly machines = new Map<string, Machine>();
+  /** machineId → sha256(credential) hex. Kept off the wire `Machine`; persisted via the DTO. */
+  private readonly credentialHashes = new Map<string, string>();
   private screenCounter = 0;
 
   constructor(private readonly store: Store) {}
+
+  /** Project the in-memory machine (+ its side-mapped credential hash) onto the storage DTO. */
+  private toPersistedMachine(machine: Machine): PersistedMachine {
+    return {
+      id: machine.id,
+      label: machine.label,
+      agentVersion: machine.agentVersion,
+      backend: machine.backend,
+      outputs: machine.outputs,
+      status: machine.status,
+      credentialHash: this.credentialHashes.get(machine.id),
+      lastSeen: machine.lastSeen,
+    };
+  }
 
   /**
    * Load persisted registry state into memory and resume the revision + screen counter.
@@ -98,8 +118,11 @@ export class ControlPlane {
         agentVersion: m.agentVersion,
         backend: m.backend,
         outputs: m.outputs,
+        // Legacy rows without a status load as `approved` (Phase 2a parity).
+        status: m.status ?? "approved",
         lastSeen: m.lastSeen,
       });
+      if (m.credentialHash) this.credentialHashes.set(m.id, m.credentialHash);
     }
 
     for (const s of persisted.screens) {
@@ -148,29 +171,19 @@ export class ControlPlane {
   }
 
   /**
-   * Upsert a machine and ensure a Screen (+ empty slice) exists per output. Write-through: persists
-   * the machine, any newly created screens/content, and the revision (if it changed).
-   * Returns the per-output assignments for the `server/apply` reply.
+   * Ensure a Screen (+ empty slice) exists for each output, creating + healing as needed. Pure in
+   * memory: the caller is responsible for write-through. `changed` is true if a screen or slice was
+   * created/healed (so the caller bumps + persists the revision).
    */
-  async registerMachine(input: RegisterMachineInput): Promise<RegisterMachineResult> {
-    const machine: Machine = {
-      id: input.machineId,
-      label: input.machineId,
-      agentVersion: input.agentVersion,
-      backend: input.backend,
-      outputs: input.outputs,
-      lastSeen: new Date().toISOString(),
-    };
-    this.machines.set(input.machineId, machine);
-
+  private ensureScreens(machineId: string, outputs: Output[]): EnsureScreensResult {
     let changed = false;
     const assignments: ScreenAssignment[] = [];
     const newScreens: Screen[] = [];
     const touchedSlices: ScreenSlice[] = [];
 
-    for (const output of input.outputs) {
+    for (const output of outputs) {
       let screen = this.state.screens.find(
-        (s) => s.machineId === input.machineId && s.connector === output.connector,
+        (s) => s.machineId === machineId && s.connector === output.connector,
       );
 
       if (!screen) {
@@ -179,7 +192,7 @@ export class ControlPlane {
         screen = {
           id,
           friendlyName: `Screen ${this.screenCounter}`,
-          machineId: input.machineId,
+          machineId,
           connector: output.connector,
         } satisfies Screen;
         this.state.screens.push(screen);
@@ -211,11 +224,12 @@ export class ControlPlane {
       });
     }
 
-    if (changed) this.bumpRevision();
+    return { assignments, newScreens, touchedSlices, changed };
+  }
 
-    // Write-through: machine (lastSeen always changes), new screens, new/healed content, revision.
-    await this.store.upsertMachine(toPersistedMachine(machine));
-    for (const s of newScreens) {
+  /** Write-through newly created screens + their (empty) content rows. */
+  private async persistScreens(result: EnsureScreensResult): Promise<void> {
+    for (const s of result.newScreens) {
       await this.store.upsertScreen({
         id: s.id,
         friendlyName: s.friendlyName,
@@ -223,16 +237,133 @@ export class ControlPlane {
         connector: s.connector,
       });
     }
-    for (const slice of touchedSlices) {
+    for (const slice of result.touchedSlices) {
       await this.store.upsertContent({
         screenId: slice.screenId,
         canvas: slice.canvas,
         surfaces: slice.surfaces,
       });
     }
-    if (changed) await this.store.setRevision(this.state.revision);
+  }
 
-    return { changed, assignments };
+  /**
+   * OPEN MODE / admit path. Upsert an `approved` machine and ensure a Screen (+ empty slice) exists
+   * per output. Write-through: persists the machine, any newly created screens/content, and the
+   * revision (if it changed). Returns the per-output assignments for the `server/apply` reply.
+   *
+   * `credentialHash`, when given (a token re-enrol of an approved machine), is stored so the machine
+   * row persists the freshly issued credential alongside the screen work.
+   */
+  async registerMachine(
+    input: RegisterMachineInput,
+    credentialHash?: string,
+  ): Promise<RegisterMachineResult> {
+    if (credentialHash) this.credentialHashes.set(input.machineId, credentialHash);
+
+    const existing = this.machines.get(input.machineId);
+    const machine: Machine = {
+      id: input.machineId,
+      label: existing?.label ?? input.machineId,
+      agentVersion: input.agentVersion,
+      backend: input.backend,
+      outputs: input.outputs,
+      status: "approved",
+      lastSeen: new Date().toISOString(),
+    };
+    this.machines.set(input.machineId, machine);
+
+    const ensured = this.ensureScreens(input.machineId, input.outputs);
+    if (ensured.changed) this.bumpRevision();
+
+    await this.store.upsertMachine(this.toPersistedMachine(machine));
+    await this.persistScreens(ensured);
+    if (ensured.changed) await this.store.setRevision(this.state.revision);
+
+    return { changed: ensured.changed, assignments: ensured.assignments };
+  }
+
+  /**
+   * GATED first contact. Create (or refresh) the machine as `pending`, persist its reported outputs
+   * and the issued credential hash, but create NO screens and do NOT bump the revision — pending
+   * machines hold no desired state until an operator approves them.
+   */
+  async enrollPending(input: RegisterMachineInput, credentialHash: string): Promise<void> {
+    this.credentialHashes.set(input.machineId, credentialHash);
+    const existing = this.machines.get(input.machineId);
+    const machine: Machine = {
+      id: input.machineId,
+      label: existing?.label ?? input.machineId,
+      agentVersion: input.agentVersion,
+      backend: input.backend,
+      outputs: input.outputs,
+      status: "pending",
+      lastSeen: new Date().toISOString(),
+    };
+    this.machines.set(input.machineId, machine);
+    await this.store.upsertMachine(this.toPersistedMachine(machine));
+  }
+
+  /**
+   * Re-issue a credential for an EXISTING machine without changing its status or creating screens
+   * (a token re-enrol of a still-pending machine, or refreshing a pending machine's reported
+   * outputs on reconnect). Write-through. No-op if the machine is unknown.
+   */
+  async setMachineCredential(
+    machineId: string,
+    credentialHash: string,
+    outputs?: Output[],
+  ): Promise<void> {
+    this.credentialHashes.set(machineId, credentialHash);
+    const machine = this.machines.get(machineId);
+    if (!machine) return;
+    machine.lastSeen = new Date().toISOString();
+    if (outputs) machine.outputs = outputs;
+    await this.store.upsertMachine(this.toPersistedMachine(machine));
+  }
+
+  /**
+   * Refresh a known machine's lastSeen (+ reported outputs) on reconnect, without touching status or
+   * screens. Used when a recognised pending machine re-presents a valid credential. No-op if unknown.
+   */
+  async touchMachine(machineId: string, outputs: Output[]): Promise<void> {
+    const machine = this.machines.get(machineId);
+    if (!machine) return;
+    machine.lastSeen = new Date().toISOString();
+    machine.outputs = outputs;
+    await this.store.upsertMachine(this.toPersistedMachine(machine));
+  }
+
+  /**
+   * Operator approval. Flip the machine to `approved` and create a Screen (+ empty slice) per its
+   * PERSISTED output, returning assignments for a live `server/apply`. Write-through (status, any
+   * new screens/content, revision). Returns null if the machine is unknown; idempotent if already
+   * approved (returns the existing screens' assignments).
+   */
+  async approveMachine(machineId: string): Promise<RegisterMachineResult | null> {
+    const machine = this.machines.get(machineId);
+    if (!machine) return null;
+
+    machine.status = "approved";
+    const ensured = this.ensureScreens(machineId, machine.outputs);
+    if (ensured.changed) this.bumpRevision();
+
+    await this.store.setMachineStatus(machineId, "approved");
+    await this.persistScreens(ensured);
+    if (ensured.changed) await this.store.setRevision(this.state.revision);
+
+    return { changed: ensured.changed, assignments: ensured.assignments };
+  }
+
+  /**
+   * Operator rejection. Flip the machine to `rejected` (terminal — it will never be admitted) and
+   * write-through. Returns false if the machine is unknown.
+   */
+  async rejectMachine(machineId: string): Promise<boolean> {
+    const machine = this.machines.get(machineId);
+    if (!machine) return false;
+    machine.status = "rejected";
+    await this.store.setMachineStatus(machineId, "rejected");
+    return true;
   }
 
   getScreens(): Screen[] {
@@ -249,6 +380,11 @@ export class ControlPlane {
 
   getMachine(machineId: string): Machine | undefined {
     return this.machines.get(machineId);
+  }
+
+  /** The stored credential hash for a machine, if it has ever been issued one. */
+  getCredentialHash(machineId: string): string | undefined {
+    return this.credentialHashes.get(machineId);
   }
 
   /** The stored slice for a screen, if any. */

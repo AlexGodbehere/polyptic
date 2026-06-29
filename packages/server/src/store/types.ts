@@ -13,7 +13,7 @@
  * so values flow between storage and the wire without translation, but they are declared here
  * explicitly to keep storage decoupled from the message layer.
  */
-import type { DisplayBackend, Geometry, Output, Surface } from "@polyptych/protocol";
+import type { DisplayBackend, EnrollmentStatus, Geometry, Output, Surface } from "@polyptych/protocol";
 
 /** A machine row: device plumbing + the outputs it last reported. */
 export interface PersistedMachine {
@@ -22,6 +22,13 @@ export interface PersistedMachine {
   agentVersion?: string;
   backend?: DisplayBackend;
   outputs: Output[];
+  /**
+   * Enrollment lifecycle (Phase 2b). Undefined on legacy rows persisted before this column existed —
+   * the control plane loads those as `approved`.
+   */
+  status?: EnrollmentStatus;
+  /** sha256(credential) hex for the durable per-machine credential, if one has been issued. */
+  credentialHash?: string;
   /** ISO-8601 timestamp of the last agent hello. */
   lastSeen?: string;
 }
@@ -58,8 +65,10 @@ export interface Store {
   migrate(): Promise<void>;
   /** Load the full persisted snapshot on boot. */
   load(): Promise<PersistedState>;
-  /** Insert-or-update a machine row. */
+  /** Insert-or-update a machine row (incl. its enrollment status + credential hash). */
   upsertMachine(machine: PersistedMachine): Promise<void>;
+  /** Update only a machine's enrollment status (operator approve/reject). No-op if the row is absent. */
+  setMachineStatus(id: string, status: EnrollmentStatus): Promise<void>;
   /** Insert-or-update a screen row (incl. its friendly name). */
   upsertScreen(screen: PersistedScreen): Promise<void>;
   /** Insert-or-update a screen's content row (canvas + surfaces). */

@@ -2,7 +2,7 @@
 
 The remembered path. Fixed direction, flexible detail. Update the **CURRENT** marker as we go. Phases are sequenced by dependency, not by calendar.
 
-> **CURRENT: Phase 2a ✅ done → Phase 2b next.** Persistent **Postgres** registry, multi-machine, `/admin` channel + Admin UI, and **ident mode** all built + verified: full typecheck (6 pkgs) green, e2e **13/13**, and the persistence DoD proven against real Postgres (a rename survives a server restart). Next: Phase 2b (enrollment/claim + mTLS). **Note (D20):** Phase 3 is reshaped by the "murals" concept — operators drag/snap **screens** (independent of host) into spatial arrangements; a Screen gains a position and a **Mural/Wall** entity is introduced.
+> **CURRENT: Phase 2b ✅ done → Phase 3 (murals) next.** Enrollment/claim + durable per-machine credentials built + verified: full typecheck (6 pkgs) green, e2e **23/23** (Phase 1/2a regression + gated enrollment), and a Postgres capstone (gated enroll → approve → restart → credential persists → reconnect admitted; wrong token rejected). mTLS transport deferred to the deploy/hardening layer (D12). **Note (D20):** Phase 3 = the "murals" spatial canvas (UI design exploration in progress) — operators drag/snap **screens** (independent of host) into arrangements; a Screen gains a position and a **Mural/Wall** entity is introduced.
 
 ---
 
@@ -22,9 +22,9 @@ The thinnest end-to-end thing that proves the spine and the **instant** property
 Real Machine/Output/Screen/Scene registry in **PostgreSQL** (dev via `deploy/docker-compose.yml`), behind a `Store` interface (`PostgresStore` default; `MemoryStore` test double). Multiple machines × screens. A minimal **Admin UI** (`packages/admin`): live machines→screens list with connection status, **rename**, and an **ident** button. **Ident mode** flashes a screen's friendly name (the player overlay is already built). Promote the e2e harness into committed `bun test`.
 **DoD:** bring up Postgres + the stack; connect 2 machines; see both machines' screens in the Admin UI; click ident → the player flashes the name; rename a screen → persists across a server restart.
 
-## Phase 2b — Enrollment/claim + mTLS identity
-Outbound-WSS **enrollment**: agent dials with a one-time bootstrap token → appears **pending** → operator **claims/approves** in the Admin UI → durable identity. Harden agent↔server identity to **mTLS** client certs keyed to `/etc/machine-id` (D12).
-**DoD:** a fresh machine shows as pending; approving it admits its screens; an unknown/unapproved machine is rejected.
+## Phase 2b — Enrollment/claim + durable credential ✅ (done)
+Outbound-WSS **enrollment**: agent dials with a one-time bootstrap token → appears **pending** → operator **approves** in the Admin UI → durable per-machine **credential** (server stores only sha256; agent keeps the raw secret). Dev default is open-enrollment (auto-approve, with a boot warning); setting `POLYPTYCH_BOOTSTRAP_TOKEN` switches on gating. **mTLS transport is deferred** to the deploy/hardening layer (D12) — the credential model is the app-level seam mTLS client-certs drop into.
+**DoD met:** a fresh machine shows pending; approving admits its screens (live `server/apply`); an unknown/wrong-token/unapproved machine is rejected + disconnected. Verified by e2e (10 gated tests) + a Postgres restart capstone.
 
 ## Phase 3 — Murals (spatial canvas) + layout, scenes, adapters, instant fan-out
 **Murals (D20):** the Admin UI's primary workspace is a canvas where operators **drag + snap screens** (independent of host machine) into spatial arrangements. A Screen gains a position/size; introduce a **Mural/Wall** entity = a named, positioned set of screens. Content can **span adjacent screens**. Then: **Typed surfaces** + **content adapters** (web, dashboard/Grafana, image, video), named versioned **Scenes** capturing a whole composition, an **Admin UI** layout/scene editor, and atomic scene fan-out across all screens.
