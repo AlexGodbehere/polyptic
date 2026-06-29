@@ -9,7 +9,7 @@
  *   - `exec()`   — MUTATING commands. In dry-run they are logged (`[plan] would run: …`) and skipped.
  *
  * File writes are idempotent: identical content is a skip; a foreign pre-existing file is backed up
- * once to `<path>.pre-polyptych` (so `setup --uninstall` can restore it).
+ * once to `<path>.pre-polyptic` (so `setup --uninstall` can restore it).
  */
 import {
   chmodSync,
@@ -49,12 +49,12 @@ export interface WriteOptions {
   group?: string;
   /** Friendlier name used in logs (defaults to the path). */
   desc?: string;
-  /** Back up a pre-existing (foreign) file to `<path>.pre-polyptych` before overwriting. */
+  /** Back up a pre-existing (foreign) file to `<path>.pre-polyptic` before overwriting. */
   backupOriginal?: boolean;
 }
 
-/** Suffix used to preserve a file's pre-Polyptych contents for `--uninstall` restore. */
-export const PRE_BACKUP_SUFFIX = ".pre-polyptych";
+/** Suffix used to preserve a file's pre-Polyptic contents for `--uninstall` restore. */
+export const PRE_BACKUP_SUFFIX = ".pre-polyptic";
 
 function bufToStr(b: Buffer | string | undefined | null): string {
   if (b == null) return "";
@@ -227,7 +227,7 @@ export class Sys {
     this.log.ok(`removed ${path}`);
   }
 
-  /** Restore a `<path>.pre-polyptych` backup over `path`. Returns true if a backup existed. */
+  /** Restore a `<path>.pre-polyptic` backup over `path`. Returns true if a backup existed. */
   restoreBackup(path: string): boolean {
     const bak = path + PRE_BACKUP_SUFFIX;
     if (!existsSync(bak)) return false;

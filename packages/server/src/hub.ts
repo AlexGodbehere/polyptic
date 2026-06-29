@@ -11,7 +11,7 @@
  */
 import { WebSocket } from "ws";
 
-import type { ServerToAgentMessage, ServerToPlayerMessage } from "@polyptych/protocol";
+import type { ServerToAgentMessage, ServerToPlayerMessage } from "@polyptic/protocol";
 
 export class PlayerHub {
   private readonly byScreen = new Map<string, Set<WebSocket>>();

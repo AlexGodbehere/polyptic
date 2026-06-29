@@ -1,9 +1,9 @@
 {
-  "name": "@polyptych/protocol",
+  "name": "@polyptic/protocol",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Shared zod contracts for Polyptych — the single source of truth for all cross-process messages.",
+  "description": "Shared zod contracts for Polyptic — the single source of truth for all cross-process messages.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

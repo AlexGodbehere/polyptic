@@ -149,7 +149,7 @@ export async function requireTools(tools: string[]): Promise<void> {
   }
   if (missing.length > 0) {
     throw new Error(
-      `missing required tool(s): ${missing.join(", ")} — install them (see docs/DEPLOY.md / \`polyptych-agent setup\`) or fix PATH`,
+      `missing required tool(s): ${missing.join(", ")} — install them (see docs/DEPLOY.md / \`polyptic-agent setup\`) or fix PATH`,
     );
   }
 }

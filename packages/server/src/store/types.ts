@@ -1,5 +1,5 @@
 /**
- * Store interface + persisted DTOs for the Polyptych control plane.
+ * Store interface + persisted DTOs for the Polyptic control plane.
  *
  * The Store is the durable home of the registry: machines, screens (incl. their friendly name),
  * per-screen content (canvas + surfaces), and the global revision counter. The control plane keeps
@@ -13,7 +13,7 @@
  * so values flow between storage and the wire without translation, but they are declared here
  * explicitly to keep storage decoupled from the message layer.
  */
-import type { DisplayBackend, EnrollmentStatus, Geometry, Output, Surface } from "@polyptych/protocol";
+import type { DisplayBackend, EnrollmentStatus, Geometry, Output, Surface } from "@polyptic/protocol";
 
 /** A machine row: device plumbing + the outputs it last reported. */
 export interface PersistedMachine {

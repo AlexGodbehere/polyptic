@@ -1,7 +1,7 @@
 import { createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import type { JSX } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
-import type { Geometry, ServerToPlayerMessage, Surface } from "@polyptych/protocol";
+import type { Geometry, ServerToPlayerMessage, Surface } from "@polyptic/protocol";
 import { PlayerSocket, type ConnState } from "./ws";
 
 const SERVER_WS_URL = "ws://localhost:8080/player";

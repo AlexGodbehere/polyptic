@@ -1,6 +1,6 @@
-# Polyptych — architecture & developer reference
+# Polyptic — architecture & developer reference
 
-Build-facing companion to `README.md`. Polyptych is a **generic, vendor-neutral** display-wall / kiosk-fleet orchestrator. Nothing here depends on a specific stack; integrations (Grafana, Keycloak, …) are pluggable adapters, covered in *Example integration* at the end.
+Build-facing companion to `README.md`. Polyptic is a **generic, vendor-neutral** display-wall / kiosk-fleet orchestrator. Nothing here depends on a specific stack; integrations (Grafana, Keycloak, …) are pluggable adapters, covered in *Example integration* at the end.
 
 ## Desired-state model (sketch)
 
@@ -35,10 +35,10 @@ New integrations = new adapters; the core model never changes.
 
 ## Auth — two separate concerns (don't conflate)
 
-**Bucket A — content auth ("can the kiosk *see* the website?").** This is **website/browser level**, not Polyptych's. When the player iframes `https://grafana…`, the browser handles the session (cookies, OAuth redirects) exactly as on a laptop. Polyptych just points a tile at a URL. The only wrinkle is that a wall is *unattended* — no human to log in — so we provide ways to make the browser arrive **already authenticated**, without re-implementing anyone's login. Per-source strategies:
-`public` (do nothing) · `anonymous-viewer` (e.g. a Grafana anonymous org — nothing to do) · `reverse-proxy-header-injection` (a proxy in front of the source adds `Authorization:` because an iframe can't) · `persisted-session` (seed the kiosk browser profile with a session cookie once, persist via `--user-data-dir`) · `oidc` (pre-seeded/refreshed token). Polyptych's only role here is *config* — which URL/proxy a tile points at. Often: nothing. If a tile needs login and nothing is arranged, it simply shows that site's login page.
+**Bucket A — content auth ("can the kiosk *see* the website?").** This is **website/browser level**, not Polyptic's. When the player iframes `https://grafana…`, the browser handles the session (cookies, OAuth redirects) exactly as on a laptop. Polyptic just points a tile at a URL. The only wrinkle is that a wall is *unattended* — no human to log in — so we provide ways to make the browser arrive **already authenticated**, without re-implementing anyone's login. Per-source strategies:
+`public` (do nothing) · `anonymous-viewer` (e.g. a Grafana anonymous org — nothing to do) · `reverse-proxy-header-injection` (a proxy in front of the source adds `Authorization:` because an iframe can't) · `persisted-session` (seed the kiosk browser profile with a session cookie once, persist via `--user-data-dir`) · `oidc` (pre-seeded/refreshed token). Polyptic's only role here is *config* — which URL/proxy a tile points at. Often: nothing. If a tile needs login and nothing is arranged, it simply shows that site's login page.
 
-**Bucket B — Polyptych's own auth ("can a *person* reconfigure the wall?").** This **is** our application layer. The admin UI/API is OIDC-gated via standard discovery (any IdP) so randoms on the network can't take over the wall. Agent↔server identity is separate again: bootstrap token → mTLS cert keyed to `/etc/machine-id` (or OIDC client credentials).
+**Bucket B — Polyptic's own auth ("can a *person* reconfigure the wall?").** This **is** our application layer. The admin UI/API is OIDC-gated via standard discovery (any IdP) so randoms on the network can't take over the wall. Agent↔server identity is separate again: bootstrap token → mTLS cert keyed to `/etc/machine-id` (or OIDC client credentials).
 
 When we say "build the auth-strategy seam from day one," we mean Bucket A is a per-tile config field. Bucket B (admin OIDC) is its own thing (Phase 6).
 
@@ -64,7 +64,7 @@ power on
   → systemd → greetd [initial_session] autologin user=kiosk
   → exec sway   (outputs pinned: `output DP-1 position 0 0 resolution 1920x1080`)
   → systemctl --user start sway-session.target
-       ├─ polyptych-agent.service          (Restart=always)
+       ├─ polyptic-agent.service          (Restart=always)
        └─ chromium@<screen>.service × N     (Restart=always; one per output)
   no swayidle · output * dpms on · power is the smart plug's job
 ```
@@ -87,9 +87,9 @@ Before launch: sed-reset `exit_type`/`exited_cleanly` in `<profile>/Default/Pref
 
 ## Example integration — Grafana + Keycloak (reference deployment)
 
-This shows how a real deployment wires Polyptych to an existing stack. It is **illustrative**, not required by the product.
+This shows how a real deployment wires Polyptic to an existing stack. It is **illustrative**, not required by the product.
 
-- **Identity:** point Polyptych's admin OIDC at the existing IdP (e.g. Keycloak realm). Any compliant OIDC provider works.
+- **Identity:** point Polyptic's admin OIDC at the existing IdP (e.g. Keycloak realm). Any compliant OIDC provider works.
 - **Dashboards:** the Grafana adapter renders `d-solo` panels / `&kiosk` pages. For public demo content, use a dedicated Grafana **anonymous-Viewer org** (`[auth.anonymous] org_role=Viewer`, `[security] allow_embedding=true`) so the wall holds no credentials and is orthogonal to human OAuth login. For protected content, use the **reverse-proxy header-injection** auth strategy on an IP-allowlisted kiosk ingress.
-- **Hosting:** deploy `polyptych-server` via its Helm chart onto the same cluster (e.g. behind the existing Traefik ingress) or anywhere else that can reach the IdP and dashboards.
-- **Originating use case (AMRC):** Polyptych was conceived to drive the AMRC's ACS/Factory+ demo wall (Grafana 6.52.4 + an MQTT-traffic "visualiser" web app, Keycloak OIDC, Traefik). That validated the OIDC + dashboard-embedding paths — but Polyptych itself depends on none of it. The visualiser is just a `web-url`/`web-window` source like any other; if it sends framing-blocking headers it renders as a top-level window.
+- **Hosting:** deploy `polyptic-server` via its Helm chart onto the same cluster (e.g. behind the existing Traefik ingress) or anywhere else that can reach the IdP and dashboards.
+- **Originating use case (AMRC):** Polyptic was conceived to drive the AMRC's ACS/Factory+ demo wall (Grafana 6.52.4 + an MQTT-traffic "visualiser" web app, Keycloak OIDC, Traefik). That validated the OIDC + dashboard-embedding paths — but Polyptic itself depends on none of it. The visualiser is just a `web-url`/`web-window` source like any other; if it sends framing-blocking headers it renders as a top-level window.

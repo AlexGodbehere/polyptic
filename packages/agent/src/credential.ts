@@ -8,19 +8,19 @@
  * separate, later layer (D12 / deploy).
  *
  * Storage: one file per machine at
- *   `${POLYPTYCH_STATE_DIR ?? ($HOME + "/.polyptych")}/credential-<machineId>`
+ *   `${POLYPTIC_STATE_DIR ?? ($HOME + "/.polyptic")}/credential-<machineId>`
  * The directory is created on demand (0700) and the file written 0600 where the platform allows.
  */
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** Root directory for agent-local state. `POLYPTYCH_STATE_DIR` overrides `$HOME/.polyptych`. */
+/** Root directory for agent-local state. `POLYPTIC_STATE_DIR` overrides `$HOME/.polyptic`. */
 export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
-  const override = env.POLYPTYCH_STATE_DIR?.trim();
+  const override = env.POLYPTIC_STATE_DIR?.trim();
   if (override && override.length > 0) return override;
   const home = env.HOME && env.HOME.length > 0 ? env.HOME : homedir();
-  return join(home, ".polyptych");
+  return join(home, ".polyptic");
 }
 
 /** Absolute path to this machine's credential file. */

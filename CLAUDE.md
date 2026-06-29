@@ -1,9 +1,9 @@
-# Polyptych — Claude working guide
+# Polyptic — Claude working guide
 
 **Read this first every session**, then `docs/ROADMAP.md` (where we are + what's next) and `docs/DECISIONS.md` (locked calls — do not re-litigate). If a decision genuinely changes, update `docs/DECISIONS.md` with the new entry and reasoning.
 
 ## What this is
-Polyptych is a **generic, self-hostable** system to centrally orchestrate **walls of screens / fleets of display kiosks** from a web UI. Vendor-neutral. **Not based on ACS** — ACS is one example deployment that motivated it. Full narrative: `docs/DESIGN.md`. Build reference: `docs/ARCHITECTURE.md`.
+Polyptic is a **generic, self-hostable** system to centrally orchestrate **walls of screens / fleets of display kiosks** from a web UI. Vendor-neutral. **Not based on ACS** — ACS is one example deployment that motivated it. Full narrative: `docs/DESIGN.md`. Build reference: `docs/ARCHITECTURE.md`.
 
 ## Non-negotiables (the spirit — keep these true)
 1. **Screens are first-class and named; machines are plumbing.** The API/layout/scenes address named screens. Ident mode maps physical panels → screen identities.
@@ -23,10 +23,10 @@ Polyptych is a **generic, self-hostable** system to centrally orchestrate **wall
 
 ## Stack (locked — see DECISIONS.md)
 - **TypeScript everywhere**, ESM, **bun** workspaces, single `tsconfig.base.json`. Bun installs deps, runs TS natively (`bun --watch`), and serves the Vite player — no Node/pnpm/tsx.
-- **`@polyptych/protocol`** — shared zod contracts. **All cross-process messages are defined and validated here.** Change the contract here first.
-- **`@polyptych/server`** — Fastify + Postgres + `ws`; REST + WebSocket; Prometheus `/metrics`.
-- **`@polyptych/agent`** — Bun single binary; controls host via IPC sockets + child processes; `DisplayBackend` interface (`wayland-sway` | `x11-i3`, auto-detected).
-- **`@polyptych/player`** — SolidJS + Vite. (Admin UI also SolidJS.)
+- **`@polyptic/protocol`** — shared zod contracts. **All cross-process messages are defined and validated here.** Change the contract here first.
+- **`@polyptic/server`** — Fastify + Postgres + `ws`; REST + WebSocket; Prometheus `/metrics`.
+- **`@polyptic/agent`** — Bun single binary; controls host via IPC sockets + child processes; `DisplayBackend` interface (`wayland-sway` | `x11-i3`, auto-detected).
+- **`@polyptic/player`** — SolidJS + Vite. (Admin UI also SolidJS.)
 
 ## Repo layout
 ```

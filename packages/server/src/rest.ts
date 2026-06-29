@@ -30,9 +30,9 @@ import {
   ServerToPlayerIdent,
   ServerToPlayerRender,
   Surface,
-} from "@polyptych/protocol";
+} from "@polyptic/protocol";
 import type { FastifyInstance } from "fastify";
-import type { Screen, ScreenSlice } from "@polyptych/protocol";
+import type { Screen, ScreenSlice } from "@polyptic/protocol";
 
 import type { ControlPlane } from "./state";
 import type { AgentHub, PlayerHub } from "./hub";

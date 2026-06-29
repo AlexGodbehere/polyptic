@@ -1,8 +1,8 @@
-# sway configuration for a Polyptych kiosk.  ->  installed to /home/kiosk/.config/sway/config
+# sway configuration for a Polyptic kiosk.  ->  installed to /home/kiosk/.config/sway/config
 #
-# Source-of-truth note: `polyptych-agent setup` writes the LIVE file from this template; it replaces
-# the @POLYPTYCH_OUTPUTS@ marker with one `output ...` line per detected connector
-# (swaymsg -t get_outputs). This copy ships to /usr/share/polyptych/templates/ as setup's input.
+# Source-of-truth note: `polyptic-agent setup` writes the LIVE file from this template; it replaces
+# the @POLYPTIC_OUTPUTS@ marker with one `output ...` line per detected connector
+# (swaymsg -t get_outputs). This copy ships to /usr/share/polyptic/templates/ as setup's input.
 # Minimal by design: pin outputs, never blank, hand control to the agent.
 
 ### -- Outputs -------------------------------------------------------------------------------------
@@ -12,7 +12,7 @@
 # what setup generates for a two-panel box:
 #     output DP-1     position 0    0 resolution 1920x1080
 #     output HDMI-A-1 position 1920 0 resolution 1920x1080
-@POLYPTYCH_OUTPUTS@
+@POLYPTIC_OUTPUTS@
 
 # Never sleep, blank, or DPMS-off — a wall is always on (power is the smart plug's job, D-stack).
 output * dpms on
@@ -40,7 +40,7 @@ xwayland enable
 # rather than racing (sway `exec` lines otherwise fire concurrently).
 exec systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE && \
      dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE && \
-     systemctl --user start polyptych-agent.service
+     systemctl --user start polyptic-agent.service
 
 # The agent owns its Chromium children (Model A); its --user unit has Restart=always, so the agent
 # (and the Chromium it launches per output) is respawned on crash without sway involvement.

@@ -1,13 +1,13 @@
 /**
- * `polyptych-agent setup` — install / provision flow.
+ * `polyptic-agent setup` — install / provision flow.
  *
- * Turns a stock systemd Linux box into a Polyptych kiosk (D26/D27). Every step is idempotent and
+ * Turns a stock systemd Linux box into a Polyptic kiosk (D26/D27). Every step is idempotent and
  * logged; `--dry-run` previews without touching anything. The cold-boot chain it wires:
  *
- *   greetd autologin (user=kiosk) -> sway (or i3) -> systemd --user polyptych-session.target
- *     -> polyptych-agent.service (Restart=always) -> Chromium-per-output
+ *   greetd autologin (user=kiosk) -> sway (or i3) -> systemd --user polyptic-session.target
+ *     -> polyptic-agent.service (Restart=always) -> Chromium-per-output
  *
- * The agent then reads /etc/polyptych/agent.toml, enrols over WSS (2b), and an operator approves it
+ * The agent then reads /etc/polyptic/agent.toml, enrols over WSS (2b), and an operator approves it
  * in the console. "apt = the box is a display; console = what it shows." (D26)
  */
 import { basename } from "node:path";
@@ -54,7 +54,7 @@ export function runInstall(sys: Sys, opts: SetupOptions, log: Logger): SetupResu
   const sessionCommand = isX11 ? "startx" : "sway";
 
   log.banner(
-    `Polyptych device setup — ${distro.prettyName} (pm=${distro.pm}, backend=${opts.backend}, user=${opts.user})`,
+    `Polyptic device setup — ${distro.prettyName} (pm=${distro.pm}, backend=${opts.backend}, user=${opts.user})`,
   );
 
   const state: SetupState = loadState(sys);
@@ -100,7 +100,7 @@ export function runInstall(sys: Sys, opts: SetupOptions, log: Logger): SetupResu
     `the agent single binary is installed at ${opts.agentBin} (the .deb / installer places it; override with --agent-bin).`,
   );
 
-  // 6 ─ /etc/polyptych/agent.toml
+  // 6 ─ /etc/polyptic/agent.toml
   writeAgentConfig(sys, opts, log, needsVerification);
 
   // 7 ─ enable services + make greetd the display manager
@@ -180,7 +180,7 @@ function ensureKioskUser(
   } else {
     sys.exec(
       "useradd",
-      ["--create-home", "--shell", "/bin/bash", "--user-group", "--comment", "Polyptych kiosk", opts.user],
+      ["--create-home", "--shell", "/bin/bash", "--user-group", "--comment", "Polyptic kiosk", opts.user],
       { desc: `create user ${opts.user}` },
     );
     state.createdUser = true;
@@ -201,7 +201,7 @@ function ensureKioskUser(
 
   // Home + per-machine state dir (where the durable credential is persisted), owned by kiosk.
   sys.ensureDir(home, { owner: opts.user, group: opts.user });
-  sys.ensureDir(`${home}/.polyptych`, { mode: 0o700, owner: opts.user, group: opts.user });
+  sys.ensureDir(`${home}/.polyptic`, { mode: 0o700, owner: opts.user, group: opts.user });
 }
 
 function writeCompositorConfig(
@@ -240,8 +240,8 @@ function writeCompositorConfig(
 }
 
 function writeAgentConfig(sys: Sys, opts: SetupOptions, log: Logger, needsVerification: string[]): void {
-  log.step("write agent config (/etc/polyptych)");
-  sys.ensureDir("/etc/polyptych", { mode: 0o755 });
+  log.step("write agent config (/etc/polyptic)");
+  sys.ensureDir("/etc/polyptic", { mode: 0o755 });
 
   if (opts.serverUrl) {
     const toml = renderAgentToml(
@@ -348,6 +348,6 @@ function printNextSteps(opts: SetupOptions, log: Logger): void {
     log.info("2. The agent enrols over WSS automatically (server_url is set).");
   }
   log.info("3. Approve the machine in the console, then place its screens onto a mural.");
-  log.info("   Diagnostics (inside the kiosk session): `systemctl --user status polyptych-agent`,");
-  log.info("   `journalctl --user -u polyptych-agent -f`.");
+  log.info("   Diagnostics (inside the kiosk session): `systemctl --user status polyptic-agent`,");
+  log.info("   `journalctl --user -u polyptic-agent -f`.");
 }

@@ -1,7 +1,7 @@
-# greetd configuration for a Polyptych kiosk.  ->  installed to /etc/greetd/config.toml
+# greetd configuration for a Polyptic kiosk.  ->  installed to /etc/greetd/config.toml
 #
-# Source-of-truth note: `polyptych-agent setup` (D26) writes the LIVE file from this template
-# (substituting the kiosk user name if changed). This copy ships to /usr/share/polyptych/templates/
+# Source-of-truth note: `polyptic-agent setup` (D26) writes the LIVE file from this template
+# (substituting the kiosk user name if changed). This copy ships to /usr/share/polyptic/templates/
 # so the wiring is reviewable and so setup has a stable input — keep edits here, not in two places.
 #
 # Behaviour: ZERO-CLICK perpetual autologin (CLAUDE.md non-negotiable #4). greetd starts the kiosk

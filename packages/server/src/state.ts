@@ -1,5 +1,5 @@
 /**
- * Desired-state for the Polyptych control plane, backed by a durable Store.
+ * Desired-state for the Polyptic control plane, backed by a durable Store.
  *
  * This module owns the single global `DesiredState` (revision starts at 0) plus the machine
  * registry. It knows nothing about sockets or HTTP — it is state + mutations + write-through.
@@ -21,7 +21,7 @@
  * registration/approval order. The mapping is stable per (machineId, connector): a reconnecting
  * machine reuses its existing screen ids, and the counter resumes past the highest persisted id.
  */
-import { WebSurface } from "@polyptych/protocol";
+import { WebSurface } from "@polyptic/protocol";
 import type {
   DesiredState,
   DisplayBackend,
@@ -32,7 +32,7 @@ import type {
   Screen,
   ScreenSlice,
   Surface,
-} from "@polyptych/protocol";
+} from "@polyptic/protocol";
 
 import type { PersistedMachine, Store } from "./store/types";
 

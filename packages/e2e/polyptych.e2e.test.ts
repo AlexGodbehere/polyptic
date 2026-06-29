@@ -1,5 +1,5 @@
 /**
- * @polyptych/e2e — end-to-end suite against the REAL control plane.
+ * @polyptic/e2e — end-to-end suite against the REAL control plane.
  *
  * We spawn the actual server (`packages/server/src/index.ts`) with `Bun.spawn`, point it at the
  * MemoryStore (STORE=memory) on PORT 8090, poll `/api/v1/state` until it answers, then drive it
@@ -24,7 +24,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PROTOCOL_VERSION } from "@polyptych/protocol";
+import { PROTOCOL_VERSION } from "@polyptic/protocol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config

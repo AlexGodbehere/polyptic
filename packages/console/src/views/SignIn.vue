@@ -10,7 +10,7 @@ const router = useRouter();
 const route = useRoute();
 
 const email = ref("operator@accent.co");
-const password = ref("polyptych");
+const password = ref("polyptic");
 const error = ref(false);
 const loading = ref(false);
 
@@ -39,7 +39,7 @@ function onSignIn(): void {
     <div class="card sheet">
       <div class="brand">
         <div class="brand-mark">P</div>
-        <span class="brand-name">Polyptych</span>
+        <span class="brand-name">Polyptic</span>
       </div>
 
       <div class="heading">Sign in to the console</div>

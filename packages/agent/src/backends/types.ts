@@ -9,7 +9,7 @@
  * The agent stays unprivileged and dumb: it never decides *what* to show (the control plane
  * does that and pushes content straight to the player), only *where* a player lives.
  */
-import type { DisplayBackend as BackendId } from "@polyptych/protocol";
+import type { DisplayBackend as BackendId } from "@polyptic/protocol";
 
 export interface DisplayBackend {
   /** Which `DisplayBackend` enum value this implementation reports in `agent/hello`. */

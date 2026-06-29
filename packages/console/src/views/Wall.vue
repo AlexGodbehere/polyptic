@@ -34,7 +34,7 @@ const alertColor = computed(() => (alerts.value > 0 ? "var(--warn)" : "var(--ok)
 
 function onDragStart(e: DragEvent, id: string) {
   if (!e.dataTransfer) return;
-  e.dataTransfer.setData("application/x-polyptych-screen", id);
+  e.dataTransfer.setData("application/x-polyptic-screen", id);
   e.dataTransfer.setData("text/plain", id);
   e.dataTransfer.effectAllowed = "move";
 }

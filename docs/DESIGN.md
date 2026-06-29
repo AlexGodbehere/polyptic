@@ -1,12 +1,12 @@
-# Polyptych — Design Notes
+# Polyptic — Design Notes
 
 *Last updated 2026-06-29.*
 
-Design record for **Polyptych** — a *generic, vendor-neutral* display-wall / kiosk-fleet orchestration product. Driven by the need to replace the AMRC ACS demo wall's fragile Windows boot scripts, but built as a standalone product with **no dependency on ACS**. The repo `README.md` + `docs/ARCHITECTURE.md` are the concise mirrors; this is the working narrative. (A formal Shape Up **pitch** will be added as `docs/PITCH.md`.)
+Design record for **Polyptic** — a *generic, vendor-neutral* display-wall / kiosk-fleet orchestration product. Driven by the need to replace the AMRC ACS demo wall's fragile Windows boot scripts, but built as a standalone product with **no dependency on ACS**. The repo `README.md` + `docs/ARCHITECTURE.md` are the concise mirrors; this is the working narrative. (A formal Shape Up **pitch** will be added as `docs/PITCH.md`.)
 
-> **Reframe (important):** earlier drafts were ACS-coupled. Decision today: Polyptych is a generic product we *can use for* ACS — not based on it. ACS is one example integration (it validated the OIDC + dashboard-embedding paths); nothing in the product depends on Factory+, Sparkplug, ConfigDB, the UNS, or `@amrc-factoryplus/service-client`.
+> **Reframe (important):** earlier drafts were ACS-coupled. Decision today: Polyptic is a generic product we *can use for* ACS — not based on it. ACS is one example integration (it validated the OIDC + dashboard-embedding paths); nothing in the product depends on Factory+, Sparkplug, ConfigDB, the UNS, or `@amrc-factoryplus/service-client`.
 >
-> **Naming:** working name was "Mural" → changed to **Polyptych** after a clash review (see *Naming* below).
+> **Naming:** working name was "Mural" → changed to **Polyptic** after a clash review (see *Naming* below).
 
 Produced from two multi-agent passes: (1) research + architecture (7 research lanes → 3 architectures → judged), (2) a name-clash sweep for "Mural".
 
@@ -14,7 +14,7 @@ Produced from two multi-agent passes: (1) research + architecture (7 research la
 
 ## TL;DR — the recommendation
 
-Build **Polyptych**: a small **bespoke TypeScript control plane** (`polyptych-server`, runs on any Kubernetes or Docker host), **thin per-client agents** (`polyptych-agent`) that dial *outbound* and reconcile to desired state (Kubernetes-controller-style), and a **web "mosaic player"** (`polyptych-player`) that renders each screen's slice of *one global layout*. Run the player **on a minimal Wayland compositor (`sway`)** for a free VNC/screenshot preview and a **native-window escape hatch**.
+Build **Polyptic**: a small **bespoke TypeScript control plane** (`polyptic-server`, runs on any Kubernetes or Docker host), **thin per-client agents** (`polyptic-agent`) that dial *outbound* and reconcile to desired state (Kubernetes-controller-style), and a **web "mosaic player"** (`polyptic-player`) that renders each screen's slice of *one global layout*. Run the player **on a minimal Wayland compositor (`sway`)** for a free VNC/screenshot preview and a **native-window escape hatch**.
 
 **Buy the substrate, build the brain.** Device management (Ubuntu + `sway` + `greetd` + `systemd`) and rendering (Chromium kiosk) are borrowed wholesale. The *only* net-new build is the control plane that owns **one global layout + named scenes + an API** — which no off-the-shelf signage product provides.
 
@@ -33,7 +33,7 @@ Build **Polyptych**: a small **bespoke TypeScript control plane** (`polyptych-se
 - Any startup change breaks it; tweaking a screen = RDP in (which logs out the local session), edit, trial-and-error.
 - Smart plugs cut power EOD → cold-boot must reach content with **zero clicks**.
 
-Polyptych solves this as the *general* case: any wall, any content, any IdP, configured from a web UI with scenes + an API.
+Polyptic solves this as the *general* case: any wall, any content, any IdP, configured from a web UI with scenes + an API.
 
 ---
 
@@ -53,7 +53,7 @@ Polyptych solves this as the *general* case: any wall, any content, any IdP, con
 
 - **Device:** Ubuntu 24.04 minimal → `greetd` passwordless autologin (`kiosk`) → `sway` (outputs pinned by connector) → `systemd --user` services launch the agent + one Chromium `--app` per output (own `--user-data-dir`, popup-suppression flags, `exit_type` reset). No `swayidle`; `output * dpms on`. **Wayland's no-self-positioning is the feature** — all geometry goes through the compositor via `swaymsg` IPC. *GPU caveat:* Intel/AMD trouble-free; NVIDIA needs extra config or an X11+i3 fallback — verify on real hardware.
 - **Rendering — hybrid typed surfaces:** default `web-url`/`dashboard-*` tiles render in the CSS-grid **player**; `web-window`/`native-app` are placed by the agent as **top-level windows** (escape hatch for framing-blocked / non-web / future sources). Dashboards use single-panel embeds (e.g. Grafana `/d-solo`, all vars + `&kiosk` in the URL).
-- **Control plane (`polyptych-server`):** TypeScript/Node (Fastify + `ws` + Postgres + `zod`), standalone, runs on any k8s/Docker. Owns the Machine/Output/Screen registry, the **one global virtual-canvas Layout** (arbitrary regions — not a fixed grid), and named **immutable versioned Scenes**. Reconcile: bump one global `desiredRevision` → recompute each machine's slice → fan out apply; optional PREPARE/COMMIT barrier for tear-free flips. Web UI: layout editor, scenes, live preview, ident trigger, fleet health. Prometheus `/metrics`.
+- **Control plane (`polyptic-server`):** TypeScript/Node (Fastify + `ws` + Postgres + `zod`), standalone, runs on any k8s/Docker. Owns the Machine/Output/Screen registry, the **one global virtual-canvas Layout** (arbitrary regions — not a fixed grid), and named **immutable versioned Scenes**. Reconcile: bump one global `desiredRevision` → recompute each machine's slice → fan out apply; optional PREPARE/COMMIT barrier for tear-free flips. Web UI: layout editor, scenes, live preview, ident trigger, fleet health. Prometheus `/metrics`.
 - **Transport:** agents dial **outbound `wss://` only**; ~10s lease, reconnect backoff+jitter; each agent **caches its last-good slice** and keeps rendering through controller outages.
 - **Auth (generic):** admin UI/API via **OIDC** standard discovery (any IdP). Per-content-source strategies: `public` · `anonymous-viewer` · `reverse-proxy-header-injection` · `persisted-session` · `oidc`. Agent identity: bootstrap token → mTLS cert keyed to `/etc/machine-id` (or OIDC client creds).
 - **Preview:** always-on `grim` JPEG thumbnails up the outbound WSS (show *real* render + auth state); on-demand `wayvnc`→noVNC tunnelled through the control plane; WYSIWYG intended-layout diagram alongside.
@@ -82,7 +82,7 @@ Surface types: `web-url` · `dashboard-panel` · `dashboard-page` (player iframe
 
 **Borrow wholesale:** device stack (Ubuntu, `sway`/`greetd`/`systemd`, Chromium kiosk, `grim`, `wayvnc`); `grafana/grafana-kiosk` for the Phase-0/1 quick win; balena's OTA/env-as-config *discipline* (ship the agent as a single-file `.deb`, provision the image declaratively) — **not** balenaCloud the SaaS.
 
-**Build (only net-new):** `polyptych-server` (registry + global layout + versioned scenes + REST/WS API + web UI) and `polyptych-agent`. Tightly scoped, *not* a generic signage CMS.
+**Build (only net-new):** `polyptic-server` (registry + global layout + versioned scenes + REST/WS API + web UI) and `polyptic-agent`. Tightly scoped, *not* a generic signage CMS.
 
 **Rejected:** signage CMSs (Xibo/Anthias/PiSignage/info-beamer) all model N independent screens with playlists — no one-global-layout, no scenes-across-fleet; borrow Xibo's *data model* as inspiration only. balenaCloud = SaaS (fails self-host) + content-agnostic; openBalena strips the very features that made it attractive. Commercial AV controllers (Userful/Datapath/Hiperwall) = enterprise/appliance, off-stack. SaaS-only (ScreenCloud/Yodeck) ruled out.
 
@@ -101,7 +101,7 @@ Surface types: `web-url` · `dashboard-panel` · `dashboard-page` (player iframe
 
 ---
 
-## Naming — why Polyptych (not Mural)
+## Naming — why Polyptic (not Mural)
 
 Multi-modal clash sweep (commercial products, same-concept signage/display tools, npm/PyPI/crates/Docker, GitHub, trademark + domains, fallback names):
 
@@ -109,7 +109,7 @@ Multi-modal clash sweep (commercial products, same-concept signage/display tools
 - **But the adjacent clash is big:** **MURAL by Tactivos, Inc.** (mural.co) — ~$2B-valuation visual-collaboration whiteboard, registered US+intl software marks (USPTO `97134497` "MURAL", `99516057` "MURAL AI", Nice classes 9/42), a "Mural for Interactive Displays" line, total SEO + domain lock-up (`mural.*`, `getmural`, `usemural` all gone). Mural Pay (fintech) crowds the bare brand further.
 - **Namespace for bare "mural" is closed:** npm/PyPI abandoned, crates.io active (May 2026), Docker Hub org held, `github.com/mural` + `/muralco` taken.
 - **Verdict:** Mural is *fine as an internal codename* (low risk; unenforceable against an internal University deployment) but **high-risk for any open-source/commercial spin-out** (trademark + namespace + SEO). Qualified variants (`Murald`, `OpenMural`) don't help — they keep the dominant MURAL element.
-- **Decision:** since Polyptych is framed as a *generic product* (spin-out plausible), adopt a distinct, clearable name **now**. **Polyptych** = a multi-panel painting whose panels compose one image (perfect screens/scenes/mosaic metaphor); npm `polyptych` free, only scattered hobby GitHub repos. *Trademark/domain not yet cleared — do a formal clearance before any public launch.*
+- **Decision:** since Polyptic is framed as a *generic product* (spin-out plausible), adopt a distinct, clearable name **now**. **Polyptic** = a multi-panel painting whose panels compose one image (perfect screens/scenes/mosaic metaphor); npm `polyptic` free, only scattered hobby GitHub repos. *Trademark/domain not yet cleared — do a formal clearance before any public launch.*
 
 ---
 
@@ -120,7 +120,7 @@ Multi-modal clash sweep (commercial products, same-concept signage/display tools
 3. **Embeddability of any given source** (e.g. the ACS Visualiser): does it send `X-Frame-Options`/CSP `frame-ancestors`? If not iframable → render as a top-level `web-window`.
 4. **How real/soon is the non-web future?** Concrete near-term native-app need or speculative? Sets how much native-window machinery to build now vs defer.
 5. **Operating commitment:** appetite to own a bespoke control plane (~1.5–3 eng-months + maintenance)? (Recommendation assumes yes.)
-6. **Spin-out intent:** how seriously open-source/productise Polyptych? Determines when to do formal trademark/domain clearance for the name.
+6. **Spin-out intent:** how seriously open-source/productise Polyptic? Determines when to do formal trademark/domain clearance for the name.
 7. **Network/identity:** can clients reach the control plane over WSS on the same LAN/VLAN; is mTLS client-cert (or OIDC client creds) acceptable to the security team for agent identity?
 
 ---
@@ -138,17 +138,17 @@ Multi-modal clash sweep (commercial products, same-concept signage/display tools
 
 ## Appendix — AMRC example-integration facts (from the ACS repo read)
 
-Polyptych depends on none of this; recorded because AMRC is the first deployment.
+Polyptic depends on none of this; recorded because AMRC is the first deployment.
 - Grafana 6.52.4 (Helm), Keycloak OIDC realm `factory_plus` (Auth Code + PKCE, `offline_token`), Traefik 23.1.0 `IngressRoute` (`grafana.<baseUrl>`, `visualiser.<baseUrl>`, `i3x.<baseUrl>`); no kiosk configured today.
 - ACS Visualiser = `acs-visualiser` Node/Express (live MQTT traffic view); **no explicit frame headers found** — confirm iframability at runtime, else render as a top-level `web-window`.
 - `i3X-Explorer` (`~/code/i3X-Explorer`) is a separate Electron app — *not* the wall visualiser.
-- For the AMRC deployment, host `polyptych-server` on the existing cluster behind Traefik and point its admin OIDC at Keycloak; that's an integration choice, not a product requirement.
+- For the AMRC deployment, host `polyptic-server` on the existing cluster behind Traefik and point its admin OIDC at Keycloak; that's an integration choice, not a product requirement.
 
 ---
 
 ## Update 2026-06-29 — Console v2 model (adopted from the design exploration)
 
-The external UI exploration ("Polyptych Console v2") settled the operator-console model. We adopt it wholesale (decisions D21–D25). This reshapes **Phase 3**; the contract/code don't change until that build.
+The external UI exploration ("Polyptic Console v2") settled the operator-console model. We adopt it wholesale (decisions D21–D25). This reshapes **Phase 3**; the contract/code don't change until that build.
 
 **Entities (the Phase 3 data model):**
 - **Mural** — a named, switchable canvas (e.g. "Reception", "Atrium"). A deployment has several. Top-bar switcher selects the active one.
@@ -168,9 +168,9 @@ The external UI exploration ("Polyptych Console v2") settled the operator-consol
 
 Settled while the design was in flight; build deferred until after Phase 3.
 
-**Delivery.** The primary on-device path is **`apt install polyptych-agent`** (a `.deb`) — *not* a dedicated OS image. The image (and cloud-init/Ansible) are **optional wrappers around the same package** for big fleets / fast reprovision. The package's `postinst` wires the whole chain on a **stock** Ubuntu: greetd autologin (`kiosk` user) → **sway** → `systemd`-supervised agent + **Chromium-per-output**, plus crash hardening (`Restart=always`, popup/`exit_type` suppression, no `swayidle`, `dpms on`). Per-box config (control-plane URL + bootstrap token) via debconf or `/etc/polyptych/agent.toml`. Clean split: **`apt install` = the box is a Polyptych display; the console = what it shows** (it enrols via 2b → you Approve it).
+**Delivery.** The primary on-device path is **`apt install polyptic-agent`** (a `.deb`) — *not* a dedicated OS image. The image (and cloud-init/Ansible) are **optional wrappers around the same package** for big fleets / fast reprovision. The package's `postinst` wires the whole chain on a **stock** Ubuntu: greetd autologin (`kiosk` user) → **sway** → `systemd`-supervised agent + **Chromium-per-output**, plus crash hardening (`Restart=always`, popup/`exit_type` suppression, no `swayidle`, `dpms on`). Per-box config (control-plane URL + bootstrap token) via debconf or `/etc/polyptic/agent.toml`. Clean split: **`apt install` = the box is a Polyptic display; the console = what it shows** (it enrols via 2b → you Approve it).
 
-**Generic Linux.** The runtime stack (systemd, greetd, sway/cage, Chromium, Wayland) is distro-agnostic; only the package format and the DM-to-displace differ. So the **setup logic lives in the agent binary** (`polyptych-agent setup`), distro-aware (apt/dnf/pacman), wrapped in a native `.deb` first (Ubuntu/Debian = the actual hardware) and `.rpm`/AUR later — one source of truth, two front-ends (native package **or** universal installer), like k3s/tailscale.
+**Generic Linux.** The runtime stack (systemd, greetd, sway/cage, Chromium, Wayland) is distro-agnostic; only the package format and the DM-to-displace differ. So the **setup logic lives in the agent binary** (`polyptic-agent setup`), distro-aware (apt/dnf/pacman), wrapped in a native `.deb` first (Ubuntu/Debian = the actual hardware) and `.rpm`/AUR later — one source of truth, two front-ends (native package **or** universal installer), like k3s/tailscale.
 
 **"How does a browser show on a *server*?"** A "server" install isn't CLI-*only* — it's the same OS with no desktop. The hardware still has a GPU + real outputs (that's how you see boot text). The Linux graphics stack is: kernel **DRM/KMS** (drives the panel) → a **compositor / display server** (sway on Wayland; Xorg on X11) → a **GUI app** (Chromium). A "server" is missing only the middle layer. We add **just a compositor** (sway, a few MB) + the browser — *no* desktop environment (GNOME/KDE bundle a compositor *plus* tons of apps we don't want). So we deliberately start from **Server-minimal**: nothing to fight, lean, fast-booting. `apt install greetd sway chromium grim` is essentially the whole graphical layer.
 

@@ -5,7 +5,7 @@ import "./styles.css";
 
 const root = document.getElementById("root");
 if (!root) {
-  throw new Error("Polyptych admin: missing #root element");
+  throw new Error("Polyptic admin: missing #root element");
 }
 
 render(() => <Admin />, root);

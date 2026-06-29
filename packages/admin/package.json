@@ -1,5 +1,5 @@
 {
-  "name": "@polyptych/admin",
+  "name": "@polyptic/admin",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@polyptych/protocol": "workspace:*",
+    "@polyptic/protocol": "workspace:*",
     "solid-js": "^1.8.0"
   },
   "devDependencies": {

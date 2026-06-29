@@ -2,8 +2,8 @@
  * Config-file renderers for the cold-boot chain (docs/ARCHITECTURE.md "On-device stack"):
  *
  *   power on -> systemd -> greetd [initial_session] autologin user=kiosk -> compositor (sway / i3)
- *            -> systemctl --user start polyptych-session.target
- *                  -> polyptych-agent.service (Restart=always) -> Chromium-per-output
+ *            -> systemctl --user start polyptic-session.target
+ *                  -> polyptic-agent.service (Restart=always) -> Chromium-per-output
  *   no swayidle | output * dpms on | popup/exit_type suppression (the agent does the per-profile bit)
  *
  * Model A: the agent OWNS its Chromium children (launches/respawns them via the wayland-sway/x11-i3
@@ -11,7 +11,7 @@
  */
 import type { OutputPin } from "./args";
 
-const MANAGED = "managed by `polyptych-agent setup` — re-running setup may overwrite this file.";
+const MANAGED = "managed by `polyptic-agent setup` — re-running setup may overwrite this file.";
 
 // ── greetd ─────────────────────────────────────────────────────────────────────
 
@@ -87,7 +87,7 @@ seat * hide_cursor 5000     # hide the pointer; no operator stands at the panel
 # backend disambiguates by window title / launch order and places each on its output via swaymsg
 # IPC (Wayland forbids client self-positioning — --window-position is a no-op).
 
-### Hand off to the systemd user session, which supervises polyptych-agent (Restart=always).
+### Hand off to the systemd user session, which supervises polyptic-agent (Restart=always).
 exec systemctl --user import-environment WAYLAND_DISPLAY SWAYSOCK XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR
 exec dbus-update-activation-environment --systemd WAYLAND_DISPLAY SWAYSOCK XDG_CURRENT_DESKTOP
 exec systemctl --user start ${p.sessionTarget}
@@ -133,7 +133,7 @@ ${i3OutputLines(p.outputs)}
 exec_always --no-startup-id xset s off -dpms s noblank
 exec_always --no-startup-id unclutter -idle 3
 
-### Hand off to the systemd user session (supervises polyptych-agent, Restart=always).
+### Hand off to the systemd user session (supervises polyptic-agent, Restart=always).
 exec_always --no-startup-id systemctl --user import-environment DISPLAY XAUTHORITY
 exec_always --no-startup-id dbus-update-activation-environment --systemd DISPLAY XAUTHORITY
 exec_always --no-startup-id systemctl --user start ${p.sessionTarget}
@@ -151,14 +151,14 @@ exec i3
 
 // ── systemd user units ─────────────────────────────────────────────────────────
 
-export const SESSION_TARGET = "polyptych-session.target";
-export const AGENT_SERVICE = "polyptych-agent.service";
+export const SESSION_TARGET = "polyptic-session.target";
+export const AGENT_SERVICE = "polyptic-agent.service";
 
 export function sessionTargetUnit(): string {
   return `# /etc/systemd/user/${SESSION_TARGET} — ${MANAGED}
 [Unit]
-Description=Polyptych kiosk session (compositor-supervised)
-Documentation=file:///etc/polyptych/agent.toml
+Description=Polyptic kiosk session (compositor-supervised)
+Documentation=file:///etc/polyptic/agent.toml
 # Grouping target the compositor starts once the Wayland/X session env is imported. \`Wants\` (not
 # \`Requires\`) so a momentary agent hiccup never tears the session down — the agent's own
 # Restart=always brings it back.
@@ -176,8 +176,8 @@ export interface AgentServiceParams {
 export function agentServiceUnit(p: AgentServiceParams): string {
   return `# /etc/systemd/user/${AGENT_SERVICE} — ${MANAGED}
 [Unit]
-Description=Polyptych agent — display reconciler + Chromium-per-output supervisor
-Documentation=file:///etc/polyptych/agent.toml
+Description=Polyptic agent — display reconciler + Chromium-per-output supervisor
+Documentation=file:///etc/polyptic/agent.toml
 # Runs INSIDE the kiosk's Wayland/X session; needs the compositor env imported by the compositor
 # before it starts ${SESSION_TARGET}.
 PartOf=${SESSION_TARGET}
@@ -191,7 +191,7 @@ ExecStart=${p.agentBin}
 Restart=always
 RestartSec=2
 # Config (control-plane URL + bootstrap token + backend) lives in agent.toml, written by setup.
-Environment=POLYPTYCH_CONFIG=${p.configPath}
+Environment=POLYPTIC_CONFIG=${p.configPath}
 # Crash/restore hardening: a power cut must never leave Chromium showing "Restore pages". The agent
 # resets exit_type/exited_cleanly in each profile's Preferences before (re)launch (per ARCHITECTURE).
 

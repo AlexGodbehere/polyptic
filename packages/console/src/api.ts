@@ -2,7 +2,7 @@
  * REST client for the control plane (http://localhost:8080/api/v1).
  *
  * Every outgoing body is validated against the shared contract's zod schema before it leaves the
- * browser — the same parse-at-the-edge discipline used on the wire (see @polyptych/protocol). The
+ * browser — the same parse-at-the-edge discipline used on the wire (see @polyptic/protocol). The
  * route paths follow the existing server conventions (POST /screens/:id/rename, /ident, /demo/web)
  * extended for Phase 3 murals & placement.
  */
@@ -12,7 +12,7 @@ import {
   PlaceScreenBody,
   RenameMuralBody,
   RenameScreenBody,
-} from "@polyptych/protocol";
+} from "@polyptic/protocol";
 
 const BASE = "http://localhost:8080/api/v1";
 

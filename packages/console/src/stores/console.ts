@@ -10,15 +10,15 @@
  * The wall view (owned by console-wall) reads exclusively through this store's getters/actions.
  */
 import { defineStore } from "pinia";
-import { PROTOCOL_VERSION, ServerToAdminMessage, parseMessage } from "@polyptych/protocol";
-import type { MachineView, Mural, Placement, ScreenView } from "@polyptych/protocol";
+import { PROTOCOL_VERSION, ServerToAdminMessage, parseMessage } from "@polyptic/protocol";
+import type { MachineView, Mural, Placement, ScreenView } from "@polyptic/protocol";
 
 import * as api from "../api";
 
 const ADMIN_WS_URL = "ws://localhost:8080/admin";
 const RECONNECT_MIN_MS = 500;
 const RECONNECT_MAX_MS = 10_000;
-const THEME_KEY = "polyptych.theme";
+const THEME_KEY = "polyptic.theme";
 
 // A newly placed screen's size is filled by the server from the screen's native output resolution;
 // until the authoritative broadcast lands we show it at this optimistic default (canvas pixels).

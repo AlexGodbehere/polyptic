@@ -23,7 +23,7 @@ export type {
 export { MemoryStore } from "./memory";
 export { PostgresStore } from "./postgres";
 
-const DEFAULT_DATABASE_URL = "postgres://polyptych:polyptych@localhost:5432/polyptych";
+const DEFAULT_DATABASE_URL = "postgres://polyptic:polyptic@localhost:5432/polyptic";
 
 export interface CreatedStore {
   store: Store;

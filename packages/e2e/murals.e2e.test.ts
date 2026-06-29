@@ -1,5 +1,5 @@
 /**
- * @polyptych/e2e — Phase 3a MURALS & PLACEMENT suite against the REAL control plane.
+ * @polyptic/e2e — Phase 3a MURALS & PLACEMENT suite against the REAL control plane.
  *
  * Phase 3 adds the spatial model: a deployment has several **Murals** (named, switchable canvases),
  * and a **Screen** is either *unplaced* (no placement → lives in the Wall view's tray) or *placed* on
@@ -8,7 +8,7 @@
  * server broadcasts on every change.
  *
  * We spawn the actual server (`packages/server/src/index.ts`) with `Bun.spawn` against the MemoryStore
- * (STORE=memory) on its own PORT (8092). With NO `POLYPTYCH_BOOTSTRAP_TOKEN` the server runs in OPEN
+ * (STORE=memory) on its own PORT (8092). With NO `POLYPTIC_BOOTSTRAP_TOKEN` the server runs in OPEN
  * mode (the Phase 2a default), so a single fake agent over `/agent` is auto-registered + auto-approved
  * and a screen is created — giving us something to place. We then drive the mural REST surface over
  * `fetch` and assert the resulting `admin/state` snapshots:
@@ -28,14 +28,14 @@
  * never race a stale broadcast that happens to satisfy an absence check. The server process is torn
  * down in `afterAll`.
  *
- * This suite is independent of polyptych.e2e.test.ts (PORT 8090) and enrollment.e2e.test.ts (PORT
+ * This suite is independent of polyptic.e2e.test.ts (PORT 8090) and enrollment.e2e.test.ts (PORT
  * 8091): different port, fresh memory store. All three must stay green.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PROTOCOL_VERSION } from "@polyptych/protocol";
+import { PROTOCOL_VERSION } from "@polyptic/protocol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
@@ -283,7 +283,7 @@ beforeAll(async () => {
       ...process.env,
       STORE: "memory",
       PORT: String(PORT),
-      // No POLYPTYCH_BOOTSTRAP_TOKEN → OPEN mode: the fake agent is auto-registered + auto-approved,
+      // No POLYPTIC_BOOTSTRAP_TOKEN → OPEN mode: the fake agent is auto-registered + auto-approved,
       // so a screen exists to place. (Gated enrollment is covered by enrollment.e2e.test.ts.)
       PLAYER_BASE_URL: "http://localhost:5173",
       LOG_LEVEL: "error",

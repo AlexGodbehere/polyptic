@@ -1,5 +1,5 @@
 /**
- * `polyptych-agent setup` entry point.
+ * `polyptic-agent setup` entry point.
  *
  * Dispatched from index.ts when argv[2] === "setup". Parses flags, sets up the logger + the dry-run
  * aware `Sys`, enforces the root requirement (for a real run), and runs the install or uninstall
@@ -62,7 +62,7 @@ export async function runSetupCli(argv: string[]): Promise<number> {
 }
 
 // Allow running the setup module directly (`bun src/setup/index.ts ...`) in addition to the
-// `polyptych-agent setup` subcommand path. import.meta.main is true only when this file is the
+// `polyptic-agent setup` subcommand path. import.meta.main is true only when this file is the
 // program entry, so importing it from index.ts is side-effect free.
 if (import.meta.main) {
   void runSetupCli(process.argv.slice(2)).then((code) => process.exit(code));

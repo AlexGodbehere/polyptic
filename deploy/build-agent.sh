@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy/build-agent.sh — compile the Polyptych agent to a single binary and package it as .deb + .rpm.
+# deploy/build-agent.sh — compile the Polyptic agent to a single binary and package it as .deb + .rpm.
 #
 # PREREQUISITES (on the BUILD host):
 #   * bun   >= 1.1    https://bun.sh                   (compiles the agent: `bun build --compile`)
@@ -14,9 +14,9 @@
 #     SKIP_INSTALL=1     skip `bun install` (assume workspace deps already present)
 #
 # OUTPUT (into deploy/dist/):
-#   polyptych-agent-<arch>                       the compiled single binary
-#   polyptych-agent_<version>_<arch>.deb
-#   polyptych-agent-<version>-1.<rpmarch>.rpm
+#   polyptic-agent-<arch>                       the compiled single binary
+#   polyptic-agent_<version>_<arch>.deb
+#   polyptic-agent-<version>-1.<rpmarch>.rpm
 #
 # D7: the agent ships as a Bun single binary — one file, no runtime to install on the box.
 # bun cross-compiles the runtime INTO the binary, so one host can build BOTH arches (e.g. an
@@ -50,11 +50,11 @@ command -v nfpm >/dev/null 2>&1 || { echo "build-agent: 'nfpm' not found — see
 
 OUT_DIR="deploy/dist"
 mkdir -p "$OUT_DIR"
-BIN_OUT="$OUT_DIR/polyptych-agent-$ARCH"
+BIN_OUT="$OUT_DIR/polyptic-agent-$ARCH"
 
-echo "==> Building polyptych-agent v$VERSION for $ARCH ($BUN_TARGET)"
+echo "==> Building polyptic-agent v$VERSION for $ARCH ($BUN_TARGET)"
 
-# ── Resolve workspace deps (@polyptych/protocol, ws, zod) before compiling ───────────────────────
+# ── Resolve workspace deps (@polyptic/protocol, ws, zod) before compiling ───────────────────────
 if [ -z "${SKIP_INSTALL:-}" ]; then
   echo "==> bun install"
   bun install

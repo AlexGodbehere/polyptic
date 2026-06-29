@@ -1,5 +1,5 @@
 /**
- * @polyptych/agent — per-client reconciler.
+ * @polyptic/agent — per-client reconciler.
  *
  * Dials the server's agent channel (outbound WS), enrolls this machine's outputs, and for
  * every screen the control plane assigns, points a player at it via the selected
@@ -7,17 +7,17 @@
  * reconnects with backoff. Content never flows through here — that goes server → player
  * directly, which is what makes changes instant.
  *
- * Every inbound frame is parsed at the edge against the `@polyptych/protocol` contract;
+ * Every inbound frame is parsed at the edge against the `@polyptic/protocol` contract;
  * every outbound frame is validated before it leaves.
  *
  * Phase 2a — identity overrides for multi-machine dev demos:
- *   - `POLYPTYCH_MACHINE_ID` overrides the machine id (else `/etc/machine-id`, else "dev-mac").
- *   - `POLYPTYCH_CONNECTOR`  overrides the advertised output connector (else "HDMI-1").
+ *   - `POLYPTIC_MACHINE_ID` overrides the machine id (else `/etc/machine-id`, else "dev-mac").
+ *   - `POLYPTIC_CONNECTOR`  overrides the advertised output connector (else "HDMI-1").
  * Together these let two agents on one box present distinct machine + screen identities,
  * so the persistent registry and the Admin UI have multiple machines to show.
  *
  * Phase 2b — enrollment + durable credential (app-level identity; mTLS is a later layer):
- *   - `POLYPTYCH_BOOTSTRAP_TOKEN` (if set) is sent on `agent/hello` for first-contact enrollment.
+ *   - `POLYPTIC_BOOTSTRAP_TOKEN` (if set) is sent on `agent/hello` for first-contact enrollment.
  *   - A durable per-machine `credential` is persisted locally (see ./credential.ts) and presented
  *     on every reconnect. The server stores only `sha256(credential)`.
  *   In the server's OPEN mode (no bootstrap token configured) both are simply ignored and the
@@ -34,8 +34,8 @@ import {
   ServerToAgentMessage,
   parseMessage,
   PROTOCOL_VERSION,
-} from "@polyptych/protocol";
-import type { Output } from "@polyptych/protocol";
+} from "@polyptic/protocol";
+import type { Output } from "@polyptic/protocol";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,20 +48,20 @@ import { applyConfigFileToEnv } from "./setup/config";
 // Config
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Seed process.env DEFAULTS from /etc/polyptych/agent.toml (written by `polyptych-agent setup`)
+// Seed process.env DEFAULTS from /etc/polyptic/agent.toml (written by `polyptic-agent setup`)
 // BEFORE any config is read below. Real env vars (and the systemd unit's Environment=) always win,
 // and an absent file is a no-op — so a dev box with no agent.toml behaves exactly as before. This
 // is what makes the on-box config file take effect without changing how the agent reads its config.
 applyConfigFileToEnv();
 
-const SERVER_URL = process.env.POLYPTYCH_SERVER_URL ?? "ws://localhost:8080/agent";
+const SERVER_URL = process.env.POLYPTIC_SERVER_URL ?? "ws://localhost:8080/agent";
 const HEARTBEAT_MS = 10_000;
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 10_000;
 /** After a `server/rejected`, retry slowly so a rejected/unapproved machine never hammers. */
 const REJECT_BACKOFF_MS = 60_000;
 
-/** Default advertised connector when `POLYPTYCH_CONNECTOR` is unset. */
+/** Default advertised connector when `POLYPTIC_CONNECTOR` is unset. */
 const DEFAULT_CONNECTOR = "HDMI-1";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -76,12 +76,12 @@ function logError(msg: string): void {
 
 /**
  * Stable machine id. Resolution order:
- *   1. `POLYPTYCH_MACHINE_ID` env override (multi-machine dev demos),
+ *   1. `POLYPTIC_MACHINE_ID` env override (multi-machine dev demos),
  *   2. `/etc/machine-id` (Linux),
  *   3. "dev-mac" fallback (e.g. macOS dev host).
  */
 function readMachineId(): string {
-  const override = process.env.POLYPTYCH_MACHINE_ID?.trim();
+  const override = process.env.POLYPTIC_MACHINE_ID?.trim();
   if (override) return override;
   try {
     const id = readFileSync("/etc/machine-id", "utf8").trim();
@@ -94,11 +94,11 @@ function readMachineId(): string {
 
 /**
  * The advertised connector for this agent's single output. Overridable via
- * `POLYPTYCH_CONNECTOR` so two agents on one box present distinct screens.
+ * `POLYPTIC_CONNECTOR` so two agents on one box present distinct screens.
  * Phase 1/2a remain a single fixed 1080p output.
  */
 function resolveConnector(): string {
-  const override = process.env.POLYPTYCH_CONNECTOR?.trim();
+  const override = process.env.POLYPTIC_CONNECTOR?.trim();
   return override && override.length > 0 ? override : DEFAULT_CONNECTOR;
 }
 
@@ -109,7 +109,7 @@ function resolveOutputs(connector: string): Output[] {
 
 /** The operator-configured enrollment secret, if any (server GATED mode). */
 function readBootstrapToken(): string | undefined {
-  const token = process.env.POLYPTYCH_BOOTSTRAP_TOKEN?.trim();
+  const token = process.env.POLYPTIC_BOOTSTRAP_TOKEN?.trim();
   return token && token.length > 0 ? token : undefined;
 }
 
@@ -386,7 +386,7 @@ class Agent {
     this.rejected = true;
     logError(
       `enrollment rejected by server: ${msg.reason}. ` +
-        `Provide a valid POLYPTYCH_BOOTSTRAP_TOKEN or wait for operator approval. ` +
+        `Provide a valid POLYPTIC_BOOTSTRAP_TOKEN or wait for operator approval. ` +
         `Retrying slowly (~${Math.round(REJECT_BACKOFF_MS / 1000)}s).`,
     );
     // The server closes the connection; the `close` handler will scheduleReconnect() with the
@@ -461,7 +461,7 @@ class Agent {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function main(): void {
-  // Subcommand dispatch: `polyptych-agent setup …` provisions/tears down the on-device stack
+  // Subcommand dispatch: `polyptic-agent setup …` provisions/tears down the on-device stack
   // (greetd autologin → sway → systemd-supervised agent → Chromium-per-output). The setup CLI and
   // its (heavier) provisioning machinery are loaded lazily so the normal agent boot path never pays
   // for them. Anything other than `setup` runs the existing reconciler loop below, unchanged.
@@ -485,7 +485,7 @@ function main(): void {
   const credential = loadCredential(machineId);
 
   log(
-    `polyptych-agent v${agentVersion} · machineId=${machineId} · connector=${connector} · backend=${backend.id}`,
+    `polyptic-agent v${agentVersion} · machineId=${machineId} · connector=${connector} · backend=${backend.id}`,
   );
   log(
     `enrollment: ${credential ? "stored credential found" : "no stored credential"}${

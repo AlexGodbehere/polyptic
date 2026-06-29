@@ -1,5 +1,5 @@
 #!/bin/sh
-# polyptych-agent — post-remove hook (deb postrm / rpm postun; one script for both).
+# polyptic-agent — post-remove hook (deb postrm / rpm postun; one script for both).
 #
 # On a deb *purge*, drop the remaining config + state directories. Leave them in place on a plain
 # remove or an upgrade so reinstalling keeps the box's enrolment credential + config.
@@ -9,8 +9,8 @@ set -e
 
 case "${1:-}" in
   purge)
-    rm -rf /etc/polyptych
-    rm -rf /var/lib/polyptych
+    rm -rf /etc/polyptic
+    rm -rf /var/lib/polyptic
     ;;
 esac
 exit 0

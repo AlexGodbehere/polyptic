@@ -13,7 +13,7 @@ import {
   PROTOCOL_VERSION,
   ServerToAdminMessage,
   parseMessage,
-} from "@polyptych/protocol";
+} from "@polyptic/protocol";
 
 export type ConnState = "connecting" | "open" | "closed";
 

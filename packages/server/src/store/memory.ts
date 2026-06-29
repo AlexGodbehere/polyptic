@@ -6,7 +6,7 @@
  * deep-cloned on the way in and out so callers can never mutate the store's copy by reference —
  * mirroring the isolation a real database gives you.
  */
-import type { EnrollmentStatus } from "@polyptych/protocol";
+import type { EnrollmentStatus } from "@polyptic/protocol";
 import type {
   PersistedContent,
   PersistedMachine,

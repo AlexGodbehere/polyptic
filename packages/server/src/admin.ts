@@ -15,9 +15,9 @@
  * The server calls `broadcaster.broadcast()` on EVERY change: agent/player connect+disconnect,
  * rename, surface change, and player/ack.
  */
-import { ServerToAdminState } from "@polyptych/protocol";
+import { ServerToAdminState } from "@polyptic/protocol";
 import type { FastifyBaseLogger } from "fastify";
-import type { MachineView, ScreenView, ServerToAdminMessage } from "@polyptych/protocol";
+import type { MachineView, ScreenView, ServerToAdminMessage } from "@polyptic/protocol";
 import { WebSocket } from "ws";
 
 import type { ControlPlane } from "./state";

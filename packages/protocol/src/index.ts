@@ -1,5 +1,5 @@
 /**
- * @polyptych/protocol — the single source of truth for every cross-process message.
+ * @polyptic/protocol — the single source of truth for every cross-process message.
  *
  * Two WS channels (see CLAUDE.md):
  *   - agent channel  (machine ↔ server): enrollment, heartbeat, placement, capture, ident, lifecycle

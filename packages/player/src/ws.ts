@@ -12,7 +12,7 @@ import {
   PROTOCOL_VERSION,
   ServerToPlayerMessage,
   parseMessage,
-} from "@polyptych/protocol";
+} from "@polyptic/protocol";
 
 export type ConnState = "connecting" | "open" | "closed";
 

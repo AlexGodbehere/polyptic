@@ -5,7 +5,7 @@ import "./styles.css";
 
 const root = document.getElementById("root");
 if (!root) {
-  throw new Error("Polyptych player: missing #root element");
+  throw new Error("Polyptic player: missing #root element");
 }
 
 render(() => <Player />, root);

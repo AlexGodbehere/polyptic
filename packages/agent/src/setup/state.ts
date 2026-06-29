@@ -1,11 +1,11 @@
 /**
  * Install-state record, so `setup --uninstall` can faithfully restore the box: which display manager
  * and default target were in place before we took over, and whether WE created the kiosk user.
- * Stored at `/etc/polyptych/.setup-state.json` (0600).
+ * Stored at `/etc/polyptic/.setup-state.json` (0600).
  */
 import type { Sys } from "./system";
 
-export const STATE_PATH = "/etc/polyptych/.setup-state.json";
+export const STATE_PATH = "/etc/polyptic/.setup-state.json";
 
 export interface SetupState {
   version: number;
@@ -32,7 +32,7 @@ export function loadState(sys: Sys): SetupState {
 }
 
 export function saveState(sys: Sys, state: SetupState): void {
-  sys.ensureDir("/etc/polyptych", { mode: 0o755 });
+  sys.ensureDir("/etc/polyptic", { mode: 0o755 });
   sys.writeFile(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, {
     mode: 0o600,
     desc: "setup state",

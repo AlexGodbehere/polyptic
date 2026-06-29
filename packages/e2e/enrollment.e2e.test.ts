@@ -1,15 +1,15 @@
 /**
- * @polyptych/e2e — GATED enrollment suite (Phase 2b) against the REAL control plane.
+ * @polyptic/e2e — GATED enrollment suite (Phase 2b) against the REAL control plane.
  *
  * We spawn the actual server (`packages/server/src/index.ts`) with `Bun.spawn`, this time with
- * POLYPTYCH_BOOTSTRAP_TOKEN set so the server runs in GATED mode (not the dev-default OPEN mode),
+ * POLYPTIC_BOOTSTRAP_TOKEN set so the server runs in GATED mode (not the dev-default OPEN mode),
  * on its own PORT (8091) against the MemoryStore (STORE=memory). We poll `/api/v1/state` until it
  * answers, then drive the device-enrollment flow exactly like a fleet would: raw `/agent` WebSockets
  * as fake agents, `/admin` for the operator view, and REST mutations over `fetch`.
  *
  * NOTE: OPEN-mode behaviour (no bootstrap token → agents auto-registered AND auto-approved, screens
- * created, server/apply sent — the Phase 2a behaviour) is covered by polyptych.e2e.test.ts, which
- * runs the same server on PORT 8090 with NO POLYPTYCH_BOOTSTRAP_TOKEN. This file deliberately only
+ * created, server/apply sent — the Phase 2a behaviour) is covered by polyptic.e2e.test.ts, which
+ * runs the same server on PORT 8090 with NO POLYPTIC_BOOTSTRAP_TOKEN. This file deliberately only
  * exercises the GATED path, so the two suites stay independent and both must remain green.
  *
  * Coverage (GATED MODE):
@@ -31,7 +31,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PROTOCOL_VERSION } from "@polyptych/protocol";
+import { PROTOCOL_VERSION } from "@polyptic/protocol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
@@ -311,7 +311,7 @@ beforeAll(async () => {
       STORE: "memory",
       PORT: String(PORT),
       // The presence of this token is what flips the server from OPEN (dev) to GATED enrollment.
-      POLYPTYCH_BOOTSTRAP_TOKEN: BOOTSTRAP_TOKEN,
+      POLYPTIC_BOOTSTRAP_TOKEN: BOOTSTRAP_TOKEN,
       PLAYER_BASE_URL: "http://localhost:5173",
       LOG_LEVEL: "error",
     },

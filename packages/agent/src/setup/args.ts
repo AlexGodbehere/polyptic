@@ -1,5 +1,5 @@
 /**
- * Argument parsing + usage for `polyptych-agent setup`.
+ * Argument parsing + usage for `polyptic-agent setup`.
  *
  * Fully non-interactive (suits cloud-init / Ansible / a `.deb` postinst); every run is idempotent so
  * there is nothing to confirm. `--dry-run` previews the whole provision without touching the box.
@@ -44,7 +44,7 @@ export interface SetupOptions {
   enable: boolean;
   /** Install OS dependency packages (default true; `--skip-deps` to skip on pre-baked images). */
   installDeps: boolean;
-  /** uninstall: also remove /etc/polyptych and the kiosk user. */
+  /** uninstall: also remove /etc/polyptic and the kiosk user. */
   purge: boolean;
 }
 
@@ -74,8 +74,8 @@ export function parseArgs(argv: string[]): SetupOptions {
     user: "kiosk",
     outputs: [],
     browser: "chromium",
-    agentBin: "/usr/local/bin/polyptych-agent",
-    configPath: "/etc/polyptych/agent.toml",
+    agentBin: "/usr/local/bin/polyptic-agent",
+    configPath: "/etc/polyptic/agent.toml",
     start: false,
     enable: true,
     installDeps: true,
@@ -190,17 +190,17 @@ export function parseArgs(argv: string[]): SetupOptions {
 }
 
 export function usage(): string {
-  return `polyptych-agent setup — provision a stock box into a Polyptych kiosk (D26/D27)
+  return `polyptic-agent setup — provision a stock box into a Polyptic kiosk (D26/D27)
 
 USAGE
-  polyptych-agent setup [options]              provision (idempotent)
-  polyptych-agent setup uninstall [--purge]    tear down / restore the prior display manager
+  polyptic-agent setup [options]              provision (idempotent)
+  polyptic-agent setup uninstall [--purge]    tear down / restore the prior display manager
 
 WHAT IT DOES (each step idempotent + logged; --dry-run previews without changes)
   distro-detect (apt/dnf/pacman) -> install deps (greetd, sway, .deb Chromium, grim, wayvnc, fonts)
   -> create the kiosk user -> write /etc/greetd/config.toml (autologin -> compositor)
   -> write the sway/i3 config (pin outputs, no idle/blank, dpms on, hand off to systemd)
-  -> write the systemd user unit(s) (polyptych-agent, Restart=always) -> write /etc/polyptych/agent.toml
+  -> write the systemd user unit(s) (polyptic-agent, Restart=always) -> write /etc/polyptic/agent.toml
   -> make greetd the display manager. Cold boot: greetd -> sway -> agent -> Chromium-per-output.
 
 OPTIONS
@@ -213,12 +213,12 @@ OPTIONS
   --browser <chromium|cog>          kiosk browser (default chromium; cog = WPE/WebKit fallback, D27).
   --chromium-deb <path|url>         install a specific .deb Chromium (Ubuntu snap avoidance).
   --chromium-ppa <ppa>              add a PPA that ships a real .deb Chromium (Ubuntu).
-  --agent-bin <path>                binary the unit launches (default: /usr/local/bin/polyptych-agent).
-  --config <path>                   agent.toml path (default: /etc/polyptych/agent.toml).
+  --agent-bin <path>                binary the unit launches (default: /usr/local/bin/polyptic-agent).
+  --config <path>                   agent.toml path (default: /etc/polyptic/agent.toml).
   --start                           also \`systemctl restart greetd\` now (default: take effect on reboot).
   --no-enable                       write configs but do not enable services / swap the display manager.
   --skip-deps                       do not install OS packages (pre-baked image).
-  --purge                           (uninstall) also remove /etc/polyptych and the kiosk user.
+  --purge                           (uninstall) also remove /etc/polyptic and the kiosk user.
   -n, --dry-run                     print the plan; make no changes (safe to run as non-root).
   -h, --help                        this help.
 

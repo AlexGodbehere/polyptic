@@ -3,7 +3,7 @@
  * e.g. some NVIDIA + wlroots combos — see docs/ARCHITECTURE.md "Gotchas").
  *
  * Phase 4. Replaces the throwing stub. Under X11 a client CAN self-position, so we launch
- * Chromium with `--class=polyptych-<connector>` + `--window-position/-size` matching the
+ * Chromium with `--class=polyptic-<connector>` + `--window-position/-size` matching the
  * output's geometry, then defensively re-place it with `xdotool`/`wmctrl` once the window is
  * mapped (and assert EWMH fullscreen on the correct monitor). Geometry comes from `xrandr`,
  * capture from ImageMagick `import` (→ JPEG on stdout) or `scrot`.
@@ -194,7 +194,7 @@ export class X11Backend implements DisplayBackend {
     let b = this.browsers.get(connector);
     if (!b) {
       const profileDir = profileDirFor(connector);
-      const className = `polyptych-${sanitizeConnector(connector)}`;
+      const className = `polyptic-${sanitizeConnector(connector)}`;
       b = new SupervisedChromium(
         connector,
         (url) => this.launchAndPlace(connector, chromium, profileDir, className, url),
@@ -256,7 +256,7 @@ export class X11Backend implements DisplayBackend {
 
     // Fallback: scrot grabs the area to a temp file (no stdout mode), which we read then remove.
     if (await which("scrot")) {
-      const tmp = join(tmpdir(), `polyptych-${sanitizeConnector(connector)}-${Date.now()}.png`);
+      const tmp = join(tmpdir(), `polyptic-${sanitizeConnector(connector)}-${Date.now()}.png`);
       const res = await run("scrot", ["-o", "-a", `${geom.x},${geom.y},${geom.w},${geom.h}`, tmp]);
       if (res.code === 0) {
         try {
@@ -283,13 +283,13 @@ async function requireX11Tools(): Promise<void> {
   if (!(await which("xrandr"))) {
     throw new Error(
       "xrandr not found — the x11-i3 backend needs an X server and xrandr on PATH " +
-        "(see docs/DEPLOY.md / `polyptych-agent setup`)",
+        "(see docs/DEPLOY.md / `polyptic-agent setup`)",
     );
   }
   if (!(await which("xdotool")) && !(await which("wmctrl"))) {
     throw new Error(
       "neither xdotool nor wmctrl found — the x11-i3 backend needs one to place windows " +
-        "(see docs/DEPLOY.md / `polyptych-agent setup`)",
+        "(see docs/DEPLOY.md / `polyptic-agent setup`)",
     );
   }
 }

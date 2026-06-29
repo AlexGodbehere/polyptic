@@ -1,4 +1,4 @@
-# deploy/nfpm.yaml — nFPM packaging for the Polyptych agent (https://nfpm.goreleaser.com).
+# deploy/nfpm.yaml — nFPM packaging for the Polyptic agent (https://nfpm.goreleaser.com).
 #
 # Builds BOTH a .deb (Debian/Ubuntu — the hardware, D27) and a .rpm (Fedora/RHEL/openSUSE) from one
 # config and one compiled binary. ${ARCH} and ${VERSION} are supplied by deploy/build-agent.sh
@@ -9,10 +9,10 @@
 #
 # D26: delivery is an installable PACKAGE, not a mandatory image. All real provisioning lives in the
 # binary's `setup` subcommand (distro-aware apt/dnf/pacman); the maintainer scripts here are thin
-# glue (systemd wiring + kicking off `polyptych-agent setup`). One source of truth, generic across
+# glue (systemd wiring + kicking off `polyptic-agent setup`). One source of truth, generic across
 # package managers — "apt install = the box is a display; the console = what it shows."
 
-name: polyptych-agent
+name: polyptic-agent
 arch: "${ARCH}"            # amd64 | arm64 (nfpm maps rpm → x86_64 | aarch64)
 platform: linux
 version: "${VERSION}"
@@ -20,20 +20,20 @@ version_schema: semver
 release: "1"
 section: misc
 priority: optional
-maintainer: "Polyptych Maintainers <maintainers@polyptych.example>"
-vendor: "Polyptych"
-homepage: "https://github.com/polyptych/polyptych"
+maintainer: "Polyptic Maintainers <maintainers@polyptic.example>"
+vendor: "Polyptic"
+homepage: "https://github.com/polyptic/polyptic"
 license: "Proprietary"
 description: |
-  Polyptych on-device agent — turns a stock Ubuntu Server-minimal box into a managed display-wall
+  Polyptic on-device agent — turns a stock Ubuntu Server-minimal box into a managed display-wall
   kiosk. Reconciles desired state from the control plane over an outbound WebSocket and drives a
   kiosk Chromium per output. Installing this package provisions the zero-click cold-boot chain
   (greetd autologin -> sway -> systemd-supervised agent -> Chromium-per-output) via
-  `polyptych-agent setup`. Chromium itself is installed by setup as a real .deb/.rpm (NOT the snap).
+  `polyptic-agent setup`. Chromium itself is installed by setup as a real .deb/.rpm (NOT the snap).
 
 # Runtime dependencies. Chromium is intentionally ABSENT: on Ubuntu the `chromium` /
 # `chromium-browser` packages are snap shims (slow cold-start, confined profiles — D27), so
-# `polyptych-agent setup` installs a real .deb/.rpm Chromium (or the cog/WPE fallback) itself.
+# `polyptic-agent setup` installs a real .deb/.rpm Chromium (or the cog/WPE fallback) itself.
 depends:
   - greetd
   - sway
@@ -54,7 +54,7 @@ overrides:
       - scrot                 # x11 capture (grim is wayland-only)
       - imagemagick           # x11 capture fallback (`import`)
     suggests:
-      - polyptych-server
+      - polyptic-server
   rpm:
     depends:
       - greetd
@@ -69,7 +69,7 @@ overrides:
       - ImageMagick           # x11 capture fallback (`import`)
 
 # Maintainer scripts (same files for deb + rpm; nfpm installs them as the packager-native hooks and
-# makes them executable). They only wire systemd + kick off `polyptych-agent setup`.
+# makes them executable). They only wire systemd + kick off `polyptic-agent setup`.
 scripts:
   postinstall: deploy/agent/scripts/postinstall.sh
   preremove: deploy/agent/scripts/preremove.sh
@@ -77,8 +77,8 @@ scripts:
 
 contents:
   # The compiled single binary (built by deploy/build-agent.sh for ${ARCH}).
-  - src: deploy/dist/polyptych-agent-${ARCH}
-    dst: /usr/bin/polyptych-agent
+  - src: deploy/dist/polyptic-agent-${ARCH}
+    dst: /usr/bin/polyptic-agent
     file_info:
       mode: 0755
 
@@ -86,36 +86,36 @@ contents:
   #   * the --user reconciler that drives Chromium-per-output inside the sway session
   #   * a system oneshot that completes the package-manager half of `setup` on first boot
   #     (the package-manager lock is held during install, so Chromium can't be fetched there).
-  - src: deploy/agent/templates/polyptych-agent.service
-    dst: /usr/lib/systemd/user/polyptych-agent.service
+  - src: deploy/agent/templates/polyptic-agent.service
+    dst: /usr/lib/systemd/user/polyptic-agent.service
     file_info:
       mode: 0644
-  - src: deploy/agent/templates/polyptych-agent-firstboot.service
-    dst: /usr/lib/systemd/system/polyptych-agent-firstboot.service
+  - src: deploy/agent/templates/polyptic-agent-firstboot.service
+    dst: /usr/lib/systemd/system/polyptic-agent-firstboot.service
     file_info:
       mode: 0644
 
-  # Config seed. The LIVE file (/etc/polyptych/agent.toml) is written by `setup` (or copied from
+  # Config seed. The LIVE file (/etc/polyptic/agent.toml) is written by `setup` (or copied from
   # this .example and edited); this .example is documentation, refreshed on upgrade.
   - src: deploy/agent/templates/agent.toml.example
-    dst: /etc/polyptych/agent.toml.example
+    dst: /etc/polyptic/agent.toml.example
     file_info:
       mode: 0644
 
-  # Generation templates that `polyptych-agent setup` reads + substitutes (kiosk user, detected
+  # Generation templates that `polyptic-agent setup` reads + substitutes (kiosk user, detected
   # outputs) when it writes the host-specific live configs -> single source of truth, no drift.
   - src: deploy/agent/templates/greetd-config.toml
-    dst: /usr/share/polyptych/templates/greetd-config.toml
+    dst: /usr/share/polyptic/templates/greetd-config.toml
     file_info:
       mode: 0644
   - src: deploy/agent/templates/sway-config
-    dst: /usr/share/polyptych/templates/sway-config
+    dst: /usr/share/polyptic/templates/sway-config
     file_info:
       mode: 0644
 
-  # Ensure the config dir exists (root-owned). /var/lib/polyptych is created by `setup` instead, so
+  # Ensure the config dir exists (root-owned). /var/lib/polyptic is created by `setup` instead, so
   # it can be chowned to the kiosk user (which does not exist until setup creates it).
-  - dst: /etc/polyptych
+  - dst: /etc/polyptic
     type: dir
     file_info:
       mode: 0755

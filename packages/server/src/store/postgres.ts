@@ -16,7 +16,7 @@
  */
 import postgres from "postgres";
 
-import { DisplayBackend, EnrollmentStatus, Geometry, Output, Surface } from "@polyptych/protocol";
+import { DisplayBackend, EnrollmentStatus, Geometry, Output, Surface } from "@polyptic/protocol";
 
 import type {
   PersistedContent,

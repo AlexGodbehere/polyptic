@@ -20,7 +20,7 @@ import { VueFlow, useVueFlow } from "@vue-flow/core";
 import type { Node } from "@vue-flow/core";
 import { Background } from "@vue-flow/background";
 import { Controls } from "@vue-flow/controls";
-import type { ScreenView } from "@polyptych/protocol";
+import type { ScreenView } from "@polyptic/protocol";
 
 import { useConsoleStore } from "../../stores/console";
 import { useIdent } from "./useIdent";
@@ -200,7 +200,7 @@ function onDrop(e: DragEvent) {
   e.preventDefault();
   const dt = e.dataTransfer;
   const id = dt
-    ? dt.getData("application/x-polyptych-screen") || dt.getData("text/plain")
+    ? dt.getData("application/x-polyptic-screen") || dt.getData("text/plain")
     : "";
   if (!id || !store.activeMuralId) return;
   const f = toFlow(e.clientX, e.clientY);

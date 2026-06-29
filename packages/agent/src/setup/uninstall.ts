@@ -1,9 +1,9 @@
 /**
- * `polyptych-agent setup --uninstall` — teardown / restore.
+ * `polyptic-agent setup --uninstall` — teardown / restore.
  *
  * Reverses the provision: disables greetd + the kiosk services and RESTORES the display manager and
- * default target that were in place before (recorded in /etc/polyptych/.setup-state.json at install),
- * so the box returns to its prior boot behaviour. `--purge` additionally removes /etc/polyptych
+ * default target that were in place before (recorded in /etc/polyptic/.setup-state.json at install),
+ * so the box returns to its prior boot behaviour. `--purge` additionally removes /etc/polyptic
  * (agent.toml + the durable credential) and the kiosk user (only if setup created it).
  */
 import { basename } from "node:path";
@@ -23,12 +23,12 @@ export function runUninstall(sys: Sys, opts: SetupOptions, log: Logger): SetupRe
   const user = state.user ?? opts.user;
   const home = `/home/${user}`;
 
-  log.banner(`Polyptych device teardown${opts.purge ? " (--purge)" : ""}`);
+  log.banner(`Polyptic device teardown${opts.purge ? " (--purge)" : ""}`);
 
   // 1 ─ best-effort stop of a running agent in the kiosk user's session.
   log.step("stop the running kiosk agent (best-effort)");
-  sys.exec("pkill", ["-u", user, "-f", "polyptych-agent"], {
-    desc: `stop polyptych-agent for user ${user}`,
+  sys.exec("pkill", ["-u", user, "-f", "polyptic-agent"], {
+    desc: `stop polyptic-agent for user ${user}`,
     allowFail: true,
   });
 
@@ -60,7 +60,7 @@ export function runUninstall(sys: Sys, opts: SetupOptions, log: Logger): SetupRe
   // 6 ─ purge: agent config/credential + the kiosk user (only if we created it).
   if (opts.purge) {
     log.step("purge agent config + kiosk user");
-    sys.remove("/etc/polyptych");
+    sys.remove("/etc/polyptic");
     if (state.createdUser) {
       sys.exec("userdel", ["-r", user], { desc: `remove kiosk user ${user} (and home)`, allowFail: true });
     } else {
@@ -69,7 +69,7 @@ export function runUninstall(sys: Sys, opts: SetupOptions, log: Logger): SetupRe
   } else {
     log.step("keep agent config");
     log.info(
-      `kept /etc/polyptych (agent.toml + credential) and the kiosk user. Use --purge to remove them. ` +
+      `kept /etc/polyptic (agent.toml + credential) and the kiosk user. Use --purge to remove them. ` +
         `(${basename(STATE_PATH)} retained for reference.)`,
     );
   }

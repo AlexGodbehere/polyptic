@@ -1,4 +1,4 @@
-# Polyptych — dev infrastructure + optional container stack
+# Polyptic — dev infrastructure + optional container stack
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # TWO WAYS TO USE THIS FILE
@@ -10,7 +10,7 @@
 #        bun run dev        # server :8080 + player :5173 + admin :5174 + agent
 #
 #    The host processes connect to Postgres on localhost:5432 via
-#        DATABASE_URL=postgres://polyptych:polyptych@localhost:5432/polyptych  (the server's default)
+#        DATABASE_URL=postgres://polyptic:polyptic@localhost:5432/polyptic  (the server's default)
 #    Stop Postgres with `bun run db:down` (data survives in the `pgdata` volume; add `-v` to wipe).
 #
 # 2. FULL (container-portable, prod-like) — Postgres AND the server in Docker:
@@ -28,12 +28,12 @@
 services:
   db:
     image: postgres:16
-    container_name: polyptych-db
+    container_name: polyptic-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: polyptych
-      POSTGRES_PASSWORD: polyptych
-      POSTGRES_DB: polyptych
+      POSTGRES_USER: polyptic
+      POSTGRES_PASSWORD: polyptic
+      POSTGRES_DB: polyptic
     ports:
       # host:container — exposes the DB to host processes (server/agent) during dev.
       - "5432:5432"
@@ -42,7 +42,7 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       # `server` waits on this (condition: service_healthy) before it boots.
-      test: ["CMD-SHELL", "pg_isready -U polyptych -d polyptych"]
+      test: ["CMD-SHELL", "pg_isready -U polyptic -d polyptic"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -51,7 +51,7 @@ services:
     # Optional: only built/started under `--profile full`. Container-portable
     # control plane for prod-like runs. Dev uses `bun run dev` on the host instead.
     profiles: ["full"]
-    container_name: polyptych-server
+    container_name: polyptic-server
     build:
       # Context is the repo root (one level up from this compose file) so the
       # Dockerfile can copy the whole bun workspace.
@@ -62,7 +62,7 @@ services:
         condition: service_healthy
     environment:
       # Reach Postgres over the compose network — host is the `db` service name.
-      DATABASE_URL: postgres://polyptych:polyptych@db:5432/polyptych
+      DATABASE_URL: postgres://polyptic:polyptic@db:5432/polyptic
       PORT: "8080"
       # Persistent registry (the default); the in-memory store is a test-only double.
       STORE: postgres

@@ -1,4 +1,4 @@
-# Polyptych — local development
+# Polyptic — local development
 
 How to run the **Phase 2a** stack on your dev machine: a persistent **Postgres**
 registry, **multiple machines**, a minimal **Admin UI**, and **ident mode** — on top
@@ -35,17 +35,17 @@ bun run db:up      # start Postgres 16 in Docker (named volume `pgdata`)
 bun run dev        # build the contract, then run the whole stack
 ```
 
-`bun run dev` first builds the shared contract (`@polyptych/protocol`) and then starts
+`bun run dev` first builds the shared contract (`@polyptic/protocol`) and then starts
 five processes together under [`concurrently`](https://www.npmjs.com/package/concurrently),
 colour-coded by name:
 
 | name (colour)      | process               | what it does                                                              |
 | ------------------ | --------------------- | ------------------------------------------------------------------------- |
-| `server` (green)   | `@polyptych/server`   | HTTP + WS on **:8080**; loads the registry from Postgres; REST API + `/admin` |
-| `player` (cyan)    | `@polyptych/player`   | Vite dev server on **:5173**; the per-screen renderer (SolidJS)           |
-| `admin`  (magenta) | `@polyptych/admin`    | Vite dev server on **:5174**; the legacy operator Admin UI (SolidJS, retired at 3e) |
-| `console` (blue)   | `@polyptych/console`  | Vite dev server on **:5175**; the new Vue operator console (Phase 3a: the Wall view) |
-| `agent`  (yellow)  | `@polyptych/agent`    | dials the server, registers one screen, opens the player page             |
+| `server` (green)   | `@polyptic/server`   | HTTP + WS on **:8080**; loads the registry from Postgres; REST API + `/admin` |
+| `player` (cyan)    | `@polyptic/player`   | Vite dev server on **:5173**; the per-screen renderer (SolidJS)           |
+| `admin`  (magenta) | `@polyptic/admin`    | Vite dev server on **:5174**; the legacy operator Admin UI (SolidJS, retired at 3e) |
+| `console` (blue)   | `@polyptic/console`  | Vite dev server on **:5175**; the new Vue operator console (Phase 3a: the Wall view) |
+| `agent`  (yellow)  | `@polyptic/agent`    | dials the server, registers one screen, opens the player page             |
 
 Stop the stack with **Ctrl-C**. Postgres keeps running in Docker (that's what makes the
 [persistence check](#the-persistence-check--survives-a-restart) work); stop it with
@@ -132,7 +132,7 @@ The first agent registers as machine `dev-mac` with one output. Start a **second
 in another terminal, posing as a different machine with a different connector:
 
 ```sh
-cd packages/agent && POLYPTYCH_MACHINE_ID=machine-b POLYPTYCH_CONNECTOR=HDMI-2 bun run dev
+cd packages/agent && POLYPTIC_MACHINE_ID=machine-b POLYPTIC_CONNECTOR=HDMI-2 bun run dev
 ```
 
 A **second machine** appears in the Admin UI, with its own screen (the next sequential id,
@@ -162,7 +162,7 @@ only `docker compose -f deploy/docker-compose.yml down -v` wipes the volume.)
 
 Phase 2b puts a **claim step** between an agent dialing in and its screens going live, and gives every
 machine a durable per-machine **credential** that it presents on each reconnect. There are two modes,
-selected by a single server env var — **`POLYPTYCH_BOOTSTRAP_TOKEN`**.
+selected by a single server env var — **`POLYPTIC_BOOTSTRAP_TOKEN`**.
 
 > **mTLS is not part of 2b.** Hardening the agent↔server *transport* to mutual-TLS client certs (D12)
 > is deferred to the deploy / transport layer. Phase 2b is the **app-level** identity only:
@@ -170,7 +170,7 @@ selected by a single server env var — **`POLYPTYCH_BOOTSTRAP_TOKEN`**.
 
 ### OPEN MODE — the dev default (unchanged Phase 2a behaviour)
 
-If `POLYPTYCH_BOOTSTRAP_TOKEN` is **unset**, the server runs in **open mode**. Any agent that dials in
+If `POLYPTIC_BOOTSTRAP_TOKEN` is **unset**, the server runs in **open mode**. Any agent that dials in
 is **auto-registered and auto-approved** (`status: approved`), its screens are created, and it receives
 `server/apply` immediately — exactly as in Phase 2a. This is what plain `bun run dev` does, so every
 demo above keeps working with no extra setup.
@@ -178,17 +178,17 @@ demo above keeps working with no extra setup.
 To make open mode impossible to miss, the server logs a prominent **warning** at boot:
 
 ```
-WARN  enrollment is OPEN (POLYPTYCH_BOOTSTRAP_TOKEN unset) — every agent is auto-approved. Do not run like this in production.
+WARN  enrollment is OPEN (POLYPTIC_BOOTSTRAP_TOKEN unset) — every agent is auto-approved. Do not run like this in production.
 ```
 
 ### GATED MODE — enrollment on
 
-Set `POLYPTYCH_BOOTSTRAP_TOKEN` on the **server** to turn enrollment on, and set the **same** token on
+Set `POLYPTIC_BOOTSTRAP_TOKEN` on the **server** to turn enrollment on, and set the **same** token on
 each **agent** so it can make first contact:
 
 ```sh
 # one shared secret for this demo — any non-empty string
-export POLYPTYCH_BOOTSTRAP_TOKEN="dev-secret-please-change"
+export POLYPTIC_BOOTSTRAP_TOKEN="dev-secret-please-change"
 bun run dev
 ```
 
@@ -205,7 +205,7 @@ screen until an operator says so.
 A first connection no longer goes straight to content. The flow:
 
 1. The agent sends `agent/hello` carrying the **bootstrap token** (from its own
-   `POLYPTYCH_BOOTSTRAP_TOKEN`). The server checks the token, creates the machine as **`pending`**,
+   `POLYPTIC_BOOTSTRAP_TOKEN`). The server checks the token, creates the machine as **`pending`**,
    records the outputs it reported, mints a random durable **credential**, and replies
    `server/enrolled` (carrying that credential) then `server/pending`. **No screens are created and no
    `server/apply` is sent** — the player does not open.
@@ -228,7 +228,7 @@ admitted.
 ### Where the credential lives
 
 - **Agent side (the raw secret):** the agent persists the credential it received in `server/enrolled`
-  to **`${POLYPTYCH_STATE_DIR or ~/.polyptych}/credential-<machineId>`** (one file per machine id). On
+  to **`${POLYPTIC_STATE_DIR or ~/.polyptic}/credential-<machineId>`** (one file per machine id). On
   the next boot it reads that file and reconnects with the credential — no token needed. Delete the
   file to force a fresh enrollment: the agent falls back to the bootstrap token and the server
   **re-issues** a credential for the existing machine, carrying its current status.
@@ -242,18 +242,18 @@ The credential is a random **32-byte hex** string (`node:crypto` `randomBytes`).
 
 ```sh
 # 1. server + the dev stack in gated mode (the bundled dev-mac agent is itself gated):
-export POLYPTYCH_BOOTSTRAP_TOKEN="dev-secret-please-change"
+export POLYPTIC_BOOTSTRAP_TOKEN="dev-secret-please-change"
 bun run dev
 
 # 2. in another terminal, a second fresh agent carrying the SAME token:
 cd packages/agent && \
-  POLYPTYCH_MACHINE_ID=machine-b POLYPTYCH_CONNECTOR=HDMI-2 \
-  POLYPTYCH_BOOTSTRAP_TOKEN="dev-secret-please-change" bun run dev
+  POLYPTIC_MACHINE_ID=machine-b POLYPTIC_CONNECTOR=HDMI-2 \
+  POLYPTIC_BOOTSTRAP_TOKEN="dev-secret-please-change" bun run dev
 
 # 3. an impostor with the WRONG token — rejected and disconnected, never shows up:
 cd packages/agent && \
-  POLYPTYCH_MACHINE_ID=impostor POLYPTYCH_CONNECTOR=HDMI-9 \
-  POLYPTYCH_BOOTSTRAP_TOKEN="nope" bun run dev
+  POLYPTIC_MACHINE_ID=impostor POLYPTIC_CONNECTOR=HDMI-9 \
+  POLYPTIC_BOOTSTRAP_TOKEN="nope" bun run dev
 ```
 
 In the Admin UI, `dev-mac` and `machine-b` both show **PENDING** with their reported output count and
@@ -264,7 +264,7 @@ player tab opens; **Reject** a machine → its agent is dropped. The same action
 
 ## Phase 3a — the Vue console
 
-Phase 3a introduces the new **Vue operator console** (`@polyptych/console`) and the spatial **Wall**
+Phase 3a introduces the new **Vue operator console** (`@polyptic/console`) and the spatial **Wall**
 view. `bun run dev` now launches it alongside everything else: it runs on **<http://localhost:5175>**
 (blue in the `concurrently` output). The legacy SolidJS Admin UI on **:5174** stays put for now — it is
 retired at Phase 3e — so during 3a you have both: `:5174` for machine enrollment/approval, `:5175` for
@@ -299,7 +299,7 @@ library) are **"coming soon" placeholders** in 3a — only the Wall is wired up.
 
 ## REST routes
 
-All bodies/params are validated against the `@polyptych/protocol` zod schemas. CORS is
+All bodies/params are validated against the `@polyptic/protocol` zod schemas. CORS is
 enabled for the player and admin origins.
 
 ### Phase 3a — murals & placement
@@ -403,14 +403,14 @@ open "http://localhost:5173/?screen=screen-1"   # Linux: xdg-open, or paste into
 | env var                 | default                                                        | meaning                                                        |
 | ----------------------- | ------------------------------------------------------------- | -------------------------------------------------------------- |
 | `STORE`                 | `postgres`                                                     | registry backend: `postgres` (durable) or `memory` (test)      |
-| `DATABASE_URL`          | `postgres://polyptych:polyptych@localhost:5432/polyptych`     | Postgres connection used when `STORE=postgres`                 |
+| `DATABASE_URL`          | `postgres://polyptic:polyptic@localhost:5432/polyptic`     | Postgres connection used when `STORE=postgres`                 |
 | `PORT`                  | `8080`                                                         | server HTTP + WS port                                          |
-| `POLYPTYCH_BOOTSTRAP_TOKEN` | _(unset → **open mode**)_                                 | **server + agent.** Set on the **server** to gate enrollment; set the **same** value on each **agent** for first-contact. Unset on the server = open mode (auto-approve, with the boot warning). |
+| `POLYPTIC_BOOTSTRAP_TOKEN` | _(unset → **open mode**)_                                 | **server + agent.** Set on the **server** to gate enrollment; set the **same** value on each **agent** for first-contact. Unset on the server = open mode (auto-approve, with the boot warning). |
 | `PLAYER_BASE_URL`       | `http://localhost:5173`                                       | base the server uses to build each `playerUrl`                 |
-| `POLYPTYCH_MACHINE_ID`  | `/etc/machine-id` if present, else `dev-mac`                  | the agent's machine identity (used for the multi-machine demo) |
-| `POLYPTYCH_CONNECTOR`   | `HDMI-1`                                                       | the agent's output connector (used for the multi-machine demo) |
-| `POLYPTYCH_BACKEND`     | _(auto → `dev-open`)_                                          | force the agent's display backend                              |
-| `POLYPTYCH_STATE_DIR`   | `~/.polyptych`                                                | **agent.** Directory where the agent persists its durable credential, as `credential-<machineId>` |
+| `POLYPTIC_MACHINE_ID`  | `/etc/machine-id` if present, else `dev-mac`                  | the agent's machine identity (used for the multi-machine demo) |
+| `POLYPTIC_CONNECTOR`   | `HDMI-1`                                                       | the agent's output connector (used for the multi-machine demo) |
+| `POLYPTIC_BACKEND`     | _(auto → `dev-open`)_                                          | force the agent's display backend                              |
+| `POLYPTIC_STATE_DIR`   | `~/.polyptic`                                                | **agent.** Directory where the agent persists its durable credential, as `credential-<machineId>` |
 
 The dev canvas defaults to **1920×1080**.
 
@@ -452,10 +452,10 @@ the top of `deploy/docker-compose.yml`.
 
 ## Phase 2b — Definition of Done
 
-> Set `POLYPTYCH_BOOTSTRAP_TOKEN` (gated mode) and bring up the stack; a fresh agent shows as
+> Set `POLYPTIC_BOOTSTRAP_TOKEN` (gated mode) and bring up the stack; a fresh agent shows as
 > **PENDING** in the Admin UI; click **Approve** → its screens appear and the player opens; an
 > **unknown / wrong-token** agent (and any machine you **Reject**) is turned away and disconnected.
-> The agent keeps a durable credential at `${POLYPTYCH_STATE_DIR or ~/.polyptych}/credential-<machineId>`
+> The agent keeps a durable credential at `${POLYPTIC_STATE_DIR or ~/.polyptic}/credential-<machineId>`
 > and the server stores only its `sha256` hash. (mTLS transport hardening is deferred — see
 > [`ROADMAP.md`](./ROADMAP.md).)
 

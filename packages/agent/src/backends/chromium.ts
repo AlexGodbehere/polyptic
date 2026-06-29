@@ -36,7 +36,7 @@ export const POPUP_SUPPRESSION_FLAGS: readonly string[] = [
   "--disable-features=Translate,InfobarUI",
 ];
 
-/** Candidate Chromium binary names, most-preferred first; `POLYPTYCH_CHROMIUM` overrides. */
+/** Candidate Chromium binary names, most-preferred first; `POLYPTIC_CHROMIUM` overrides. */
 const CHROMIUM_CANDIDATES = [
   "chromium",
   "chromium-browser",
@@ -60,7 +60,7 @@ export interface ChromiumLaunchSpec {
   /** `--force-device-scale-factor` (default 1, per ARCHITECTURE). */
   scaleFactor?: number;
   /**
-   * WM class. X11: sets WM_CLASS so we can find the window (`--class=polyptych-<connector>`).
+   * WM class. X11: sets WM_CLASS so we can find the window (`--class=polyptic-<connector>`).
    * Wayland-native: Chromium reports `app_id="chromium"` regardless (placement keys on the
    * window's pid / launch order instead); only meaningful here for the XWayland fallback.
    */
@@ -96,25 +96,25 @@ export function buildChromiumArgs(spec: ChromiumLaunchSpec): string[] {
   return args;
 }
 
-/** Resolve the Chromium binary (or throw a clear error). `POLYPTYCH_CHROMIUM` wins. */
+/** Resolve the Chromium binary (or throw a clear error). `POLYPTIC_CHROMIUM` wins. */
 export async function resolveChromium(env: NodeJS.ProcessEnv = process.env): Promise<string> {
-  const override = env.POLYPTYCH_CHROMIUM?.trim();
+  const override = env.POLYPTIC_CHROMIUM?.trim();
   const candidates = override ? [override] : [...CHROMIUM_CANDIDATES];
   for (const c of candidates) {
     if (await which(c)) return c;
   }
   throw new Error(
     `no Chromium binary found (tried: ${candidates.join(", ")}). Install the .deb Chromium ` +
-      `(D27) or set POLYPTYCH_CHROMIUM to the browser path.`,
+      `(D27) or set POLYPTIC_CHROMIUM to the browser path.`,
   );
 }
 
-/** Base directory holding the per-output profiles. `POLYPTYCH_PROFILE_DIR` overrides. */
+/** Base directory holding the per-output profiles. `POLYPTIC_PROFILE_DIR` overrides. */
 export function profileBaseDir(env: NodeJS.ProcessEnv = process.env): string {
-  const override = env.POLYPTYCH_PROFILE_DIR?.trim();
+  const override = env.POLYPTIC_PROFILE_DIR?.trim();
   if (override && override.length > 0) return override;
   const home = env.HOME && env.HOME.length > 0 ? env.HOME : homedir();
-  return join(home, ".polyptych", "profiles");
+  return join(home, ".polyptic", "profiles");
 }
 
 /** Filesystem-safe profile directory for `connector` (e.g. `DP-1` → `<base>/DP-1`). */
@@ -165,7 +165,7 @@ export async function resetCrashFlags(
       .replace(/"exited_cleanly":\s*(?:true|false)/g, '"exited_cleanly":true');
   }
   try {
-    const tmp = `${prefs}.polyptych.tmp`;
+    const tmp = `${prefs}.polyptic.tmp`;
     await writeFile(tmp, next);
     await rename(tmp, prefs); // atomic replace
   } catch (err) {

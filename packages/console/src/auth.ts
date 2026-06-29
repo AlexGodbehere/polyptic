@@ -3,7 +3,7 @@
  * land in a later sub-phase; for now the sign-in screen just flips this localStorage flag so the
  * router guard lets the operator into the console.
  */
-const KEY = "polyptych.signedIn";
+const KEY = "polyptic.signedIn";
 
 export function isSignedIn(): boolean {
   try {

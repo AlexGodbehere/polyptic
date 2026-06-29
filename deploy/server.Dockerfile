@@ -1,11 +1,11 @@
-# Polyptych control plane — container image.
+# Polyptic control plane — container image.
 #
 # Minimal Bun image for the server (used by the `full` compose profile and as the
 # prod-portable artifact). Build context is the REPO ROOT (see docker-compose.yml:
 # build.context = ..), so paths below are relative to the monorepo root.
 #
 # Build standalone:
-#     docker build -f deploy/server.Dockerfile -t polyptych-server .
+#     docker build -f deploy/server.Dockerfile -t polyptic-server .
 # Or via compose:
 #     docker compose -f deploy/docker-compose.yml --profile full up --build
 FROM oven/bun:1
@@ -19,7 +19,7 @@ COPY . .
 # Install all workspace dependencies.
 RUN bun install
 
-# Build the shared contract so @polyptych/protocol resolves to its compiled
+# Build the shared contract so @polyptic/protocol resolves to its compiled
 # dist/ (its package.json "main"/"exports" point at ./dist) before the server
 # imports it.
 RUN cd packages/protocol && bun run build

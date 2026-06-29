@@ -47,7 +47,7 @@ function detectChromium(sys: Sys): ChromiumFound | null {
 function installDebFile(sys: Sys, source: string, log: Logger): void {
   let file = source;
   if (/^https?:\/\//.test(source)) {
-    file = "/tmp/polyptych-chromium.deb";
+    file = "/tmp/polyptic-chromium.deb";
     if (sys.which("curl")) {
       sys.exec("curl", ["-fSL", "-o", file, source], { desc: `download ${source}` });
     } else if (sys.which("wget")) {

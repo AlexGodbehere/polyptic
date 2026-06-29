@@ -36,7 +36,7 @@ import {
   ServerToAgentRejected,
   ServerToPlayerRender,
   parseMessage,
-} from "@polyptych/protocol";
+} from "@polyptic/protocol";
 import type { FastifyBaseLogger } from "fastify";
 import type { Server } from "node:http";
 import type { RawData } from "ws";

@@ -58,7 +58,7 @@ interface SwayWindowEvent {
 }
 
 function looksLikeChromium(appId: string): boolean {
-  return /chrom|polyptych/i.test(appId);
+  return /chrom|polyptic/i.test(appId);
 }
 
 /** A live `swaymsg -t subscribe -m '["window"]'` monitor we can query for the placed window. */
@@ -299,7 +299,7 @@ async function requireSwaymsg(): Promise<void> {
   if (!(await which("swaymsg"))) {
     throw new Error(
       "swaymsg not found — the wayland-sway backend needs sway running and swaymsg on PATH " +
-        "(see docs/DEPLOY.md / `polyptych-agent setup`)",
+        "(see docs/DEPLOY.md / `polyptic-agent setup`)",
     );
   }
 }

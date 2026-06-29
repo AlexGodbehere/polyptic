@@ -24,7 +24,7 @@ import {
 } from "solid-js";
 import type { JSX } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
-import type { MachineView, ScreenView, ServerToAdminMessage } from "@polyptych/protocol";
+import type { MachineView, ScreenView, ServerToAdminMessage } from "@polyptic/protocol";
 import { AdminSocket, type ConnState } from "./ws";
 
 const SERVER_WS_URL = "ws://localhost:8080/admin";
@@ -382,7 +382,7 @@ export function Admin(): JSX.Element {
         <div class="brand">
           <span class="brand-mark" aria-hidden="true" />
           <div class="brand-text">
-            <h1>Polyptych</h1>
+            <h1>Polyptic</h1>
             <p class="brand-sub">Display-wall control</p>
           </div>
         </div>

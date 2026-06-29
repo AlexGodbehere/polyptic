@@ -1,7 +1,7 @@
 /**
  * Enrollment / agent authentication (Phase 2b).
  *
- * The server runs in one of two modes, selected by the `POLYPTYCH_BOOTSTRAP_TOKEN` env var:
+ * The server runs in one of two modes, selected by the `POLYPTIC_BOOTSTRAP_TOKEN` env var:
  *
  *   OPEN MODE   (token UNSET — the dev default): every agent that connects is auto-registered AND
  *               auto-approved exactly like Phase 2a. `authenticate()` always returns `open`.
@@ -20,7 +20,7 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-import type { AgentMessage, EnrollmentStatus } from "@polyptych/protocol";
+import type { AgentMessage, EnrollmentStatus } from "@polyptic/protocol";
 
 /** The `agent/hello` variant of the agent channel union. */
 export type AgentHelloMessage = Extract<AgentMessage, { t: "agent/hello" }>;
@@ -96,9 +96,9 @@ export class Enrollment {
     this.open = this.token === undefined;
   }
 
-  /** Build from the environment (`POLYPTYCH_BOOTSTRAP_TOKEN`). */
+  /** Build from the environment (`POLYPTIC_BOOTSTRAP_TOKEN`). */
   static fromEnv(env: Record<string, string | undefined> = process.env): Enrollment {
-    return new Enrollment(env.POLYPTYCH_BOOTSTRAP_TOKEN);
+    return new Enrollment(env.POLYPTIC_BOOTSTRAP_TOKEN);
   }
 
   private tokenValid(provided: string | undefined): boolean {

@@ -1,5 +1,5 @@
 /**
- * Tiny logger for the `polyptych-agent setup` provisioner.
+ * Tiny logger for the `polyptic-agent setup` provisioner.
  *
  * Every step is logged with a stable, greppable prefix. In `--dry-run` the prefix flips to
  * `[setup:dry-run]` and mutating steps log `[plan] would …` instead of acting, so an operator can

@@ -1,15 +1,15 @@
 {
-  "name": "@polyptych/e2e",
+  "name": "@polyptic/e2e",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Polyptych end-to-end suite — spawns the real control plane and drives it over WS + REST with bun test.",
+  "description": "Polyptic end-to-end suite — spawns the real control plane and drives it over WS + REST with bun test.",
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@polyptych/protocol": "workspace:*"
+    "@polyptic/protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.1.0",

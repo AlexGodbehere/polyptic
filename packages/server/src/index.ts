@@ -1,5 +1,5 @@
 /**
- * @polyptych/server — the control plane.
+ * @polyptic/server — the control plane.
  *
  * Fastify (REST + CORS) on :8080, with three WebSocket channels (/agent, /player, /admin)
  * multiplexed onto the same HTTP server. The desired-state + registry live in a durable Store
@@ -43,7 +43,7 @@ await store.migrate();
 const control = new ControlPlane(store);
 await control.init();
 
-// ── Enrollment policy (Phase 2b): OPEN MODE when POLYPTYCH_BOOTSTRAP_TOKEN is unset. ──
+// ── Enrollment policy (Phase 2b): OPEN MODE when POLYPTIC_BOOTSTRAP_TOKEN is unset. ──
 const enrollment = Enrollment.fromEnv();
 
 const hub = new PlayerHub();
@@ -75,8 +75,8 @@ attachWebSockets({
 if (enrollment.open) {
   fastify.log.warn(
     { event: "enrollment.open" },
-    "⚠️  ENROLLMENT IS OPEN: POLYPTYCH_BOOTSTRAP_TOKEN is unset — every agent that connects is " +
-      "auto-registered AND auto-approved (Phase 2a behaviour). Set POLYPTYCH_BOOTSTRAP_TOKEN to " +
+    "⚠️  ENROLLMENT IS OPEN: POLYPTIC_BOOTSTRAP_TOKEN is unset — every agent that connects is " +
+      "auto-registered AND auto-approved (Phase 2a behaviour). Set POLYPTIC_BOOTSTRAP_TOKEN to " +
       "require a bootstrap token + operator approval (gated enrollment).",
   );
 } else {
@@ -120,7 +120,7 @@ try {
       screens: control.getScreens().length,
       machines: control.getMachines().length,
     },
-    "polyptych control plane up",
+    "polyptic control plane up",
   );
 } catch (err) {
   fastify.log.error(err, "failed to start");
