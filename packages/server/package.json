@@ -1,0 +1,26 @@
+{
+  "name": "@polyptych/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Polyptych control plane — Fastify REST + WebSocket hub holding the in-memory desired-state.",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@polyptych/protocol": "workspace:*",
+    "fastify": "^4.28.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.5.0"
+  }
+}

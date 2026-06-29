@@ -22,7 +22,7 @@ Polyptych is a **generic, self-hostable** system to centrally orchestrate **wall
 - **Player channel** (screen ↔ server): content for that screen's slice, pushed live. Content never routes through the agent — it goes server → player directly, for speed.
 
 ## Stack (locked — see DECISIONS.md)
-- **TypeScript everywhere**, ESM, pnpm workspaces, single `tsconfig.base.json`.
+- **TypeScript everywhere**, ESM, **bun** workspaces, single `tsconfig.base.json`. Bun installs deps, runs TS natively (`bun --watch`), and serves the Vite player — no Node/pnpm/tsx.
 - **`@polyptych/protocol`** — shared zod contracts. **All cross-process messages are defined and validated here.** Change the contract here first.
 - **`@polyptych/server`** — Fastify + Postgres + `ws`; REST + WebSocket; Prometheus `/metrics`.
 - **`@polyptych/agent`** — Bun single binary; controls host via IPC sockets + child processes; `DisplayBackend` interface (`wayland-sway` | `x11-i3`, auto-detected).

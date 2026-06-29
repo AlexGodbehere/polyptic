@@ -2,22 +2,21 @@
 
 The remembered path. Fixed direction, flexible detail. Update the **CURRENT** marker as we go. Phases are sequenced by dependency, not by calendar.
 
-> **CURRENT: Phase 0 → entering Phase 1.** Foundation (docs, contract, workspace) is in place; next is the live vertical slice.
+> **CURRENT: Phase 1 ✅ done → entering Phase 2.** Vertical slice runs on bun: change a screen's content via REST → player render pushed in ~4ms over WS, stable-id in-place swap, no reload (verified by an e2e harness, 8/8). Next is the screens-first registry + enrollment + ident.
 
 ---
 
 ## Phase 0 — Foundation ✅ (this commit)
-Anchor docs (`CLAUDE.md`, `ROADMAP.md`, `DECISIONS.md`), monorepo skeleton (pnpm workspaces + `tsconfig.base`), and the shared **contract** (`@polyptych/protocol`, zod). The keystone everything builds against.
+Anchor docs (`CLAUDE.md`, `ROADMAP.md`, `DECISIONS.md`), monorepo skeleton (bun workspaces + `tsconfig.base`), and the shared **contract** (`@polyptych/protocol`, zod). The keystone everything builds against.
 **DoD:** workspace resolves; protocol types compile; design + decisions committed.
 
-## Phase 1 — Live vertical slice ◀ NEXT
+## Phase 1 — Live vertical slice ✅ (done)
 The thinnest end-to-end thing that proves the spine and the **instant** property.
-- `server`: holds desired-state in memory, exposes a WS hub + a stub REST call to set one screen's content.
-- `agent`: connects, registers one fake "screen", launches one player (on dev, just opens the page).
-- `player`: SolidJS page, connects over WS, renders one surface, **swaps content via DOM with no reload** when the server pushes a change.
-- `deploy`: docker-compose runs the server (+ Postgres, unused yet) for local dev.
-**DoD:** change a screen's URL via a REST call → it updates on the player in < ~150ms, no reload. Demo-able.
-**Good candidate for a parallel build** (server / agent / player against the locked contract).
+- `server`: in-memory desired-state, Fastify REST + WS hub (`/agent`, `/player`) on :8080.
+- `agent`: connects, registers one screen, opens the player via the `dev-open` backend.
+- `player`: SolidJS page, connects over WS, renders the slice, **swaps content via keyed DOM diff (no reload)**.
+- `deploy`: docker-compose Postgres (Phase 2+, unused by the slice); run everything with `bun run dev`.
+**DoD met:** REST change → player render in **~4ms** over WS, **stable-id in-place swap**, no reload. Verified by `scratchpad/harness.ts` (8/8) + typecheck + Vite build. See `docs/DEV.md`. Built in parallel against the locked contract, then cross-reviewed + fixed.
 
 ## Phase 2 — Screens-first registry + enrollment + ident
 Real Machine/Output/Screen registry in Postgres. Outbound WSS **enrollment** (bootstrap token → claim → mTLS cert). **Ident mode** (flash friendly name on each output). Multiple screens across multiple machines.

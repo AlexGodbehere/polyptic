@@ -1,0 +1,40 @@
+# Polyptych — local dev infrastructure
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 2+ ONLY.  NOT USED BY THE PHASE 1 VERTICAL SLICE.
+# ─────────────────────────────────────────────────────────────────────────────
+# The Phase 1 slice (`bun run dev`) holds all desired-state IN MEMORY in
+# @polyptych/server — it needs NO database and does NOT read this file.
+#
+# This Postgres service is scaffolding for Phase 2, when the real
+# Machine/Output/Screen registry + enrollment move into a durable store.
+# Until then it is safe to ignore; you do not need Docker to run the demo.
+#
+# When Phase 2 lands, bring it up with:
+#     docker compose -f deploy/docker-compose.yml up -d
+# and point the server at:
+#     postgres://polyptych:polyptych@localhost:5432/polyptych
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: polyptych-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: polyptych
+      POSTGRES_PASSWORD: polyptych
+      POSTGRES_DB: polyptych
+    ports:
+      # host:container — exposes the DB to the server running on the host.
+      - "5432:5432"
+    volumes:
+      # Named volume so data survives `docker compose down` (use `down -v` to wipe).
+      - polyptych-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polyptych -d polyptych"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  polyptych-pgdata:

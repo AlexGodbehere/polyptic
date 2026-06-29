@@ -33,8 +33,14 @@ adapter.resolve(source) -> { url | launchSpec, surfaceType, auth: AuthStrategy, 
 
 New integrations = new adapters; the core model never changes.
 
-## Auth strategies (generic, per source)
-`public` · `anonymous-viewer` · `reverse-proxy-header-injection` (proxy adds `Authorization:` — iframes can't set headers) · `persisted-session` (seed a browser profile once, persist via `--user-data-dir`) · `oidc`. Admin UI/API auth is generic **OIDC** via standard discovery (any IdP). Agent↔server identity: bootstrap token → mTLS cert keyed to `/etc/machine-id`, or OIDC client credentials.
+## Auth — two separate concerns (don't conflate)
+
+**Bucket A — content auth ("can the kiosk *see* the website?").** This is **website/browser level**, not Polyptych's. When the player iframes `https://grafana…`, the browser handles the session (cookies, OAuth redirects) exactly as on a laptop. Polyptych just points a tile at a URL. The only wrinkle is that a wall is *unattended* — no human to log in — so we provide ways to make the browser arrive **already authenticated**, without re-implementing anyone's login. Per-source strategies:
+`public` (do nothing) · `anonymous-viewer` (e.g. a Grafana anonymous org — nothing to do) · `reverse-proxy-header-injection` (a proxy in front of the source adds `Authorization:` because an iframe can't) · `persisted-session` (seed the kiosk browser profile with a session cookie once, persist via `--user-data-dir`) · `oidc` (pre-seeded/refreshed token). Polyptych's only role here is *config* — which URL/proxy a tile points at. Often: nothing. If a tile needs login and nothing is arranged, it simply shows that site's login page.
+
+**Bucket B — Polyptych's own auth ("can a *person* reconfigure the wall?").** This **is** our application layer. The admin UI/API is OIDC-gated via standard discovery (any IdP) so randoms on the network can't take over the wall. Agent↔server identity is separate again: bootstrap token → mTLS cert keyed to `/etc/machine-id` (or OIDC client credentials).
+
+When we say "build the auth-strategy seam from day one," we mean Bucket A is a per-tile config field. Bucket B (admin OIDC) is its own thing (Phase 6).
 
 ## API sketch (REST + WS)
 ```

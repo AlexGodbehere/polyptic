@@ -37,7 +37,10 @@ export const Output = z.object({
 });
 export type Output = z.infer<typeof Output>;
 
-export const DisplayBackend = z.enum(["wayland-sway", "x11-i3"]);
+// "dev-open" is the development backend: it just opens player URLs in the host's default
+// browser (macOS `open` / Linux `xdg-open`) so the system runs on any dev machine with no
+// compositor. The real placement backends (wayland-sway, x11-i3) land in Phase 4.
+export const DisplayBackend = z.enum(["wayland-sway", "x11-i3", "dev-open"]);
 export type DisplayBackend = z.infer<typeof DisplayBackend>;
 
 /** A client machine. Plumbing — users address screens, not machines. */
