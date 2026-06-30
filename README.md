@@ -2,96 +2,115 @@
 
 > A **polyptic** is a multi-panel painting whose panels together compose one picture — exactly what a wall of screens is.
 
-**Polyptic is a generic, self-hostable system for centrally orchestrating walls of screens and fleets of display kiosks from a web UI.** Named screens, drag-and-drop layouts, preset **scenes**, a REST/WebSocket API, live preview, and zero-click boot. It is **vendor-neutral**: any web content, dashboard, image or video; any OIDC identity provider; runs on any Kubernetes cluster or plain Docker host.
+**Polyptic is a generic, self-hostable system for centrally orchestrating walls of screens and fleets of display kiosks from a web console.** Named screens, a drag-and-drop spatial canvas, combined video-wall surfaces, a reusable content library (linkable **or** uploaded media), preset **scenes**, live preview, a live activity feed, real local-account auth, a REST/WebSocket API, and zero-click cold boot. It is **vendor-neutral**: any web content, dashboard, image or video; runs on any Kubernetes cluster or plain Docker host; the edge boxes are stock Ubuntu.
 
 It replaces the all-too-common pattern of "a fragile per-machine boot script that clicks here, waits, opens a browser, and types a password in plaintext" with one declarative control plane and thin reconciling agents.
 
-> This repo is the **product**. It has **no dependency on any specific stack.** A reference *Example integration* shows how to point it at a Grafana + Keycloak deployment (see `docs/ARCHITECTURE.md`), but Grafana, Keycloak and friends are optional content/identity adapters, never foundations.
+> This repo is the **product**. It has **no dependency on any specific stack** — ACS/Factory+, Grafana, Keycloak and friends are optional content/identity adapters that motivated the design, never foundations.
 
 ---
 
 ## Core ideas
 
-- **Screens, not machines.** You drive *named screens* ("Nessie", "Bertha"). A client machine is just plumbing — "this box owns these two outputs." An **ident mode** flashes each screen's name on its physical panel so onboarding/relabelling is point-and-confirm, never remote-desktop-and-guess.
-- **One global layout, reconciled.** The control plane holds a single virtual-canvas layout + named **scenes**; each agent renders only *its* slice. This is the same desired-state reconcile loop as a Kubernetes controller (spec/status, generation/observedGeneration) — so the fleet is **one consistent system, not N isolated kiosks**, by construction.
-- **Buy the substrate, build the brain.** The device stack (Ubuntu + `sway` + `greetd` + `systemd` + Chromium kiosk) is standard and borrowed wholesale. The only thing Polyptic itself *is*, is the global-layout + scenes + API + UI that no off-the-shelf signage product provides.
-- **Typed surfaces.** A tile can be a web page, a dashboard panel, an image, a video, a slideshow, or a native window — so the system is never trapped in an "iframes only" model.
-- **Outbound-only agents.** Clients dial out to the control plane (WSS); no inbound ports or NAT holes. Cold boot = reconnect and reconcile.
+- **Screens, not machines.** You drive *named screens* ("Nessie", "Bertha"). A client machine is just plumbing — "this box owns these outputs." An **ident mode** flashes each screen's name on its physical panel so onboarding is point-and-confirm, never remote-desktop-and-guess.
+- **One global layout, reconciled.** The control plane holds a single spatial layout ("murals") + named **scenes**; each agent renders only *its* slice. Same desired-state reconcile loop as a Kubernetes controller — the fleet is **one consistent system, not N isolated kiosks**, by construction.
+- **Instant.** Content changes propagate over WebSocket and patch the player's DOM **in place — no reload** (the iframe/img/video source swaps, no white flash). Snappy enough to demo to stakeholders.
+- **Buy the substrate, build the brain.** The device stack (Ubuntu + `sway`/`greetd`/`systemd` + Chromium kiosk) is standard and borrowed wholesale. Only the global-layout + scenes + content library + API + console are ours.
+- **Outbound-only agents, air-gappable edge.** Clients dial out to the control plane; no inbound ports. The control plane is also the **provisioning depot** — an edge box can install everything from the server with `curl … | sh`, no internet required (see *Provisioning*).
+
+## Quickstart (local dev)
+
+```bash
+bun install
+bun run db:up                                 # Postgres in Docker (or use STORE=memory to skip it)
+POLYPTIC_OUTPUTS="HDMI-1,HDMI-2" bun run dev   # console :5175 · server :8080 · player :5173 · a dev agent
+```
+Open **http://localhost:5175**, sign in (dev default `operator@polyptic.local` / `polyptic-admin`, prefilled), approve the dev machine under **Machines**, drag its screens onto the canvas, and open a player tab per screen at `http://localhost:5173/?screen=<id>`. Drop a URL or library source on a screen and watch it swap live. `bun run test` runs the suite; `bun run ui-smoke` runs the browser smoke check.
 
 ## Architecture
 
 ```
                   ┌──────────────────────────────────────────────┐
-                  │  polyptic-server   (control plane)            │
-                  │  TypeScript / Fastify · Postgres · ws          │
-                  │   • registry: machines · screens · outputs     │
-                  │   • ONE global layout + versioned scenes       │
-                  │   • REST + WebSocket API                       │
-                  │   • web UI: layout editor · scenes · preview · │
-                  │     ident-mode · fleet health                 │
+                  │  @polyptic/server   (control plane · :8080)   │
+                  │  Bun · Fastify · Postgres · ws · zod          │
+                  │   • registry: machines · screens · outputs    │
+                  │   • murals · placements · combined surfaces   │
+                  │   • content library · scenes · media on disk  │
+                  │   • REST + 3 WS channels · /healthz · /metrics │
+                  │   • serves the console + player SPAs           │
                   │  runs on any Kubernetes OR Docker host         │
                   └───────────────▲──────────────▲────────────────┘
-                       outbound    │   wss://     │   outbound
+                       outbound    │   ws(s)://    │   outbound
               ┌────────────────────┘              └────────────────────┐
      ┌────────┴───────────┐                              ┌─────────────┴──────┐
      │  Display client A  │   (machine = plumbing)        │  Display client C  │
-     │  Ubuntu + sway     │            ...                │  Ubuntu + sway     │
-     │  polyptic-agent   │  reconciles its slice via     │  polyptic-agent   │
-     │  Chromium player   │  swaymsg + the player app     │  Chromium player   │
+     │  Ubuntu + sway     │            ...                │  Ubuntu + x11/i3   │
+     │  polyptic-agent    │  reconciles its slice via     │  polyptic-agent    │
+     │  Chromium per out  │  swaymsg / xrandr + player    │  Chromium per out  │
      │ ┌────────┬────────┐│                              │ ┌────────┬────────┐ │
-     │ │ Screen │ Screen ││                              │ │ Screen │ Screen │ │
-     │ │"Nessie"│"Bertha"││                              │ │  ...   │  ...   │ │
+     │ │ Screen │ Screen ││                              │ │  ...   │  ...   │ │
      │ └────────┴────────┘│                              │ └────────┴────────┘ │
      └────────────────────┘                              └─────────────────────┘
+
+   Operator's browser ── REST /api/v1 + WS /admin (session-gated) ──► the console
 ```
 
 ### Components
-| component | where | tech | role |
-|---|---|---|---|
-| `polyptic-server` | any k8s / Docker | TypeScript/Node, Fastify, `ws`, Postgres, `zod` | source of truth: registry, global layout, versioned scenes, REST+WS API, web UI |
-| `polyptic-agent` | each display client | TypeScript (Bun single-file binary / `.deb`) | outbound WSS, reconciles its slice, drives `swaymsg`, captures `grim`/`wayvnc` preview |
-| `polyptic-player` | each screen (Chromium) | web app served by the server | renders the per-screen mosaic of typed surfaces |
-| `@polyptic/protocol` | shared | `zod` | wire types shared by server/agent/player |
+| component | tech | role |
+|---|---|---|
+| `@polyptic/server` | Bun · Fastify · `ws` · Postgres (porsager) · `zod` | source of truth: registry, murals/placement, combined surfaces, content library, scenes, media; REST + WS (`/agent`, `/player`, `/admin`); local auth; `/healthz` + Prometheus `/metrics`; serves both SPAs |
+| `@polyptic/console` | **Vue 3 · Vite · Vue Router · Pinia · Vue Flow** | the operator UI: spatial **Wall** canvas, content library, scenes, machines + cold-start wizard, settings, live activity feed |
+| `@polyptic/player` | **Vue 3 · Vite** | per-screen renderer; draws its slice of typed surfaces, including a video-wall **span** of one piece of content across panels; in-place updates |
+| `@polyptic/agent` | **Bun single binary** (`.deb`/`.rpm`) | outbound WS, reconciles its slice, drives `sway` (`swaymsg`) or `x11/i3`, launches Chromium-per-output, captures `grim`/`scrot` preview thumbnails |
+| `@polyptic/protocol` | `zod` | the shared contract — every cross-process message is defined and validated here |
 
 ### Device stack (each display client)
-Ubuntu 24.04 LTS minimal → `greetd [initial_session]` passwordless autologin (`kiosk`) → `sway` (outputs pinned by connector) → `systemd --user` services launch the agent + one Chromium `--app` per output (own `--user-data-dir`, popup-suppression flags, `exit_type` reset so a power cut never shows "Restore pages"). No `swayidle`; `output * dpms on`. **Zero clicks, zero sleeps, zero typed passwords.** Wayland's refusal to let clients self-position is a *feature*: all geometry lives in one authoritative place (the compositor, driven by the agent over `swaymsg` IPC).
+Ubuntu Server-minimal → `greetd` passwordless autologin (`kiosk`) → **`sway`** (Wayland; `x11`/`i3` fallback for NVIDIA) with outputs pinned by connector → `systemd`-supervised agent + one Chromium `--app` per output (own `--user-data-dir`, popup-suppression flags, `exit_type` reset so a power cut never shows "Restore pages"). No idle/blank; `output * dpms on`. **Zero clicks, zero sleeps, zero typed passwords.**
 
-### Content model — typed surfaces
-`web-url` · `dashboard-panel` · `dashboard-page` (rendered as player iframes) · `web-window` · `native-app` (the agent places these as **top-level windows** via `swaymsg` — the escape hatch for framing-blocked or non-web sources) · `image` · `video` · `slideshow`.
+### Content model
+Reusable **`ContentSource`** library entries — `web` · `dashboard` · `image` · `video` — that are **linkable (a URL) or uploaded** (stored on a disk volume, served with HTTP Range so video seeks). Assign a source to a screen or a combined surface by **drag-and-drop** or the inspector; a source assigned to a video wall **spans** across its member panels. Editing a library source re-pushes live to every screen showing it. (Office docs → pre-convert to image/video; framing-hostile sites are a known web limitation — use embed-friendly URLs or the kiosk's trusted-content flags.)
 
-**Content adapters** are pluggable: an adapter turns a logical source into a concrete URL/launch-spec + an auth strategy. A **Grafana adapter** (kiosk-URL / `d-solo` single-panel helper) ships as a first-class *optional* example — not a dependency. Office documents (e.g. PowerPoint) are handled by **pre-converting to images/PDF/MP4 server-side**, never rendered live.
+### Auth
+- **Operator console / API:** **local accounts**, done properly — argon2id password hashing (Bun's built-in), signed **HTTP-only** session cookies (secure over HTTPS), per-email + per-IP login **rate-limiting/lockout**, anti-CSWSH origin checks. Every `/api/v1/**` route and the `/admin` WebSocket are session-gated by default (`AUTH_ENABLED`); the device channels (`/agent`, `/player`) and `/healthz`,`/metrics`,`/media` are not. **OIDC/SSO** is a planned add-on on the same seam.
+- **Agent ↔ server:** a one-time **bootstrap token** (gated mode) → the machine appears *pending* → an operator **approves** it → a durable per-machine credential (the server stores only its `sha256`). Open mode auto-approves for dev, loudly. No inbound ports.
 
-### Auth (generic)
-- **Admin UI / API:** generic **OIDC/OAuth2** via standard discovery — works with any IdP (Keycloak, Auth0, Entra, Google, Authelia…). Anonymous/local fallback for trivial deployments.
-- **Per-content-source strategies:** `public` · `anonymous-viewer` · `reverse-proxy-header-injection` (a proxy adds `Authorization:` because iframes can't set headers) · `persisted-session` · `oidc`. Chosen per source by its adapter.
-- **Agent ↔ server:** bootstrap token → durable **mTLS client cert keyed to `/etc/machine-id`** (or OIDC client credentials). No inbound ports.
+### Live preview, health & activity
+Per-output **JPEG thumbnails** (`grim`/`scrot`) flow up the agent channel and paint the actual render onto each tile in the console. `GET /healthz` + a hand-rolled Prometheus `GET /metrics` (build info, revision, agents/players/machines/screens). A **Live Activity feed** streams notable events (machine connected/unreachable, screen approved, content assigned, scene applied, combine/split/rename).
 
-### Live preview
-Always-on `grim` per-output **JPEG thumbnails** pushed up the existing outbound WSS (shows *real* render + auth state — you'd see a login page if auth broke). On-demand `wayvnc` bound to `127.0.0.1`, tunnelled through the authenticated control plane to **noVNC** for deep debugging. Plus a WYSIWYG "intended layout" diagram next to the real thumbnail.
+## Provisioning the edge (air-gappable)
+
+The control plane *is* the depot — an edge box needs to reach **only your server**:
+
+```bash
+# agent only — fully air-gapped (the box never touches the internet):
+curl -sfL http://CONTROL_PLANE:8080/install | POLYPTIC_TOKEN=<token> sh -
+
+# full kiosk — substrate (sway/greetd/Chromium) from the server's bundle,
+# falling back to the distro's package manager only on an un-bundled distro with internet:
+curl -sfL http://CONTROL_PLANE:8080/install | POLYPTIC_TOKEN=<token> sh -s -- --kiosk
+```
+
+The script bakes in the control-plane URL from the host you curled. The server bundles the substrate `.deb`s for a supported distro (Ubuntu latest); `--kiosk` prefers that bundle and only reaches the internet when the box is on a distro you haven't bundled. The classic path also works: `sudo apt install ./polyptic-agent_*.deb` then `polyptic-agent setup …` (see `docs/DEPLOY.md`).
+
+Once provisioned, a box **dials in and waits to be approved**. The operator journey from there —
+**enrol → approve → ident the panels to name them → place on a mural → assign content** — is point-and-confirm (a guided **Cold-start wizard** in the console walks you through it). Full step-by-step:
+**[`docs/ONBOARDING.md`](docs/ONBOARDING.md)**.
 
 ## Deploy / Distribution
-Polyptic ships as **two artifacts** — see **[`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md)** for the full packaging story (image, `.deb`/`.rpm`, the tag-driven release flow, env reference, and the optional private-npm options):
+See **[`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md)** for the full packaging story.
 
-- **Server** — one **Docker image** (`ghcr.io/<owner>/polyptic-server`) that bundles the control plane **plus** the console and player SPAs, served same-origin so the session cookie just works. Deploy with `docker run`, the **docker-compose** `full` profile (server + Postgres), or the **Helm chart** in `deploy/helm/polyptic` (any cluster, bring-your-own Postgres). You don't `npm install` Polyptic — you run the image.
-- **Agent** — a per-box **`.deb`/`.rpm`** from the GitHub Release: `sudo apt install ./polyptic-agent_*.deb` then `polyptic-agent setup …`. The device-side guide (cold-boot chain, backends, troubleshooting, VM walkthrough) is **[`docs/DEPLOY.md`](docs/DEPLOY.md)**.
-- **Releases** are **tag-driven**: pushing `vX.Y.Z` builds the image + packages and attaches them to the Release. Nothing publishes on a normal push.
-- `polyptic-player`: static assets served by the server (bundled into the image).
-
-## Roadmap
-- **Phase 0 — Quick win (days):** point an *existing* wall at anonymous/`kiosk` dashboard URLs to delete any plaintext-password boot hack immediately and validate that the wall can be decoupled from human auth. Reversible, no new infra.
-- **Phase 1:** one Ubuntu client — autologin → `sway` → systemd-supervised Chromium per screen, static config. Proves zero-click cold-boot. *Verify GPU/Wayland on the real hardware.*
-- **Phase 2:** control-plane MVP + agent reconciling one scene; screen registry + ident mode.
-- **Phase 3:** mosaic player across all screens + typed surfaces + scenes + layout editor + atomic fan-out.
-- **Phase 4:** thumbnails + on-demand VNC; Helm + compose packaging; OIDC + mTLS identity; Prometheus metrics; last-good-slice caching.
-- **Phase 5 (nice-to-have):** image/video/slideshow + Office→media conversion; native-app surfaces as concrete needs arrive.
-
-Est. ~1.5–3 engineer-months to a production v1 for 1–2 engineers comfortable with TypeScript + Linux/k8s.
-
-## Example integrations
-- **Grafana + Keycloak (reference):** anonymous-Viewer org for public dashboards, or reverse-proxy header injection for protected ones; `d-solo` panels for fine mosaic control. See `docs/ARCHITECTURE.md` → *Example integration*.
+- **Server** — one **Docker image** (`ghcr.io/<owner>/polyptic-server`) bundling the control plane **plus** the console and player SPAs, served same-origin (so the session cookie just works). `docker run`, the **docker-compose** `full` profile (server + Postgres + media volume), or the **Helm chart** in `deploy/helm/polyptic` (bring-your-own Postgres; renders standalone). You don't `npm install` Polyptic — you run the image.
+- **Agent** — a per-box **`.deb`/`.rpm`**, or the `curl | sh` install above.
+- **Releases** are **tag-driven** (GitHub Actions): pushing `vX.Y.Z` builds the image + packages and attaches them to the Release. CI (typecheck + tests) runs on every push; nothing publishes on a normal push.
 
 ## Status
-Foundation in place: monorepo + the shared contract (`@polyptic/protocol`). **Next: Phase 1** — the live vertical slice (instant content on one screen). See `docs/ROADMAP.md` for the path, `docs/DECISIONS.md` for locked calls, and `CLAUDE.md` for working conventions. Full design narrative in `docs/DESIGN.md`; build reference in `docs/ARCHITECTURE.md`.
+
+**Feature-complete through Phase 8** and verified headlessly + in a real browser; the remaining work is environmental (real hardware), not features.
+
+- **Built & tested:** Phases 1–3 (instant slice → registry → enrollment → the full Vue console: murals, combined surfaces, content library, scenes, machines + cold-start wizard, local auth + settings), Phase 5 (live preview, metrics, Helm), Phase 7 (media upload to disk), Phase 8 (single-image packaging + CI/release/Pages). **101 end-to-end tests** (real server, REST + WS) + full TypeScript typecheck are green; the console's interactions (content names, drag-to-assign, combine/rename, the activity feed) are **verified in-browser** via the `tools/ui-check` Playwright harness. *(Phase 6 / OIDC is deliberately deferred — the seam is in place.)*
+- **Code-complete, not yet proven on hardware:** the **device stack** (Phase 4 — real `sway`/`x11` backends, `.deb` packaging, greetd cold-boot, Chromium-per-output) and the **production image build** / actual multi-machine deploy. These can only be validated on real boxes/VMs — that's the active next step.
+
+See **`docs/ONBOARDING.md`** to add a display, `docs/DEPLOY.md` for the device side, `docs/DISTRIBUTION.md` for packaging, `docs/ROADMAP.md` for the detailed state, `docs/DECISIONS.md` for the decision log (D1–D34+), `docs/DESIGN.md` for the narrative, `docs/ARCHITECTURE.md` for the build reference, and `CLAUDE.md` for working conventions.
 
 ## Naming note
-"Polyptic" was chosen over the working name "Mural" after a name-clash review: nothing in the display-wall/signage/kiosk space is named Mural, but **MURAL by Tactivos** (the $2B visual-collaboration whiteboard) holds registered software trademarks (USPTO `97134497`) and the entire `mural.*` domain/package namespace — fine for an internal codename, risky for a public/open-source product. Polyptic keeps the multi-panel metaphor with a clean namespace.
+"Polyptic" was chosen over the working name "Mural" after a name-clash review: nothing in the display-wall/signage/kiosk space is named Mural, but **MURAL by Tactivos** holds registered software trademarks (USPTO `97134497`) and the entire `mural.*` namespace — fine for an internal codename, risky for a public product. Polyptic keeps the multi-panel metaphor with a clean namespace. *(Trademark/domain for "Polyptic" not yet cleared — do before any public launch.)*
