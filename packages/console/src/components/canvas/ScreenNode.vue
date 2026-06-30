@@ -94,14 +94,18 @@ const store = useConsoleStore();
 const dropHover = ref(false);
 const SRC_TYPE = "application/x-polyptic-source";
 function onDragOver(e: DragEvent) {
-  if (!e.dataTransfer?.types.includes(SRC_TYPE)) return;
+  // A source drag is in progress (tracked in the store) → become a drop target.
+  if (!store.draggingSourceId && !e.dataTransfer?.types.includes(SRC_TYPE)) return;
   e.preventDefault();
-  e.dataTransfer.dropEffect = "copy";
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
   dropHover.value = true;
 }
 function onDrop(e: DragEvent) {
-  const sid = e.dataTransfer?.getData(SRC_TYPE);
   dropHover.value = false;
+  // Read the dragged source from the store (reliable) rather than dataTransfer.getData (empty on
+  // some real drops).
+  const sid = store.draggingSourceId ?? e.dataTransfer?.getData(SRC_TYPE);
+  store.endSourceDrag();
   if (!sid) return;
   e.preventDefault();
   e.stopPropagation();
@@ -114,6 +118,7 @@ function onDrop(e: DragEvent) {
     class="screen-node"
     :class="{ identing: data.identing, 'has-thumb': hasThumb, 'drop-hover': dropHover }"
     :style="nodeStyle"
+    :data-screen-id="data.screenId"
     @dragover="onDragOver"
     @dragleave="dropHover = false"
     @drop="onDrop"

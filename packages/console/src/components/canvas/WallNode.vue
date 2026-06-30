@@ -50,14 +50,15 @@ const store = useConsoleStore();
 const dropHover = ref(false);
 const SRC_TYPE = "application/x-polyptic-source";
 function onDragOver(e: DragEvent) {
-  if (!e.dataTransfer?.types.includes(SRC_TYPE)) return;
+  if (!store.draggingSourceId && !e.dataTransfer?.types.includes(SRC_TYPE)) return;
   e.preventDefault();
-  e.dataTransfer.dropEffect = "copy";
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
   dropHover.value = true;
 }
 function onDrop(e: DragEvent) {
-  const sid = e.dataTransfer?.getData(SRC_TYPE);
   dropHover.value = false;
+  const sid = store.draggingSourceId ?? e.dataTransfer?.getData(SRC_TYPE);
+  store.endSourceDrag();
   if (!sid) return;
   e.preventDefault();
   e.stopPropagation();
@@ -87,6 +88,7 @@ const nodeStyle = computed<Record<string, string>>(() => {
     class="wall-node"
     :class="{ identing: data.identing, selected: data.selected, 'drop-hover': dropHover }"
     :style="nodeStyle"
+    :data-wall-id="data.wallId"
     @dragover="onDragOver"
     @dragleave="dropHover = false"
     @drop="onDrop"

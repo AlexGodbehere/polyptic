@@ -119,6 +119,10 @@ export interface ConsoleState {
   /** A library source "armed" in the Wall's left library: click it, then click a screen/wall on the
    *  canvas to assign it (client-only UI state). Null = nothing armed. */
   pickedSourceId: string | null;
+  /** The library source currently being DRAGGED onto the canvas (set on dragstart, read on drop).
+   *  Carried in the store rather than the DragEvent's dataTransfer, whose getData() is unreliable
+   *  across real HTML5 drops. Null = no drag in progress. */
+  draggingSourceId: string | null;
   theme: "light" | "dark";
 }
 
@@ -144,6 +148,7 @@ export const useConsoleStore = defineStore("console", {
     selectedScreenIds: [],
     selectedWallId: null,
     pickedSourceId: null,
+    draggingSourceId: null,
     theme: initialTheme(),
   }),
 
@@ -1010,6 +1015,16 @@ export const useConsoleStore = defineStore("console", {
     /** Disarm any click-to-assign source. */
     clearPickedSource(): void {
       this.pickedSourceId = null;
+    },
+
+    /** A library source drag started (dragstart on the tray item). */
+    beginSourceDrag(id: string): void {
+      this.draggingSourceId = id;
+    },
+
+    /** The drag ended (dropped or cancelled). */
+    endSourceDrag(): void {
+      this.draggingSourceId = null;
     },
 
     /** Assign the armed source to a screen, then disarm. No-op if nothing is armed. */

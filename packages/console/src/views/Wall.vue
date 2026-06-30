@@ -53,6 +53,7 @@ function onDragStart(e: DragEvent, id: string) {
 
 /** Drag a library source onto a screen/surface to assign it (distinct DnD type from screen placement). */
 function onSourceDragStart(e: DragEvent, id: string) {
+  store.beginSourceDrag(id); // the drop reads this (store), not the unreliable dataTransfer.getData
   if (!e.dataTransfer) return;
   e.dataTransfer.setData("application/x-polyptic-source", id);
   e.dataTransfer.effectAllowed = "copy";
@@ -107,6 +108,7 @@ function place(id: string) {
             draggable="true"
             @click="pickSource(s.id)"
             @dragstart="onSourceDragStart($event, s.id)"
+            @dragend="store.endSourceDrag()"
           >
             <span class="lib-glyph" :style="{ color: `var(${kindColorVar(s.kind)})` }">
               {{ kindGlyph(s.kind) }}

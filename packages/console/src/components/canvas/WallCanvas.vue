@@ -301,6 +301,20 @@ function toFlow(clientX: number, clientY: number): { x: number; y: number } {
 
 function onDrop(e: DragEvent) {
   e.preventDefault();
+  // A library source dropped on the canvas → assign it to the screen/surface under the cursor. The
+  // dragged id lives in the store (reliable), and we hit-test the node so this works even when the
+  // node's own @drop doesn't fire.
+  const sid = store.draggingSourceId;
+  if (sid) {
+    store.endSourceDrag();
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const screenId = el?.closest<HTMLElement>("[data-screen-id]")?.dataset.screenId;
+    const wallId = el?.closest<HTMLElement>("[data-wall-id]")?.dataset.wallId;
+    if (screenId) store.setScreenContent(screenId, { sourceId: sid });
+    else if (wallId) store.setWallContent(wallId, { sourceId: sid });
+    return;
+  }
+  // Otherwise: a tray screen dropped on the canvas → place it.
   const dt = e.dataTransfer;
   const id = dt
     ? dt.getData("application/x-polyptic-screen") || dt.getData("text/plain")
@@ -312,7 +326,9 @@ function onDrop(e: DragEvent) {
 
 function onDragOver(e: DragEvent) {
   e.preventDefault();
-  if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+  // A source drag is "copy"; a tray-screen placement is "move". Setting the wrong dropEffect makes
+  // the browser reject the drop, so honour the in-progress source drag.
+  if (e.dataTransfer) e.dataTransfer.dropEffect = store.draggingSourceId ? "copy" : "move";
 }
 </script>
 
