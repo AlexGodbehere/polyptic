@@ -521,7 +521,9 @@ export class ControlPlane {
     const existing = this.machines.get(input.machineId);
     const machine: Machine = {
       id: input.machineId,
-      label: existing?.label ?? input.hostname ?? input.machineId,
+      // An operator rename wins (label diverged from the machineId default); otherwise adopt the box
+      // hostname, so an already-registered machine still UUID-labelled relabels on its next hello.
+      label: existing && existing.label !== existing.id ? existing.label : (input.hostname ?? input.machineId),
       agentVersion: input.agentVersion,
       backend: input.backend,
       outputs: input.outputs,
@@ -550,7 +552,9 @@ export class ControlPlane {
     const existing = this.machines.get(input.machineId);
     const machine: Machine = {
       id: input.machineId,
-      label: existing?.label ?? input.hostname ?? input.machineId,
+      // An operator rename wins (label diverged from the machineId default); otherwise adopt the box
+      // hostname, so an already-registered machine still UUID-labelled relabels on its next hello.
+      label: existing && existing.label !== existing.id ? existing.label : (input.hostname ?? input.machineId),
       agentVersion: input.agentVersion,
       backend: input.backend,
       outputs: input.outputs,
