@@ -2,8 +2,10 @@
 # deploy/build-agent.sh — compile the Polyptic agent to a single binary and package it as .deb + .rpm.
 #
 # PREREQUISITES (on the BUILD host):
-#   * bun   >= 1.1    https://bun.sh                   (compiles the agent: `bun build --compile`)
-#   * nfpm  >= 2.30   https://nfpm.goreleaser.com      (`go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest`)
+#   * bun   >= 1.1    https://bun.sh                   (REQUIRED — compiles the single binary)
+#   * nfpm  >= 2.30   https://nfpm.goreleaser.com      (OPTIONAL — only for .deb/.rpm; `brew install nfpm`)
+# The single binary (served by the control-plane depot at /dist/agent/<arch> and installed by the
+# zero-touch `curl|sh`) needs only bun; nfpm is just for the classic `apt install ./*.deb` path.
 #
 # USAGE:
 #   deploy/build-agent.sh [arch]
@@ -45,8 +47,11 @@ if [ -z "${VERSION:-}" ]; then
 fi
 
 # ── Prereq checks ────────────────────────────────────────────────────────────────────────────────
-command -v bun  >/dev/null 2>&1 || { echo "build-agent: 'bun' not found — see https://bun.sh"               >&2; exit 1; }
-command -v nfpm >/dev/null 2>&1 || { echo "build-agent: 'nfpm' not found — see https://nfpm.goreleaser.com" >&2; exit 1; }
+command -v bun  >/dev/null 2>&1 || { echo "build-agent: 'bun' not found — see https://bun.sh" >&2; exit 1; }
+# nfpm is OPTIONAL — it only builds the .deb/.rpm. The single binary needs only bun, so a missing
+# nfpm just skips packaging (with a note) rather than failing the build.
+HAVE_NFPM=0
+command -v nfpm >/dev/null 2>&1 && HAVE_NFPM=1
 
 OUT_DIR="deploy/dist"
 mkdir -p "$OUT_DIR"
@@ -70,12 +75,18 @@ bun build \
   packages/agent/src/index.ts
 chmod 0755 "$BIN_OUT"
 
-# ── Package: nfpm reads ${ARCH}/${VERSION} from the environment (see deploy/nfpm.yaml) ───────────
-export ARCH VERSION
-echo "==> nfpm package (deb)"
-nfpm package --config deploy/nfpm.yaml --packager deb --target "$OUT_DIR/"
-echo "==> nfpm package (rpm)"
-nfpm package --config deploy/nfpm.yaml --packager rpm --target "$OUT_DIR/"
+# ── Package (OPTIONAL): nfpm reads ${ARCH}/${VERSION} from the env (see deploy/nfpm.yaml). The binary
+#    above is the primary artifact; .deb/.rpm are only for the classic `apt install` path. ──────────
+if [ "$HAVE_NFPM" = 1 ]; then
+  export ARCH VERSION
+  echo "==> nfpm package (deb)"
+  nfpm package --config deploy/nfpm.yaml --packager deb --target "$OUT_DIR/"
+  echo "==> nfpm package (rpm)"
+  nfpm package --config deploy/nfpm.yaml --packager rpm --target "$OUT_DIR/"
+else
+  echo "==> nfpm not installed — built the binary only, skipping .deb/.rpm."
+  echo "    (the depot + curl|sh use the binary; for the classic apt path: brew install nfpm)"
+fi
 
 echo
 echo "==> Done. Artifacts in $OUT_DIR/:"
