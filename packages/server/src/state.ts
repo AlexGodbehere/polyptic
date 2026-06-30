@@ -885,6 +885,33 @@ export class ControlPlane {
     return undefined;
   }
 
+  /** What's on a screen now, for the console's tiles/inspector: the library source's name+kind (a
+   *  wall member shows the wall's source), an ad-hoc URL's derived name, or null when nothing's on air. */
+  screenContentSummary(screenId: string): { name: string; kind: ContentKind } | null {
+    const wall = this.getWallForScreen(screenId);
+    const sourceId = wall ? this.wallSourceIds.get(wall.id) : this.screenSourceIds.get(screenId);
+    if (sourceId) {
+      const src = this.contentSources.get(sourceId);
+      if (src) return { name: src.name, kind: src.kind };
+    }
+    const surface = this.state.slices[screenId]?.surfaces[0];
+    if (!surface) return null;
+    const kind = surface.type as ContentKind;
+    const raw = "url" in surface ? surface.url : "src" in surface ? surface.src : "";
+    return { name: this.contentNameFromUrl(raw, kind), kind };
+  }
+
+  /** A friendly name for ad-hoc content: the URL host, else a kind label. */
+  private contentNameFromUrl(raw: string, kind: ContentKind): string {
+    try {
+      const h = new URL(raw).host;
+      if (h) return h;
+    } catch {
+      /* not a URL */
+    }
+    return kind === "web" ? "Web page" : kind === "dashboard" ? "Dashboard" : kind === "image" ? "Image" : "Video";
+  }
+
   private nextWallId(): string {
     this.wallCounter += 1;
     return `wall-${this.wallCounter}`;

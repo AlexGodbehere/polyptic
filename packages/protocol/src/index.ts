@@ -288,6 +288,12 @@ export const ScreenView = Screen.extend({
   online: z.boolean(), // is a player currently connected for this screen?
   revision: z.number().int().nonnegative(), // last revision this screen's player observed
   surfaceCount: z.number().int().nonnegative(),
+  /** What's on the screen now — a library source's name+kind, an ad-hoc URL's derived name, or null.
+   *  Lets the console tiles + inspector show the actual content, not just a surface count. */
+  content: z
+    .object({ name: z.string(), kind: z.enum(["web", "dashboard", "image", "video"]) })
+    .nullable()
+    .optional(),
 });
 export type ScreenView = z.infer<typeof ScreenView>;
 

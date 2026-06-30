@@ -111,6 +111,7 @@ export function buildAdminState(
           online: playerHub.count(s.id) > 0,
           revision: presence.screenObservedRevision(s.id),
           surfaceCount: slice ? slice.surfaces.length : 0,
+          content: control.screenContentSummary(s.id),
         } satisfies ScreenView;
       });
 

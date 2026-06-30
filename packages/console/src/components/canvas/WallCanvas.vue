@@ -63,6 +63,7 @@ function buildData(screen: ScreenView) {
     status: statusOf(screen),
     online: !!screen.online,
     surfaceCount: screen.surfaceCount ?? 0,
+    content: screen.content ?? null,
     machineLabel: machine ? machine.label : screen.machineId,
     connector: screen.connector,
     identing: identingIds.has(screen.id),

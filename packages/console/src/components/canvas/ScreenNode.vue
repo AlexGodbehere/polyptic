@@ -11,7 +11,9 @@
 -->
 <script setup lang="ts">
 import { computed } from "vue";
+import type { ContentKind } from "@polyptic/protocol";
 import { useScreenThumbnail } from "./useThumbnails";
+import { kindLabel } from "../../content";
 
 type ScreenStatus = "live" | "empty" | "offline" | "error";
 
@@ -21,6 +23,7 @@ interface ScreenNodeData {
   status: ScreenStatus;
   online: boolean;
   surfaceCount: number;
+  content?: { name: string; kind: ContentKind } | null;
   machineLabel: string;
   connector: string;
   identing: boolean;
@@ -76,11 +79,13 @@ const nodeStyle = computed<Record<string, string>>(() => {
   return s;
 });
 
-const contentLabel = computed(() =>
-  props.data.surfaceCount === 1 ? "Showing content" : `${props.data.surfaceCount} surfaces`,
-);
-const kindLabel = computed(() =>
-  `${props.data.surfaceCount} surface${props.data.surfaceCount === 1 ? "" : "s"}`,
+// The actual content's name + kind (from admin/state), falling back to a generic label only when the
+// server hasn't told us what's on the screen.
+const contentLabel = computed(() => props.data.content?.name ?? "Showing content");
+const kindText = computed(() =>
+  props.data.content
+    ? kindLabel(props.data.content.kind)
+    : `${props.data.surfaceCount} surface${props.data.surfaceCount === 1 ? "" : "s"}`,
 );
 </script>
 
@@ -115,7 +120,7 @@ const kindLabel = computed(() =>
         <div v-if="!hasThumb" class="state live-state">
           <span class="content-name">{{ contentLabel }}</span>
         </div>
-        <span class="kind-label">{{ kindLabel }}</span>
+        <span class="kind-label">{{ kindText }}</span>
       </template>
 
       <!-- error (not reachable from the 3a contract; kept for parity) -->
