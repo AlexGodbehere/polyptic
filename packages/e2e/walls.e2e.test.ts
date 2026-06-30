@@ -529,6 +529,47 @@ describe("phase 3b combined surfaces (video walls)", () => {
   );
 
   test(
+    "the combined wall has a non-empty default name in admin/state.videoWalls",
+    async () => {
+      // A wall combined WITHOUT a name still gets a sensible default (the operator complaint: a wall
+      // auto-named "Screen 1 + Screen 2" with no way to rename). The contract keeps VideoWall.name
+      // OPTIONAL (walls stored before naming have none), but a freshly combined wall must carry one.
+      const state = await snapshot("admin/state for the default wall name");
+      const wall = wallById(state, wallId);
+      expect(wall).toBeDefined();
+      expect(typeof wall.name).toBe("string");
+      expect(wall.name.length).toBeGreaterThan(0);
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
+    "POST /walls/:id/rename {name} renames the wall (2xx) and admin/state reflects it",
+    async () => {
+      const res = await postJson(`/api/v1/walls/${wallId}/rename`, { name: "Atrium Wall" });
+      expect(res.status).toBeGreaterThanOrEqual(200);
+      expect(res.status).toBeLessThan(300);
+      await drain(res);
+
+      const state = await snapshot("admin/state after wall rename");
+      const wall = wallById(state, wallId);
+      expect(wall).toBeDefined();
+      expect(wall.name).toBe("Atrium Wall");
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
+    "POST /walls/:id/rename on an unknown wall → 404",
+    async () => {
+      const res = await postJson(`/api/v1/walls/wall-does-not-exist/rename`, { name: "Nope" });
+      expect(res.status).toBe(404);
+      await drain(res);
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
     "PUT /walls/:id/content pushes a server/render with the correct span to EACH member",
     async () => {
       const url = "https://example.com/wall-content-1";
@@ -706,6 +747,36 @@ describe("phase 3b combined surfaces (video walls)", () => {
       const surface = renderA.slice.surfaces.find((s: Frame) => s.url === url);
       expect(surface).toBeDefined();
       expect(surface.span).toBeUndefined();
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
+    "POST /murals/:id/walls with a {name} in the body creates a wall bearing that exact name",
+    async () => {
+      // After the split above, videoWalls[] is empty and A+B are still placed adjacent — combine them
+      // again, this time naming the wall at creation time (CombineScreensBody.name, optional).
+      const res = await postJson(`/api/v1/murals/${wallMuralId}/walls`, {
+        muralId: wallMuralId,
+        memberScreenIds: [screenA, screenB],
+        name: "Lobby Wall",
+      });
+      expect(res.status).toBeGreaterThanOrEqual(200);
+      expect(res.status).toBeLessThan(300);
+      await drain(res);
+
+      const state = await snapshot("admin/state with the named-at-creation wall");
+      expect(state.videoWalls.length).toBe(1);
+      const created = state.videoWalls[0];
+      expect(created.name).toBe("Lobby Wall");
+
+      // Restore an empty videoWalls[] (and freed members) for the lifecycle suite that follows.
+      const split = await del(`/api/v1/walls/${created.id}`);
+      expect(split.status).toBeGreaterThanOrEqual(200);
+      expect(split.status).toBeLessThan(300);
+      await drain(split);
+      const after = await snapshot("admin/state after restoring empty walls");
+      expect(after.videoWalls.length).toBe(0);
     },
     TEST_TIMEOUT,
   );

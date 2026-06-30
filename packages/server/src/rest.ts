@@ -28,6 +28,7 @@ import {
   PlaceScreenBody,
   RenameMuralBody,
   RenameScreenBody,
+  RenameVideoWallBody,
   ServerToAgentApply,
   ServerToAgentRejected,
   ServerToPlayerIdent,
@@ -566,7 +567,11 @@ export function registerRestRoutes(
       });
     }
 
-    const result = await control.combineScreens(params.data.muralId, body.data.memberScreenIds);
+    const result = await control.combineScreens(
+      params.data.muralId,
+      body.data.memberScreenIds,
+      body.data.name,
+    );
     if (!result.ok) {
       const status =
         result.error === "unknown-mural" || result.error === "unknown-screen"
@@ -620,6 +625,28 @@ export function registerRestRoutes(
     );
     broadcaster.broadcast();
     return { ok: true, wallId: params.data.wallId, revision: control.state.revision };
+  });
+
+  // POST /api/v1/walls/:wallId/rename  { name }  -> rename the combined surface (no render change)
+  fastify.post("/api/v1/walls/:wallId/rename", async (request, reply) => {
+    const params = WallParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+    const body = RenameVideoWallBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ error: "invalid body", issues: body.error.issues });
+    }
+
+    const wall = await control.renameVideoWall(params.data.wallId, body.data.name);
+    if (!wall) {
+      return reply.code(404).send({ error: `unknown wall: ${params.data.wallId}` });
+    }
+
+    fastify.log.info({ event: "wall.rename", wallId: wall.id, name: wall.name }, "video wall renamed");
+    // No render change (content is unaffected) — just re-broadcast admin/state so the console relabels.
+    broadcaster.broadcast();
+    return { ok: true, wall };
   });
 
   // PUT /api/v1/walls/:wallId/content  { url }  -> recompute spans + push render to all members

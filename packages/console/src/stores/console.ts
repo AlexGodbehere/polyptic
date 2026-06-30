@@ -306,10 +306,14 @@ export const useConsoleStore = defineStore("console", {
       };
     },
 
-    /** A display name for a combined surface. The contract carries no wall name, so we derive one
-     *  from the member screens (e.g. "Nessie + Bertha"). */
+    /** A display name for a combined surface. Prefer the operator-chosen `wall.name` when set;
+     *  otherwise derive a label from the member screens (e.g. "Nessie + Bertha"). Walls stored
+     *  before naming existed (or never named) have no `name` and fall back to the member join. */
     wallName(): (wallId: string) => string {
       return (wallId: string) => {
+        const wall = this.videoWalls.find((w) => w.id === wallId);
+        const named = wall?.name?.trim();
+        if (named) return named;
         const members = this.wallMembers(wallId);
         if (members.length === 0) return "Combined surface";
         return members.map((m) => m.screen.friendlyName).join(" + ");
@@ -878,6 +882,26 @@ export const useConsoleStore = defineStore("console", {
         await api.setWallContent(wallId, body);
       } catch (err) {
         console.error("[console] setWallContent failed", err);
+      }
+    },
+
+    /**
+     * Rename a combined surface. Optimistically patches the wall's `name` so the canvas + inspector
+     * update instantly; the authoritative admin/state broadcast reconciles. A blank name is ignored
+     * (the contract requires min length 1 — a wall with no name derives a member-join label instead).
+     * A freshly-combined wall is optimistic until its real id arrives, so renaming the temp id is a
+     * no-op (it would 404 and be swallowed); wait for the real wall.
+     */
+    async renameWall(wallId: string, name: string): Promise<void> {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      if (wallId.startsWith("wall-pending")) return;
+      const wall = this.videoWalls.find((w) => w.id === wallId);
+      if (wall) wall.name = trimmed; // optimistic
+      try {
+        await api.renameVideoWall(wallId, trimmed);
+      } catch (err) {
+        console.error("[console] renameWall failed", err);
       }
     },
 

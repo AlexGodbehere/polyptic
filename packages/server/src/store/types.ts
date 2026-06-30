@@ -101,6 +101,12 @@ export interface PersistedVideoWall {
   muralId: string;
   memberScreenIds: string[];
   /**
+   * Operator-given name for the combined surface (e.g. "Atrium Wall"). Nullable/undefined on legacy
+   * rows persisted before naming existed — the control plane loads those with `VideoWall.name`
+   * undefined and the console derives a member-name label. Never required at the store layer.
+   */
+  name?: string | null;
+  /**
    * Phase 3c — the library source this wall currently spans, if any. `null`/undefined means the wall
    * shows ad-hoc content (an ad-hoc URL or none). Editing the referenced source re-resolves + re-pushes
    * every member's span slice.

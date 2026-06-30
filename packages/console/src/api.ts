@@ -15,11 +15,12 @@ import {
   PlaceScreenBody,
   RenameMuralBody,
   RenameScreenBody,
+  RenameVideoWallBody,
   SetContentBody,
   UpdateContentSourceBody,
   UpdateSceneBody,
 } from "@polyptic/protocol";
-import type { ContentSource, Scene } from "@polyptic/protocol";
+import type { ContentSource, Scene, VideoWall } from "@polyptic/protocol";
 
 const BASE = "http://localhost:8080/api/v1";
 
@@ -248,6 +249,20 @@ export function setWallContent(wallId: string, body: SetContentBody): Promise<un
 /** POST /api/v1/walls/:wallId/ident { on, ttlMs? } — flash every panel of a combined surface. */
 export function identWall(wallId: string, body: IdentBody): Promise<unknown> {
   return send("POST", `/walls/${encodeURIComponent(wallId)}/ident`, IdentBody.parse(body));
+}
+
+/**
+ * POST /api/v1/walls/:wallId/rename { name } — give a combined surface an operator-chosen name. The
+ * server persists it (additive: the column is nullable) and re-broadcasts; we return the updated
+ * VideoWall when the response carries one (`{ wall }`) so an optimistic caller can reconcile.
+ */
+export async function renameVideoWall(wallId: string, name: string): Promise<VideoWall | undefined> {
+  const res = await send<{ wall?: VideoWall } | undefined>(
+    "POST",
+    `/walls/${encodeURIComponent(wallId)}/rename`,
+    RenameVideoWallBody.parse({ name }),
+  );
+  return res?.wall;
 }
 
 // ── Content library (Phase 3c) ───────────────────────────────────────────────

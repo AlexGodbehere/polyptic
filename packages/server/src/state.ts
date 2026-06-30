@@ -306,6 +306,8 @@ export class ControlPlane {
         id: w.id,
         muralId: w.muralId,
         memberScreenIds: w.memberScreenIds,
+        // NULL on legacy/pre-naming rows → undefined (the console derives a member-name label).
+        name: w.name ?? undefined,
       });
       if (parsed.success) {
         this.videoWalls.set(parsed.data.id, parsed.data);
@@ -994,6 +996,8 @@ export class ControlPlane {
       id: wall.id,
       muralId: wall.muralId,
       memberScreenIds: wall.memberScreenIds,
+      // Carry the wall's name through so a content change never wipes it from the row.
+      name: wall.name ?? null,
       contentSourceId: sourceId,
     });
   }
@@ -1060,6 +1064,7 @@ export class ControlPlane {
   async combineScreens(
     muralId: string,
     memberScreenIds: string[],
+    name?: string,
   ): Promise<CombineScreensResult> {
     if (!this.murals.has(muralId)) return { ok: false, error: "unknown-mural" };
 
@@ -1081,12 +1086,16 @@ export class ControlPlane {
     }
 
     const id = this.nextWallId();
-    const wall = VideoWall.parse({ id, muralId, memberScreenIds: ids });
+    // Name the wall: use the operator-provided name (trimmed), else derive a default from the members'
+    // friendly names joined " + " (e.g. "Screen 1 + Screen 2"), capped to the contract's 80 chars.
+    const wallName = this.resolveWallName(name, ids);
+    const wall = VideoWall.parse({ id, muralId, memberScreenIds: ids, name: wallName });
     this.videoWalls.set(id, wall);
     await this.store.upsertVideoWall({
       id: wall.id,
       muralId: wall.muralId,
       memberScreenIds: wall.memberScreenIds,
+      name: wall.name ?? null,
     });
 
     // Combining clears the members' previous (single-screen) content — render change → bump + push.
@@ -1102,6 +1111,43 @@ export class ControlPlane {
     await this.store.setRevision(this.state.revision);
 
     return { ok: true, wall, slices };
+  }
+
+  /**
+   * Resolve a video wall's display name. A provided name is trimmed and capped to 80 chars; an absent
+   * or blank name falls back to a default derived from the members' friendly names joined " + "
+   * (e.g. "Screen 1 + Screen 2"), also capped to 80. Always returns a non-empty string (≥2 members).
+   */
+  private resolveWallName(name: string | undefined, memberScreenIds: string[]): string {
+    const provided = name?.trim();
+    if (provided) return provided.slice(0, 80);
+    const derived = memberScreenIds
+      .map((id) => this.getScreen(id)?.friendlyName ?? id)
+      .join(" + ");
+    return derived.slice(0, 80);
+  }
+
+  /**
+   * Rename a combined surface (video wall). Updates the in-memory wall + writes the row through, then
+   * returns the updated wall. Returns null if the wall is unknown. The name is trimmed and capped to
+   * the contract's 80 chars. No render change (the wall's content is unaffected) — the REST layer just
+   * re-broadcasts admin/state so the console's label updates.
+   */
+  async renameVideoWall(wallId: string, name: string): Promise<VideoWall | null> {
+    const wall = this.videoWalls.get(wallId);
+    if (wall === undefined) return null;
+
+    const next: VideoWall = { ...wall, name: name.trim().slice(0, 80) };
+    this.videoWalls.set(wallId, next);
+    await this.store.upsertVideoWall({
+      id: next.id,
+      muralId: next.muralId,
+      memberScreenIds: next.memberScreenIds,
+      name: next.name ?? null,
+      // Preserve the wall's current library-source assignment so the rename doesn't clear it.
+      contentSourceId: this.wallSourceIds.get(wallId) ?? null,
+    });
+    return next;
   }
 
   /**

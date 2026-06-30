@@ -91,6 +91,7 @@ interface VideoWallRow {
   id: string;
   mural_id: string;
   member_screen_ids: unknown;
+  name: string | null;
   content_source_id: string | null;
 }
 
@@ -219,6 +220,9 @@ export class PostgresStore implements Store {
     // Idempotent migration for databases created before Phase 3c: tracks which library source (if any)
     // a wall currently spans, so source edits re-resolve + re-push every member's span slice.
     await sql`ALTER TABLE video_walls ADD COLUMN IF NOT EXISTS content_source_id text`;
+    // Idempotent migration for the "nameable combined surfaces" feature: existing rows keep NULL name
+    // (load → VideoWall.name undefined → the console derives a member-name label). Nullable on purpose.
+    await sql`ALTER TABLE video_walls ADD COLUMN IF NOT EXISTS name text`;
     // Content library (Phase 3c). A reusable, named source resolved to surface(s) on assignment.
     await sql`
       CREATE TABLE IF NOT EXISTS content_sources (
@@ -291,7 +295,7 @@ export class PostgresStore implements Store {
       sql<MetaRow[]>`SELECT revision FROM meta WHERE id = 1`,
       sql<MuralRow[]>`SELECT id, name FROM murals`,
       sql<PlacementRow[]>`SELECT mural_id, screen_id, x, y, w, h FROM placements`,
-      sql<VideoWallRow[]>`SELECT id, mural_id, member_screen_ids, content_source_id FROM video_walls`,
+      sql<VideoWallRow[]>`SELECT id, mural_id, member_screen_ids, name, content_source_id FROM video_walls`,
       sql<ContentSourceRow[]>`SELECT id, name, kind, url FROM content_sources`,
       sql<SceneRow[]>`SELECT id, name, mural_id, snapshot, schedule_at FROM scenes`,
     ]);
@@ -352,6 +356,8 @@ export class PostgresStore implements Store {
       memberScreenIds: Array.isArray(row.member_screen_ids)
         ? row.member_screen_ids.filter((v): v is string => typeof v === "string")
         : [],
+      // NULL on legacy/pre-naming rows → undefined (the console derives a member-name label).
+      name: row.name ?? null,
       contentSourceId: row.content_source_id ?? null,
     }));
 
@@ -530,16 +536,18 @@ export class PostgresStore implements Store {
   async upsertVideoWall(wall: PersistedVideoWall): Promise<void> {
     const sql = this.sql;
     await sql`
-      INSERT INTO video_walls (id, mural_id, member_screen_ids, content_source_id)
+      INSERT INTO video_walls (id, mural_id, member_screen_ids, name, content_source_id)
       VALUES (
         ${wall.id},
         ${wall.muralId},
         ${sql.json(wall.memberScreenIds)},
+        ${wall.name ?? null},
         ${wall.contentSourceId ?? null}
       )
       ON CONFLICT (id) DO UPDATE SET
         mural_id          = EXCLUDED.mural_id,
         member_screen_ids = EXCLUDED.member_screen_ids,
+        name              = EXCLUDED.name,
         content_source_id = EXCLUDED.content_source_id
     `;
   }
@@ -551,13 +559,14 @@ export class PostgresStore implements Store {
 
   async listVideoWalls(): Promise<PersistedVideoWall[]> {
     const sql = this.sql;
-    const rows = await sql<VideoWallRow[]>`SELECT id, mural_id, member_screen_ids, content_source_id FROM video_walls`;
+    const rows = await sql<VideoWallRow[]>`SELECT id, mural_id, member_screen_ids, name, content_source_id FROM video_walls`;
     return rows.map((row) => ({
       id: row.id,
       muralId: row.mural_id,
       memberScreenIds: Array.isArray(row.member_screen_ids)
         ? row.member_screen_ids.filter((v): v is string => typeof v === "string")
         : [],
+      name: row.name ?? null,
       contentSourceId: row.content_source_id ?? null,
     }));
   }

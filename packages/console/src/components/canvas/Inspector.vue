@@ -71,6 +71,26 @@ watch(wall, () => {
   wallUrlDraft.value = "";
   wallSourcePick.value = "";
 });
+
+// ── combined-surface name (editable) ────────────────────────────────────────
+// Mirrors the single-screen rename pattern: a draft synced from `wallName` (which is the
+// operator-chosen name when set, else the derived member-join). Commit on blur/Enter; an empty or
+// unchanged value reverts to the current label rather than sending a blank rename.
+const wallNameDraft = ref("");
+watch(
+  wallName,
+  (n) => {
+    wallNameDraft.value = n;
+  },
+  { immediate: true },
+);
+function commitWallName() {
+  const w = wall.value;
+  if (!w) return;
+  const v = wallNameDraft.value.trim();
+  if (v && v !== wallName.value) store.renameWall(w.id, v);
+  else wallNameDraft.value = wallName.value; // revert blank / no-op edits
+}
 // A just-combined wall carries a temp id until the authoritative admin/state re-points it; spanning
 // content against the temp id would 404, so the Span control is disabled until the real wall arrives.
 const wallPending = computed(() => (wall.value ? wall.value.id.startsWith("wall-pending") : false));
@@ -201,7 +221,14 @@ function selectOne(id: string) {
     <!-- ── COMBINED SURFACE (video wall) ──────────────────────────────── -->
     <section v-if="wall" class="pad">
       <div class="group-head">▦ Combined surface</div>
-      <div class="group-name">{{ wallName }}</div>
+      <input
+        v-model="wallNameDraft"
+        class="group-name-input"
+        :disabled="wallPending"
+        placeholder="Name this surface…"
+        @blur="commitWallName"
+        @keyup.enter="commitWallName"
+      />
 
       <div class="group-actions">
         <button class="ident-btn flex" :class="{ on: wallIdenting }" @click="identWall">
@@ -700,7 +727,7 @@ function selectOne(id: string) {
   color: var(--accent-fg);
   margin-bottom: 11px;
 }
-.group-name {
+.group-name-input {
   width: 100%;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -709,10 +736,16 @@ function selectOne(id: string) {
   font-size: 14px;
   font-weight: 600;
   color: var(--fg);
+  outline: none;
   margin-bottom: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-family: inherit;
+}
+.group-name-input:focus {
+  border-color: var(--accent);
+}
+.group-name-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .group-actions {
   display: flex;
