@@ -80,7 +80,7 @@ export function runInstall(sys: Sys, opts: SetupOptions, log: Logger): SetupResu
     backupOriginal: true,
     desc: "greetd config",
   });
-  assumptions.push("greetd's package postinst provides the 'greeter' fallback user (default_session).");
+  assumptions.push("greetd's fallback default_session runs as the kiosk user (no separate 'greeter' user needed — that user isn't created by the greetd package on every distro).");
 
   // 4 ─ compositor config (sway or i3)
   writeCompositorConfig(sys, opts, log, home, isX11);

@@ -30,10 +30,12 @@ export function greetdConfig(p: GreetdParams): string {
 vt = 1
 
 # Fallback greeter for any *non-initial* session (e.g. after a manual logout). A wall normally
-# reboots rather than logs out, so this is only a safety net.
+# reboots rather than logs out, so this is only a safety net. Run it as the kiosk user — greetd
+# refuses to start if this user doesn't exist, and a dedicated 'greeter' user isn't created by the
+# greetd package on every distro (e.g. Ubuntu 26.04), whereas the kiosk user always exists.
 [default_session]
 command = "agreety --cmd /bin/sh"
-user = "greeter"
+user = "${p.user}"
 
 # The session run once at boot: kiosk user -> compositor -> systemd user session.
 [initial_session]
