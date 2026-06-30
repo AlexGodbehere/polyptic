@@ -240,7 +240,9 @@ esac
 
 step "A1: installing → ${BIN_PATH}"
 $SUDO install -D -m 0755 "$AGENT_TMP" "$BIN_PATH"
-log "installed $("$BIN_PATH" --version 2>/dev/null || echo "polyptic-agent") at ${BIN_PATH}"
+# NB: do NOT execute the binary here — it has no --version flag, so running it starts the full agent
+# (which blocks this installer and, with no config yet, dials the default localhost). systemd runs it.
+log "installed the agent binary at ${BIN_PATH}"
 
 # ── A2. /etc/polyptic/agent.toml ─────────────────────────────────────────────
 # The agent reads this flat TOML at boot (server_url + bootstrap_token + backend). The keys here
