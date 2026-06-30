@@ -249,6 +249,7 @@ function writeAgentConfig(sys: Sys, opts: SetupOptions, log: Logger, needsVerifi
         serverUrl: opts.serverUrl,
         bootstrapToken: opts.bootstrapToken,
         backend: opts.backend,
+        browser: opts.browser,
         connector: opts.connector,
       },
       { example: false },
@@ -262,7 +263,7 @@ function writeAgentConfig(sys: Sys, opts: SetupOptions, log: Logger, needsVerifi
     });
   } else {
     const example = renderAgentToml(
-      { backend: opts.backend, connector: opts.connector },
+      { backend: opts.backend, browser: opts.browser, connector: opts.connector },
       { example: true },
     );
     sys.writeFile(`${opts.configPath}.example`, example, { mode: 0o644, desc: "agent.toml.example" });

@@ -179,17 +179,19 @@ export async function ensureDir(dir: string): Promise<void> {
 }
 
 /**
- * Best-effort: kill any Chromium still bound to `profileDir` that we don't track — e.g. an
- * orphan left running after the agent itself crashed and systemd restarted it. Scoped tightly
- * by the unique `--user-data-dir=<profileDir>` token so it only ever touches *this* output's
- * browser. Requires `pgrep`; a silent no-op without it.
+ * Best-effort: kill any untracked browser process whose command line carries the unique `token`
+ * — e.g. an orphan left running after the agent itself crashed and systemd restarted it. Scoped
+ * tightly by that token so it only ever touches *this* output's browser. Requires `pgrep`; a
+ * silent no-op without it.
+ *
+ * Generalised from `killStaleForProfile` so cog (which has no `--user-data-dir` token) can key the
+ * reap on its unique player URL instead.
  */
-export async function killStaleForProfile(
-  profileDir: string,
+export async function killStaleByToken(
+  token: string,
   log: (msg: string) => void = () => {},
 ): Promise<void> {
   if (!(await which("pgrep"))) return;
-  const token = `--user-data-dir=${profileDir}`;
   const res = await run("pgrep", ["-f", "--", escapeRegex(token)]);
   if (res.code !== 0) return; // none found
   const pids = res.stdout
@@ -199,11 +201,23 @@ export async function killStaleForProfile(
   for (const pid of pids) {
     try {
       process.kill(pid, "SIGTERM");
-      log(`reaped stale Chromium pid ${pid} for profile ${profileDir}`);
+      log(`reaped stale browser pid ${pid} (matched ${token})`);
     } catch {
       // already gone / not ours
     }
   }
+}
+
+/**
+ * Best-effort: kill any Chromium still bound to `profileDir` that we don't track. Thin wrapper over
+ * {@link killStaleByToken} keyed on the unique `--user-data-dir=<profileDir>` token, so it only
+ * ever touches *this* output's browser.
+ */
+export async function killStaleForProfile(
+  profileDir: string,
+  log: (msg: string) => void = () => {},
+): Promise<void> {
+  await killStaleByToken(`--user-data-dir=${profileDir}`, log);
 }
 
 /** A backend-provided launcher: (re)launch+place Chromium for one URL, returning the child. */

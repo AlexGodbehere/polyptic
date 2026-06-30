@@ -19,18 +19,12 @@
  */
 import type { ChildProcess } from "node:child_process";
 import type { DisplayBackend } from "./types";
-import {
-  buildChromiumArgs,
-  ensureDir,
-  killStaleForProfile,
-  profileDirFor,
-  resetCrashFlags,
-  resolveChromium,
-  SupervisedChromium,
-} from "./chromium";
+import type { Browser } from "./browser";
+import { profileDirFor, SupervisedChromium } from "./chromium";
+import { selectBrowser } from "./browser";
 import { captureStdout, makeJsonStreamSplitter, run, spawnChild, which } from "./proc";
 
-/** How long to wait for the freshly-launched Chromium window to appear on the sway tree. */
+/** How long to wait for the freshly-launched browser window to appear on the sway tree. */
 const PLACE_TIMEOUT_MS = 8_000;
 /** Grace before we accept an `app_id`-only match, giving the exact pid match a chance to arrive. */
 const APP_ID_GRACE_MS = 600;
@@ -57,19 +51,18 @@ interface SwayWindowEvent {
   } | null;
 }
 
-function looksLikeChromium(appId: string): boolean {
-  return /chrom|polyptic/i.test(appId);
-}
-
 /** A live `swaymsg -t subscribe -m '["window"]'` monitor we can query for the placed window. */
 interface SwayWindowSub {
-  /** Resolve with the sway container id of the new Chromium window, or throw on timeout. */
-  waitForChromiumWindow(pid: number, timeoutMs: number): Promise<number>;
+  /** Resolve with the sway container id of the new browser window, or throw on timeout. */
+  waitForWindow(pid: number, timeoutMs: number): Promise<number>;
   /** Stop the monitor. */
   close(): void;
 }
 
-function startSwayWindowSubscription(log: (m: string) => void): SwayWindowSub {
+function startSwayWindowSubscription(
+  matchesWindow: (appId: string) => boolean,
+  log: (m: string) => void,
+): SwayWindowSub {
   const proc = spawnChild("swaymsg", ["-t", "subscribe", "-m", '["window"]']);
   const candidates: WindowCandidate[] = [];
   let wake: (() => void) | null = null;
@@ -99,22 +92,22 @@ function startSwayWindowSubscription(log: (m: string) => void): SwayWindowSub {
   proc.on("error", (err) => log(`swaymsg subscribe failed: ${err.message}`));
 
   return {
-    async waitForChromiumWindow(pid: number, timeoutMs: number): Promise<number> {
+    async waitForWindow(pid: number, timeoutMs: number): Promise<number> {
       const deadline = Date.now() + timeoutMs;
       const startedAt = Date.now();
       for (;;) {
-        let chromCandidate: number | null = null;
+        let appIdCandidate: number | null = null;
         for (const c of candidates) {
           if (pid > 0 && c.pid === pid) return c.id; // best: exact pid match
-          if (chromCandidate === null && looksLikeChromium(c.appId)) chromCandidate = c.id;
+          if (appIdCandidate === null && matchesWindow(c.appId)) appIdCandidate = c.id;
         }
         // Accept the app_id/launch-order match only after a short grace, so a pid match wins.
-        if (chromCandidate !== null && (pid <= 0 || Date.now() - startedAt >= APP_ID_GRACE_MS)) {
-          return chromCandidate;
+        if (appIdCandidate !== null && (pid <= 0 || Date.now() - startedAt >= APP_ID_GRACE_MS)) {
+          return appIdCandidate;
         }
         if (Date.now() >= deadline) {
-          if (chromCandidate !== null) return chromCandidate; // last resort
-          throw new Error(`no Chromium window appeared on the sway tree within ${timeoutMs}ms`);
+          if (appIdCandidate !== null) return appIdCandidate; // last resort
+          throw new Error(`no browser window appeared on the sway tree within ${timeoutMs}ms`);
         }
         await new Promise<void>((resolve) => {
           const w = (): void => resolve();
@@ -139,22 +132,25 @@ function startSwayWindowSubscription(log: (m: string) => void): SwayWindowSub {
 export class SwayBackend implements DisplayBackend {
   readonly id = "wayland-sway" as const;
 
-  /** connector → supervised kiosk Chromium. */
+  /** connector → supervised kiosk browser. */
   private readonly browsers = new Map<string, SupervisedChromium>();
+
+  /** The kiosk browser (chromium default, or cog via POLYPTIC_BROWSER=cog). */
+  private readonly browser: Browser = selectBrowser();
 
   /** Latched once `grim` is found missing, so we log the remediation hint once and then skip. */
   private captureUnavailable = false;
   /** Resolved once; reused for every (re)launch. */
-  private chromiumPath: string | null = null;
+  private browserBin: string | null = null;
 
   private log(msg: string): void {
     console.log(`[${ts()}] [sway] ${msg}`);
   }
 
-  private async ensureChromium(): Promise<string> {
-    if (this.chromiumPath) return this.chromiumPath;
-    this.chromiumPath = await resolveChromium();
-    return this.chromiumPath;
+  private async ensureBin(): Promise<string> {
+    if (this.browserBin) return this.browserBin;
+    this.browserBin = await this.browser.resolveBin();
+    return this.browserBin;
   }
 
   /** Names of sway's connected outputs (validates connectors; surfaces a clear error). */
@@ -204,35 +200,33 @@ export class SwayBackend implements DisplayBackend {
     }
   }
 
-  /** Launch + place Chromium for one (connector, url). Returns the live child for supervision. */
+  /** Launch + place the browser for one (connector, url). Returns the live child for supervision. */
   private async launchAndPlace(
     connector: string,
-    chromium: string,
+    bin: string,
     profileDir: string,
     url: string,
   ): Promise<ChildProcess> {
-    await ensureDir(profileDir);
-    await killStaleForProfile(profileDir, (m) => this.log(m));
-    await resetCrashFlags(profileDir, (m) => this.log(m));
+    await this.browser.prelaunch(profileDir, url, (m) => this.log(m));
 
     // Subscribe BEFORE spawning so we never miss the window's `new` event.
-    const sub = startSwayWindowSubscription((m) => this.log(m));
+    const sub = startSwayWindowSubscription((appId) => this.browser.matchesWindow(appId), (m) => this.log(m));
     let child: ChildProcess;
     try {
-      const args = buildChromiumArgs({ url, profileDir, platform: "wayland", scaleFactor: 1 });
-      child = spawnChild(chromium, args, { stdio: "ignore" });
-      this.log(`spawned Chromium pid=${child.pid ?? "?"} for ${connector} → ${url}`);
+      const args = this.browser.buildArgs({ url, profileDir, platform: "wayland", scaleFactor: 1 });
+      child = spawnChild(bin, args, { stdio: "ignore" });
+      this.log(`spawned ${this.browser.name} pid=${child.pid ?? "?"} for ${connector} → ${url}`);
     } catch (err) {
       sub.close();
       throw err;
     }
 
-    // Placement is best-effort: a Chromium showing on the wrong output beats no Chromium, so a
+    // Placement is best-effort: a browser showing on the wrong output beats no browser, so a
     // placement failure logs but does NOT fail the launch (and never kills the supervised child).
     try {
-      const conId = await sub.waitForChromiumWindow(child.pid ?? -1, PLACE_TIMEOUT_MS);
+      const conId = await sub.waitForWindow(child.pid ?? -1, PLACE_TIMEOUT_MS);
       await this.moveToOutput(conId, connector);
-      this.log(`placed Chromium (con_id=${conId}) on ${connector}`);
+      this.log(`placed ${this.browser.name} (con_id=${conId}) on ${connector}`);
     } catch (err) {
       this.log(`placement on ${connector} failed: ${(err as Error).message} (left on default output)`);
     } finally {
@@ -241,13 +235,13 @@ export class SwayBackend implements DisplayBackend {
     return child;
   }
 
-  private ensureBrowser(connector: string, chromium: string): SupervisedChromium {
+  private ensureBrowser(connector: string, bin: string): SupervisedChromium {
     let b = this.browsers.get(connector);
     if (!b) {
       const profileDir = profileDirFor(connector);
       b = new SupervisedChromium(
         connector,
-        (url) => this.launchAndPlace(connector, chromium, profileDir, url),
+        (url) => this.launchAndPlace(connector, bin, profileDir, url),
         (m) => this.log(m),
       );
       this.browsers.set(connector, b);
@@ -256,20 +250,20 @@ export class SwayBackend implements DisplayBackend {
   }
 
   async showScreen(connector: string, url: string): Promise<void> {
-    const chromium = await this.ensureChromium();
+    const bin = await this.ensureBin();
     await requireSwaymsg();
     await this.validateConnector(connector);
-    const browser = this.ensureBrowser(connector, chromium);
-    await browser.setUrl(url);
+    const supervised = this.ensureBrowser(connector, bin);
+    await supervised.setUrl(url);
   }
 
   async hideScreen(connector: string): Promise<void> {
-    const browser = this.browsers.get(connector);
-    if (!browser) {
+    const supervised = this.browsers.get(connector);
+    if (!supervised) {
       this.log(`hideScreen(${connector}): nothing placed`);
       return;
     }
-    await browser.stop();
+    await supervised.stop();
     this.browsers.delete(connector);
     this.log(`hideScreen(${connector}): torn down`);
   }

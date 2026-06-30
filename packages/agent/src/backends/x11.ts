@@ -16,19 +16,12 @@ import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DisplayBackend } from "./types";
-import {
-  buildChromiumArgs,
-  ensureDir,
-  killStaleForProfile,
-  profileDirFor,
-  resetCrashFlags,
-  resolveChromium,
-  sanitizeConnector,
-  SupervisedChromium,
-} from "./chromium";
+import type { Browser } from "./browser";
+import { profileDirFor, sanitizeConnector, SupervisedChromium } from "./chromium";
+import { selectBrowser } from "./browser";
 import { captureStdout, delay, run, spawnChild, which } from "./proc";
 
-/** How long to wait for the freshly-launched Chromium window to be mapped + named. */
+/** How long to wait for the freshly-launched browser window to be mapped + named. */
 const PLACE_TIMEOUT_MS = 8_000;
 const WINDOW_POLL_MS = 150;
 
@@ -68,7 +61,10 @@ export class X11Backend implements DisplayBackend {
   readonly id = "x11-i3" as const;
 
   private readonly browsers = new Map<string, SupervisedChromium>();
-  private chromiumPath: string | null = null;
+
+  /** The kiosk browser (chromium default, or cog via POLYPTIC_BROWSER=cog). */
+  private readonly browser: Browser = selectBrowser();
+  private browserBin: string | null = null;
 
   /** Latched once neither `import` nor `scrot` is found, so we log the hint once and then skip. */
   private captureUnavailable = false;
@@ -77,10 +73,10 @@ export class X11Backend implements DisplayBackend {
     console.log(`[${ts()}] [x11] ${msg}`);
   }
 
-  private async ensureChromium(): Promise<string> {
-    if (this.chromiumPath) return this.chromiumPath;
-    this.chromiumPath = await resolveChromium();
-    return this.chromiumPath;
+  private async ensureBin(): Promise<string> {
+    if (this.browserBin) return this.browserBin;
+    this.browserBin = await this.browser.resolveBin();
+    return this.browserBin;
   }
 
   /** Resolve `connector`'s geometry via `xrandr`, or throw a clear error. */
@@ -157,17 +153,15 @@ export class X11Backend implements DisplayBackend {
 
   private async launchAndPlace(
     connector: string,
-    chromium: string,
+    bin: string,
     profileDir: string,
     className: string,
     url: string,
   ): Promise<ChildProcess> {
     const geom = await this.geometryFor(connector);
-    await ensureDir(profileDir);
-    await killStaleForProfile(profileDir, (m) => this.log(m));
-    await resetCrashFlags(profileDir, (m) => this.log(m));
+    await this.browser.prelaunch(profileDir, url, (m) => this.log(m));
 
-    const args = buildChromiumArgs({
+    const args = this.browser.buildArgs({
       url,
       profileDir,
       platform: "x11",
@@ -176,8 +170,8 @@ export class X11Backend implements DisplayBackend {
       position: { x: geom.x, y: geom.y },
       size: { w: geom.w, h: geom.h },
     });
-    const child = spawnChild(chromium, args, { stdio: "ignore" });
-    this.log(`spawned Chromium pid=${child.pid ?? "?"} class=${className} for ${connector} → ${url}`);
+    const child = spawnChild(bin, args, { stdio: "ignore" });
+    this.log(`spawned ${this.browser.name} pid=${child.pid ?? "?"} class=${className} for ${connector} → ${url}`);
 
     // Best-effort defensive placement (Chromium's launch flags usually suffice; this corrects
     // misplacement without ever failing the launch).
@@ -193,14 +187,14 @@ export class X11Backend implements DisplayBackend {
     return child;
   }
 
-  private ensureBrowser(connector: string, chromium: string): SupervisedChromium {
+  private ensureBrowser(connector: string, bin: string): SupervisedChromium {
     let b = this.browsers.get(connector);
     if (!b) {
       const profileDir = profileDirFor(connector);
       const className = `polyptic-${sanitizeConnector(connector)}`;
       b = new SupervisedChromium(
         connector,
-        (url) => this.launchAndPlace(connector, chromium, profileDir, className, url),
+        (url) => this.launchAndPlace(connector, bin, profileDir, className, url),
         (m) => this.log(m),
       );
       this.browsers.set(connector, b);
@@ -209,21 +203,21 @@ export class X11Backend implements DisplayBackend {
   }
 
   async showScreen(connector: string, url: string): Promise<void> {
-    const chromium = await this.ensureChromium();
+    const bin = await this.ensureBin();
     await requireX11Tools();
     // Validate the connector eagerly so a bad name fails before we spawn anything.
     await this.geometryFor(connector);
-    const browser = this.ensureBrowser(connector, chromium);
-    await browser.setUrl(url);
+    const supervised = this.ensureBrowser(connector, bin);
+    await supervised.setUrl(url);
   }
 
   async hideScreen(connector: string): Promise<void> {
-    const browser = this.browsers.get(connector);
-    if (!browser) {
+    const supervised = this.browsers.get(connector);
+    if (!supervised) {
       this.log(`hideScreen(${connector}): nothing placed`);
       return;
     }
-    await browser.stop();
+    await supervised.stop();
     this.browsers.delete(connector);
     this.log(`hideScreen(${connector}): torn down`);
   }

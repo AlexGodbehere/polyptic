@@ -41,6 +41,11 @@ TOKEN="${POLYPTIC_TOKEN:-}"
 # --kiosk / POLYPTIC_KIOSK=1 → also provision the visual substrate (Stage B).
 KIOSK="${POLYPTIC_KIOSK:-0}"
 
+# Kiosk runtime browser for Stage B (forwarded to `polyptic-agent setup --browser`). The depot
+# bundle ships cog (WPE/WebKit), NOT a working .deb Chromium, on Ubuntu/arm64 (Chromium is
+# snap-only there, D27) — so default to cog. POLYPTIC_BROWSER=chromium overrides on the curl line.
+BROWSER="${POLYPTIC_BROWSER:-cog}"
+
 # Install locations.
 BIN_PATH="/usr/local/bin/polyptic-agent"
 ETC_DIR="/etc/polyptic"
@@ -138,6 +143,7 @@ Flags:
 Env:
   POLYPTIC_TOKEN   one-time enrolment bootstrap token (server GATED mode)
   POLYPTIC_KIOSK   set to 1 for the substrate (same as --kiosk)
+  POLYPTIC_BROWSER kiosk browser for --kiosk: cog (default) | chromium
   POLYPTIC_BASE    override the baked-in control-plane base URL
 EOF
 }
@@ -212,7 +218,7 @@ else
 fi
 
 log "arch=${ARCH}  distro=${DISTRO_SLUG}  base=${BASE}  server_url=${SERVER_URL}"
-log "kiosk=${KIOSK}  token=$( [ -n "$TOKEN" ] && echo 'set' || echo 'EMPTY (server OPEN mode)' )"
+log "kiosk=${KIOSK}  browser=${BROWSER}  token=$( [ -n "$TOKEN" ] && echo 'set' || echo 'EMPTY (server OPEN mode)' )"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STAGE A — agent (fully air-gapped; server only)
@@ -384,31 +390,38 @@ elif [ "$CODE" = "404" ]; then
   warn "no server bundle for ${DISTRO_SLUG}/${ARCH} (${MANIFEST_URL} → 404)"
   if has_internet; then
     log "box has internet — falling back to the distro package manager online"
+    # Install BOTH the substrate and the kiosk browser. cog (WPE/WebKit) is the default Stage-B
+    # browser (D27 — Ubuntu has no working .deb Chromium), so always pull cog; chromium is a
+    # best-effort extra so POLYPTIC_BROWSER=chromium still has a binary where a real .deb resolves.
     install_online() {
       case "$DISTRO_ID" in
         ubuntu|debian)
           $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
           $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            sway greetd grim wayvnc dbus-user-session fonts-dejavu-core \
-            && { $SUDO apt-get install -y chromium-browser || $SUDO apt-get install -y chromium; }
+            sway greetd grim wayvnc dbus-user-session fonts-dejavu-core cog \
+            && { $SUDO apt-get install -y chromium-browser || $SUDO apt-get install -y chromium || true; }
           ;;
         fedora|rhel|centos|rocky|almalinux)
-          $SUDO dnf install -y sway greetd grim wayvnc dbus-daemon dejavu-sans-fonts chromium
+          $SUDO dnf install -y sway greetd grim wayvnc dbus-daemon dejavu-sans-fonts cog \
+            && { $SUDO dnf install -y chromium || true; }
           ;;
         arch|archarm|manjaro)
-          $SUDO pacman -Sy --noconfirm sway greetd grim wayvnc dbus chromium ttf-dejavu
+          $SUDO pacman -Sy --noconfirm sway greetd grim wayvnc dbus cog ttf-dejavu \
+            && { $SUDO pacman -S --noconfirm chromium || true; }
           ;;
         *)
           case "$DISTRO_LIKE" in
             *debian*)
               $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
               $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                sway greetd grim wayvnc dbus-user-session fonts-dejavu-core \
-                && { $SUDO apt-get install -y chromium-browser || $SUDO apt-get install -y chromium; } ;;
+                sway greetd grim wayvnc dbus-user-session fonts-dejavu-core cog \
+                && { $SUDO apt-get install -y chromium-browser || $SUDO apt-get install -y chromium || true; } ;;
             *fedora*|*rhel*)
-              $SUDO dnf install -y sway greetd grim wayvnc dbus-daemon dejavu-sans-fonts chromium ;;
+              $SUDO dnf install -y sway greetd grim wayvnc dbus-daemon dejavu-sans-fonts cog \
+                && { $SUDO dnf install -y chromium || true; } ;;
             *arch*)
-              $SUDO pacman -Sy --noconfirm sway greetd grim wayvnc dbus chromium ttf-dejavu ;;
+              $SUDO pacman -Sy --noconfirm sway greetd grim wayvnc dbus cog ttf-dejavu \
+                && { $SUDO pacman -S --noconfirm chromium || true; } ;;
             *)
               return 3 ;;
           esac
@@ -443,6 +456,7 @@ step "B3: wiring the kiosk via 'polyptic-agent setup --skip-deps'"
 $SUDO "$BIN_PATH" setup --skip-deps \
   --server-url "$SERVER_URL" \
   --bootstrap-token "$TOKEN" \
+  --browser "$BROWSER" \
   $OUTPUT_ARGS \
   || die "'polyptic-agent setup' failed (see output above)"
 
@@ -456,8 +470,8 @@ $SUDO systemctl disable --now polyptic-agent.service 2>/dev/null || true
 log "Done (Stage A + Stage B — kiosk)."
 cat >&2 <<EOF
   • binary  : ${BIN_PATH}
-  • substrate: sway + greetd + Chromium + grim + wayvnc + dbus + fonts
-  • wiring  : polyptic-agent setup (greetd autologin → sway → user agent → Chromium-per-output)
+  • substrate: sway + greetd + ${BROWSER} + grim + wayvnc + dbus + fonts
+  • wiring  : polyptic-agent setup (greetd autologin → sway → user agent → ${BROWSER}-per-output)
   • next    : sudo reboot   # cold-boot into the kiosk; approve the box in the console
 
 Logs after reboot:
