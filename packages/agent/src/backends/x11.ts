@@ -57,6 +57,22 @@ export function parseXrandrGeometry(xrandr: string, connector: string): OutputGe
   return null;
 }
 
+/**
+ * Names of the connected, enabled outputs (those with an active mode) in `xrandr --query`.
+ * Used by the single-output fallback to find the sole real output when the requested connector
+ * name doesn't match.
+ */
+export function parseXrandrOutputs(xrandr: string): string[] {
+  const names: string[] = [];
+  for (const line of xrandr.split("\n")) {
+    const m = line.match(/^(\S+) connected\b/);
+    if (!m || !m[1]) continue;
+    if (!/(\d+)x(\d+)\+(-?\d+)\+(-?\d+)/.test(line)) continue; // connected but no active mode
+    names.push(m[1]);
+  }
+  return names;
+}
+
 export class X11Backend implements DisplayBackend {
   readonly id = "x11-i3" as const;
 
@@ -79,8 +95,16 @@ export class X11Backend implements DisplayBackend {
     return this.browserBin;
   }
 
-  /** Resolve `connector`'s geometry via `xrandr`, or throw a clear error. */
-  private async geometryFor(connector: string): Promise<OutputGeometry> {
+  /**
+   * Resolve the requested `connector` to a real X11 output + its geometry via `xrandr`.
+   * Exact matches pass through. For a single-output host (e.g. QEMU/virtio-gpu where the agent
+   * advertised "HDMI-1" but the only enabled output is "Virtual-1"), fall back to that sole
+   * output so the kiosk still renders despite the name mismatch. With 2+ outputs an exact match
+   * is still required, and 0 enabled outputs still errors.
+   */
+  private async resolveConnector(
+    connector: string,
+  ): Promise<{ name: string; geom: OutputGeometry }> {
     const res = await run("xrandr", ["--query"]);
     if (res.code !== 0) {
       throw new Error(
@@ -89,12 +113,23 @@ export class X11Backend implements DisplayBackend {
       );
     }
     const geom = parseXrandrGeometry(res.stdout, connector);
-    if (!geom) {
-      throw new Error(
-        `connector "${connector}" not found as a connected, enabled output in xrandr`,
-      );
+    if (geom) return { name: connector, geom };
+
+    const outputs = parseXrandrOutputs(res.stdout);
+    if (outputs.length === 1 && outputs[0]) {
+      const soleGeom = parseXrandrGeometry(res.stdout, outputs[0]);
+      if (soleGeom) {
+        this.log(
+          `connector "${connector}" not among xrandr outputs [${outputs.join(", ")}]; ` +
+            `using the sole output "${outputs[0]}"`,
+        );
+        return { name: outputs[0], geom: soleGeom };
+      }
     }
-    return geom;
+    throw new Error(
+      `connector "${connector}" not found as a connected, enabled output in xrandr ` +
+        `[${outputs.join(", ") || "none"}]`,
+    );
   }
 
   /** Find the mapped window for `className`, preferring the one whose pid matches our child. */
@@ -158,7 +193,9 @@ export class X11Backend implements DisplayBackend {
     className: string,
     url: string,
   ): Promise<ChildProcess> {
-    const geom = await this.geometryFor(connector);
+    // `target` may differ from the requested `connector` under the single-output fallback; X11
+    // placement is geometric, so we just use the resolved output's geometry.
+    const { name: target, geom } = await this.resolveConnector(connector);
     await this.browser.prelaunch(profileDir, url, (m) => this.log(m));
 
     const args = this.browser.buildArgs({
@@ -171,7 +208,7 @@ export class X11Backend implements DisplayBackend {
       size: { w: geom.w, h: geom.h },
     });
     const child = spawnChild(bin, args, { stdio: "ignore" });
-    this.log(`spawned ${this.browser.name} pid=${child.pid ?? "?"} class=${className} for ${connector} → ${url}`);
+    this.log(`spawned ${this.browser.name} pid=${child.pid ?? "?"} class=${className} for ${target} → ${url}`);
 
     // Best-effort defensive placement (Chromium's launch flags usually suffice; this corrects
     // misplacement without ever failing the launch).
@@ -179,10 +216,10 @@ export class X11Backend implements DisplayBackend {
       const wid = await this.findWindow(className, child.pid ?? -1, PLACE_TIMEOUT_MS);
       await this.placeWindow(wid, geom);
       this.log(
-        `placed window ${wid} on ${connector} @ ${geom.w}x${geom.h}+${geom.x}+${geom.y}`,
+        `placed window ${wid} on ${target} @ ${geom.w}x${geom.h}+${geom.x}+${geom.y}`,
       );
     } catch (err) {
-      this.log(`placement on ${connector} failed: ${(err as Error).message} (relying on launch flags)`);
+      this.log(`placement on ${target} failed: ${(err as Error).message} (relying on launch flags)`);
     }
     return child;
   }
@@ -205,8 +242,9 @@ export class X11Backend implements DisplayBackend {
   async showScreen(connector: string, url: string): Promise<void> {
     const bin = await this.ensureBin();
     await requireX11Tools();
-    // Validate the connector eagerly so a bad name fails before we spawn anything.
-    await this.geometryFor(connector);
+    // Resolve the connector eagerly (with the single-output fallback) so a bad name fails before
+    // we spawn anything.
+    await this.resolveConnector(connector);
     const supervised = this.ensureBrowser(connector, bin);
     await supervised.setUrl(url);
   }
@@ -242,7 +280,7 @@ export class X11Backend implements DisplayBackend {
 
     let geom: OutputGeometry;
     try {
-      geom = await this.geometryFor(connector);
+      geom = (await this.resolveConnector(connector)).geom;
     } catch (err) {
       this.log(`capture(${connector}): ${(err as Error).message}`);
       return null;

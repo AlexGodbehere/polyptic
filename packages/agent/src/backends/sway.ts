@@ -178,21 +178,34 @@ export class SwayBackend implements DisplayBackend {
     return names;
   }
 
-  private async validateConnector(connector: string): Promise<void> {
+  /**
+   * Resolve the requested `connector` to a real sway output name. Exact matches pass through.
+   * For a single-output host (e.g. QEMU/virtio-gpu where the agent advertised "HDMI-1" but the
+   * compositor's only output is "Virtual-1"), fall back to that sole output so the kiosk still
+   * renders despite the name mismatch. With 2+ outputs an exact match is still required, and 0
+   * outputs still errors.
+   */
+  private async resolveConnector(connector: string): Promise<string> {
     const outputs = await this.getOutputs();
-    if (!outputs.includes(connector)) {
-      throw new Error(
-        `connector "${connector}" is not a known sway output [${outputs.join(", ") || "none"}]`,
+    if (outputs.includes(connector)) return connector;
+    if (outputs.length === 1 && outputs[0]) {
+      this.log(
+        `connector "${connector}" not among sway outputs [${outputs.join(", ")}]; ` +
+          `using the sole output "${outputs[0]}"`,
       );
+      return outputs[0];
     }
+    throw new Error(
+      `connector "${connector}" is not a known sway output [${outputs.join(", ") || "none"}]`,
+    );
   }
 
-  /** Move the placed container onto `connector` and (re)assert fullscreen there. */
-  private async moveToOutput(conId: number, connector: string): Promise<void> {
+  /** Move the placed container onto `output` and (re)assert fullscreen there. */
+  private async moveToOutput(conId: number, output: string): Promise<void> {
     // Disable fullscreen first so sway will relocate the container, then re-enable on the target.
     const cmd =
       `[con_id=${conId}] fullscreen disable, ` +
-      `move container to output ${connector}, ` +
+      `move container to output ${output}, ` +
       `fullscreen enable`;
     const res = await run("swaymsg", [cmd]);
     if (res.code !== 0) {
@@ -200,9 +213,14 @@ export class SwayBackend implements DisplayBackend {
     }
   }
 
-  /** Launch + place the browser for one (connector, url). Returns the live child for supervision. */
+  /**
+   * Launch + place the browser for one (connector, url). `target` is the real sway output the
+   * window is moved onto (it may differ from the requested `connector` under the single-output
+   * fallback). Returns the live child for supervision.
+   */
   private async launchAndPlace(
     connector: string,
+    target: string,
     bin: string,
     profileDir: string,
     url: string,
@@ -225,23 +243,23 @@ export class SwayBackend implements DisplayBackend {
     // placement failure logs but does NOT fail the launch (and never kills the supervised child).
     try {
       const conId = await sub.waitForWindow(child.pid ?? -1, PLACE_TIMEOUT_MS);
-      await this.moveToOutput(conId, connector);
-      this.log(`placed ${this.browser.name} (con_id=${conId}) on ${connector}`);
+      await this.moveToOutput(conId, target);
+      this.log(`placed ${this.browser.name} (con_id=${conId}) on ${target}`);
     } catch (err) {
-      this.log(`placement on ${connector} failed: ${(err as Error).message} (left on default output)`);
+      this.log(`placement on ${target} failed: ${(err as Error).message} (left on default output)`);
     } finally {
       sub.close();
     }
     return child;
   }
 
-  private ensureBrowser(connector: string, bin: string): SupervisedChromium {
+  private ensureBrowser(connector: string, target: string, bin: string): SupervisedChromium {
     let b = this.browsers.get(connector);
     if (!b) {
       const profileDir = profileDirFor(connector);
       b = new SupervisedChromium(
         connector,
-        (url) => this.launchAndPlace(connector, bin, profileDir, url),
+        (url) => this.launchAndPlace(connector, target, bin, profileDir, url),
         (m) => this.log(m),
       );
       this.browsers.set(connector, b);
@@ -252,8 +270,8 @@ export class SwayBackend implements DisplayBackend {
   async showScreen(connector: string, url: string): Promise<void> {
     const bin = await this.ensureBin();
     await requireSwaymsg();
-    await this.validateConnector(connector);
-    const supervised = this.ensureBrowser(connector, bin);
+    const target = await this.resolveConnector(connector);
+    const supervised = this.ensureBrowser(connector, target, bin);
     await supervised.setUrl(url);
   }
 
@@ -284,10 +302,13 @@ export class SwayBackend implements DisplayBackend {
       this.log("capture: grim not installed — preview thumbnails disabled; install grim to enable");
       return null;
     }
+    // Resolve to the real output (single-output fallback) but never let that break capture —
+    // fall back to the requested name if resolution fails.
+    const target = await this.resolveConnector(connector).catch(() => connector);
     // JPEG to match the agent's `image/jpeg` thumbnail framing (grim ≥ 1.4); PNG fallback for
     // older grim builds that lack `-t jpeg`.
-    let buf = await captureStdout("grim", ["-t", "jpeg", "-q", "80", "-o", connector, "-"]);
-    if (!buf) buf = await captureStdout("grim", ["-o", connector, "-"]);
+    let buf = await captureStdout("grim", ["-t", "jpeg", "-q", "80", "-o", target, "-"]);
+    if (!buf) buf = await captureStdout("grim", ["-o", target, "-"]);
     if (!buf) this.log(`capture(${connector}): grim produced no data`);
     return buf;
   }
