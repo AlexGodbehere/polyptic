@@ -12,9 +12,10 @@
   node only selects (click → store.selectWall).
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { ContentKind } from "@polyptic/protocol";
 import { kindLabel } from "../../content";
+import { useConsoleStore } from "../../stores/console";
 
 interface MemberRect {
   id: string;
@@ -44,6 +45,25 @@ const ckindText = computed(() =>
   props.data.contentKind ? `${kindLabel(props.data.contentKind)} · spans all panels` : "spanning content",
 );
 
+// Drag a library source onto the combined surface to span it across all members.
+const store = useConsoleStore();
+const dropHover = ref(false);
+const SRC_TYPE = "application/x-polyptic-source";
+function onDragOver(e: DragEvent) {
+  if (!e.dataTransfer?.types.includes(SRC_TYPE)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+  dropHover.value = true;
+}
+function onDrop(e: DragEvent) {
+  const sid = e.dataTransfer?.getData(SRC_TYPE);
+  dropHover.value = false;
+  if (!sid) return;
+  e.preventDefault();
+  e.stopPropagation();
+  store.setWallContent(props.data.wallId, { sourceId: sid });
+}
+
 const dotColor = computed(() => {
   if (props.data.identing) return "var(--accent)";
   return props.data.allOnline ? "var(--ok)" : "var(--bad)";
@@ -63,7 +83,14 @@ const nodeStyle = computed<Record<string, string>>(() => {
 </script>
 
 <template>
-  <div class="wall-node" :class="{ identing: data.identing, selected: data.selected }" :style="nodeStyle">
+  <div
+    class="wall-node"
+    :class="{ identing: data.identing, selected: data.selected, 'drop-hover': dropHover }"
+    :style="nodeStyle"
+    @dragover="onDragOver"
+    @dragleave="dropHover = false"
+    @drop="onDrop"
+  >
     <!-- bezel seams: one outlined cell per member, gaps = bezel allowance -->
     <div
       v-for="m in data.memberRects"
@@ -117,6 +144,10 @@ const nodeStyle = computed<Record<string, string>>(() => {
 }
 .wall-node.identing {
   animation: ident-flash 1.4s infinite;
+}
+.wall-node.drop-hover {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
 }
 
 .seam-cell {

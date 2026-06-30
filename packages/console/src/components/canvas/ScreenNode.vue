@@ -10,10 +10,11 @@
   contract carries no per-screen error signal, so it is never triggered yet.)
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { ContentKind } from "@polyptic/protocol";
 import { useScreenThumbnail } from "./useThumbnails";
 import { kindLabel } from "../../content";
+import { useConsoleStore } from "../../stores/console";
 
 type ScreenStatus = "live" | "empty" | "offline" | "error";
 
@@ -87,10 +88,36 @@ const kindText = computed(() =>
     ? kindLabel(props.data.content.kind)
     : `${props.data.surfaceCount} surface${props.data.surfaceCount === 1 ? "" : "s"}`,
 );
+
+// Drag-and-drop: drop a library source from the tray onto this screen to assign it as content.
+const store = useConsoleStore();
+const dropHover = ref(false);
+const SRC_TYPE = "application/x-polyptic-source";
+function onDragOver(e: DragEvent) {
+  if (!e.dataTransfer?.types.includes(SRC_TYPE)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+  dropHover.value = true;
+}
+function onDrop(e: DragEvent) {
+  const sid = e.dataTransfer?.getData(SRC_TYPE);
+  dropHover.value = false;
+  if (!sid) return;
+  e.preventDefault();
+  e.stopPropagation();
+  store.setScreenContent(props.data.screenId, { sourceId: sid });
+}
 </script>
 
 <template>
-  <div class="screen-node" :class="{ identing: data.identing, 'has-thumb': hasThumb }" :style="nodeStyle">
+  <div
+    class="screen-node"
+    :class="{ identing: data.identing, 'has-thumb': hasThumb, 'drop-hover': dropHover }"
+    :style="nodeStyle"
+    @dragover="onDragOver"
+    @dragleave="dropHover = false"
+    @drop="onDrop"
+  >
     <!-- live preview fill (behind the label + state overlays) -->
     <div
       v-if="hasThumb"
@@ -157,6 +184,11 @@ const kindText = computed(() =>
 }
 .screen-node.identing {
   animation: ident-flash 1.4s infinite;
+}
+/* Drag-a-source-here affordance. */
+.screen-node.drop-hover {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
 }
 /* When a live preview is showing, neutralise the status background so the capture fills cleanly. */
 .screen-node.has-thumb {

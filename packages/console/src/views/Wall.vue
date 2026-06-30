@@ -50,6 +50,13 @@ function onDragStart(e: DragEvent, id: string) {
   e.dataTransfer.effectAllowed = "move";
 }
 
+/** Drag a library source onto a screen/surface to assign it (distinct DnD type from screen placement). */
+function onSourceDragStart(e: DragEvent, id: string) {
+  if (!e.dataTransfer) return;
+  e.dataTransfer.setData("application/x-polyptic-source", id);
+  e.dataTransfer.effectAllowed = "copy";
+}
+
 /** Place an unplaced screen at the next free grid slot (canvas px ≈ native res). */
 function place(id: string) {
   const muralId = store.activeMuralId;
@@ -96,7 +103,9 @@ function place(id: string) {
             class="lib-item"
             :class="{ armed: pickedSourceId === s.id }"
             :title="s.url"
+            draggable="true"
             @click="pickSource(s.id)"
+            @dragstart="onSourceDragStart($event, s.id)"
           >
             <span class="lib-glyph" :style="{ color: `var(${kindColorVar(s.kind)})` }">
               {{ kindGlyph(s.kind) }}
