@@ -155,6 +155,8 @@ export const AgentHello = z.object({
   agentVersion: z.string(),
   backend: DisplayBackend,
   outputs: z.array(Output),
+  /** The box's os.hostname(), used as the human machine label (additive-safe; optional). */
+  hostname: z.string().optional(),
   /** First contact only: the operator-configured enrollment secret. The server validates it,
    * creates the machine as `pending`, and replies `server/enrolled` with a durable credential. */
   bootstrapToken: z.string().optional(),

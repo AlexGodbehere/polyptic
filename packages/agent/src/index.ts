@@ -44,6 +44,7 @@ import {
 } from "@polyptic/protocol";
 import type { Output } from "@polyptic/protocol";
 import { readFileSync } from "node:fs";
+import { hostname as osHostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { selectBackend } from "./backends/select";
@@ -433,6 +434,7 @@ class Agent {
       agentVersion: this.agentVersion,
       backend: this.backend.id,
       outputs: this.outputs,
+      hostname: osHostname(),
       bootstrapToken: this.bootstrapToken,
       credential: this.credential ?? undefined,
     };

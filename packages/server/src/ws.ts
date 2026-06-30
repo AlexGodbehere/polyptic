@@ -232,6 +232,7 @@ function handleAgent(
       agentVersion: msg.agentVersion,
       backend: msg.backend,
       outputs: msg.outputs,
+      hostname: msg.hostname,
     };
 
     try {

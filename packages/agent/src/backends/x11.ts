@@ -70,6 +70,9 @@ export class X11Backend implements DisplayBackend {
   private readonly browsers = new Map<string, SupervisedChromium>();
   private chromiumPath: string | null = null;
 
+  /** Latched once neither `import` nor `scrot` is found, so we log the hint once and then skip. */
+  private captureUnavailable = false;
+
   private log(msg: string): void {
     console.log(`[${ts()}] [x11] ${msg}`);
   }
@@ -231,6 +234,18 @@ export class X11Backend implements DisplayBackend {
 
   /** Crop the output's region out of the root window via ImageMagick `import`, else `scrot`. */
   async capture(connector: string): Promise<Buffer | null> {
+    if (this.captureUnavailable) return null;
+
+    const hasImport = await which("import");
+    const hasScrot = await which("scrot");
+    if (!hasImport && !hasScrot) {
+      this.captureUnavailable = true;
+      this.log(
+        "capture: neither ImageMagick 'import' nor 'scrot' installed — preview thumbnails disabled; install one to enable",
+      );
+      return null;
+    }
+
     let geom: OutputGeometry;
     try {
       geom = await this.geometryFor(connector);
@@ -241,7 +256,7 @@ export class X11Backend implements DisplayBackend {
     const crop = `${geom.w}x${geom.h}+${geom.x}+${geom.y}`;
 
     // Preferred: ImageMagick import → JPEG on stdout (matches the agent's image/jpeg framing).
-    if (await which("import")) {
+    if (hasImport) {
       const buf = await captureStdout("import", [
         "-silent",
         "-window",
@@ -255,7 +270,7 @@ export class X11Backend implements DisplayBackend {
     }
 
     // Fallback: scrot grabs the area to a temp file (no stdout mode), which we read then remove.
-    if (await which("scrot")) {
+    if (hasScrot) {
       const tmp = join(tmpdir(), `polyptic-${sanitizeConnector(connector)}-${Date.now()}.png`);
       const res = await run("scrot", ["-o", "-a", `${geom.x},${geom.y},${geom.w},${geom.h}`, tmp]);
       if (res.code === 0) {

@@ -58,6 +58,10 @@ const enrollmentLoaded = computed(() => store.enrollment !== null);
 const enrollmentOpen = computed(() => store.enrollmentOpen);
 const enrollmentToken = computed(() => store.enrollmentToken);
 
+// Where a fresh box installs the agent from — this control plane. Host = how the operator reached the
+// console; :8080 is the server (same-origin in the prod image; the dev console talks to it on 8080).
+const serverBase = `${window.location.protocol}//${window.location.hostname}:8080`;
+
 const enrollingMachine = computed(() =>
   enrollingId.value ? store.machineById(enrollingId.value) : undefined,
 );
@@ -162,7 +166,7 @@ function close(): void {
           <ol class="steps">
             <li>
               <span class="num">1</span>
-              <span>Install the Polyptic agent on a PC behind your screens and start it.</span>
+              <span>On a fresh Ubuntu box behind your screens, run the one-liner below — it installs the agent straight from this control plane (no internet on the box).</span>
             </li>
             <li>
               <span class="num">2</span>
@@ -190,14 +194,14 @@ function close(): void {
 
           <div class="run">
             <code v-if="enrollmentLoaded && !enrollmentOpen"
-              >POLYPTIC_SERVER=ws://this-host:8080 \
-POLYPTIC_BOOTSTRAP_TOKEN={{ enrollmentToken }} \
-polyptic-agent</code
+              >curl -sfL {{ serverBase }}/install | POLYPTIC_TOKEN={{ enrollmentToken }} sh -</code
             >
-            <code v-else
-              >POLYPTIC_SERVER=ws://this-host:8080 \
-polyptic-agent</code
-            >
+            <code v-else>curl -sfL {{ serverBase }}/install | sh -</code>
+          </div>
+          <div class="run-hint">
+            Pulls the agent straight from this control plane — no internet on the box. Add
+            <code class="inline">sh -s -- --kiosk</code> to also set up the display (sway + Chromium).
+            If a screen can't reach <b>{{ serverBase }}</b>, use this server's LAN address instead.
           </div>
 
           <!-- waiting for the machine to dial in -->

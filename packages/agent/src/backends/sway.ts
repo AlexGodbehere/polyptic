@@ -141,6 +141,9 @@ export class SwayBackend implements DisplayBackend {
 
   /** connector → supervised kiosk Chromium. */
   private readonly browsers = new Map<string, SupervisedChromium>();
+
+  /** Latched once `grim` is found missing, so we log the remediation hint once and then skip. */
+  private captureUnavailable = false;
   /** Resolved once; reused for every (re)launch. */
   private chromiumPath: string | null = null;
 
@@ -281,8 +284,10 @@ export class SwayBackend implements DisplayBackend {
 
   /** Grab a thumbnail of `connector` via `grim`. Returns JPEG bytes (or PNG), `null` on failure. */
   async capture(connector: string): Promise<Buffer | null> {
+    if (this.captureUnavailable) return null;
     if (!(await which("grim"))) {
-      this.log(`capture(${connector}): grim not installed`);
+      this.captureUnavailable = true;
+      this.log("capture: grim not installed — preview thumbnails disabled; install grim to enable");
       return null;
     }
     // JPEG to match the agent's `image/jpeg` thumbnail framing (grim ≥ 1.4); PNG fallback for

@@ -73,6 +73,8 @@ export interface RegisterMachineInput {
   agentVersion: string;
   backend: DisplayBackend;
   outputs: Output[];
+  /** The box's os.hostname(), used as the human machine label on first registration. */
+  hostname?: string;
 }
 
 export interface RegisterMachineResult {
@@ -519,7 +521,7 @@ export class ControlPlane {
     const existing = this.machines.get(input.machineId);
     const machine: Machine = {
       id: input.machineId,
-      label: existing?.label ?? input.machineId,
+      label: existing?.label ?? input.hostname ?? input.machineId,
       agentVersion: input.agentVersion,
       backend: input.backend,
       outputs: input.outputs,
@@ -548,7 +550,7 @@ export class ControlPlane {
     const existing = this.machines.get(input.machineId);
     const machine: Machine = {
       id: input.machineId,
-      label: existing?.label ?? input.machineId,
+      label: existing?.label ?? input.hostname ?? input.machineId,
       agentVersion: input.agentVersion,
       backend: input.backend,
       outputs: input.outputs,
