@@ -161,17 +161,24 @@ function onDrop(e: DragEvent) {
         <span class="err-text">Content failed to load<br />retrying…</span>
       </div>
 
-      <!-- empty -->
-      <div v-else-if="data.status === 'empty' && !hasThumb" class="state empty-state">
-        <span class="plus">+</span>
-        <span class="empty-text">Drop content</span>
-      </div>
-
-      <!-- offline -->
-      <div v-else class="state offline-state">
+      <!-- offline (checked before empty: an offline screen never shows a live preview, so this must
+           win over the empty/preview branches — otherwise an online screen with a preview but no
+           assigned content would fall through here and be mislabelled "Machine unreachable"). -->
+      <div v-else-if="data.status === 'offline'" class="state offline-state">
         <span class="off-1">Screen dark</span>
         <span class="off-2">Machine unreachable</span>
       </div>
+
+      <!-- empty: online, but no Polyptic content assigned. With a live preview the captured picture
+           stands alone (just a faint "no content" tag); without one, invite the operator to drop
+           content. -->
+      <template v-else>
+        <div v-if="!hasThumb" class="state empty-state">
+          <span class="plus">+</span>
+          <span class="empty-text">Drop content</span>
+        </div>
+        <span v-else class="kind-label">No content assigned</span>
+      </template>
     </template>
   </div>
 </template>
