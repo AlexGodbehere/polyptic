@@ -21,7 +21,7 @@ import type { Sys } from "./system";
 import type { Logger } from "./log";
 import type { Distro } from "./distro";
 import type { SetupOptions } from "./args";
-import { installCmd } from "./distro";
+import { APT_LOCK_WAIT, installCmd } from "./distro";
 
 interface ChromiumFound {
   bin: string;
@@ -58,7 +58,7 @@ function installDebFile(sys: Sys, source: string, log: Logger): void {
     }
   }
   // `apt-get install` of a local file resolves its dependencies (unlike `dpkg -i`).
-  sys.exec("apt-get", ["install", "-y", file], {
+  sys.exec("apt-get", [...APT_LOCK_WAIT, "install", "-y", file], {
     desc: `install Chromium .deb ${file}`,
     env: { DEBIAN_FRONTEND: "noninteractive" },
   });
@@ -122,13 +122,13 @@ export function installBrowser(
 
   // Explicit PPA (apt only): add a real-.deb source then install chromium-browser from it.
   if (opts.chromiumPpa && distro.pm === "apt") {
-    sys.exec("apt-get", ["install", "-y", "software-properties-common"], {
+    sys.exec("apt-get", [...APT_LOCK_WAIT, "install", "-y", "software-properties-common"], {
       desc: "install add-apt-repository helper",
       env: { DEBIAN_FRONTEND: "noninteractive" },
     });
     sys.exec("add-apt-repository", ["-y", opts.chromiumPpa], { desc: `add PPA ${opts.chromiumPpa}` });
-    sys.exec("apt-get", ["update"], { desc: "refresh after PPA" });
-    sys.exec("apt-get", ["install", "-y", "chromium-browser"], {
+    sys.exec("apt-get", [...APT_LOCK_WAIT, "update"], { desc: "refresh after PPA" });
+    sys.exec("apt-get", [...APT_LOCK_WAIT, "install", "-y", "chromium-browser"], {
       desc: `install chromium-browser from ${opts.chromiumPpa}`,
       env: { DEBIAN_FRONTEND: "noninteractive" },
     });
@@ -148,7 +148,7 @@ export function installBrowser(
 
   // apt + Debian: real native .deb.
   if (distro.isDebian) {
-    sys.exec("apt-get", ["install", "-y", "chromium"], {
+    sys.exec("apt-get", [...APT_LOCK_WAIT, "install", "-y", "chromium"], {
       desc: "install chromium (.deb)",
       env: { DEBIAN_FRONTEND: "noninteractive" },
     });
@@ -161,13 +161,13 @@ export function installBrowser(
   // on a no-3D virtio-gpu). Default to it. --chromium-deb / --chromium-ppa above override (e.g. a
   // vendored .deb for air-gapped boxes, or a different real-.deb PPA).
   const ppa = "ppa:xtradeb/apps";
-  sys.exec("apt-get", ["install", "-y", "software-properties-common"], {
+  sys.exec("apt-get", [...APT_LOCK_WAIT, "install", "-y", "software-properties-common"], {
     desc: "install add-apt-repository helper",
     env: { DEBIAN_FRONTEND: "noninteractive" },
   });
   sys.exec("add-apt-repository", ["-y", ppa], { desc: `add ${ppa} (real .deb Chromium for Ubuntu)` });
-  sys.exec("apt-get", ["update"], { desc: "refresh package lists after adding the PPA" });
-  sys.exec("apt-get", ["install", "-y", "chromium"], {
+  sys.exec("apt-get", [...APT_LOCK_WAIT, "update"], { desc: "refresh package lists after adding the PPA" });
+  sys.exec("apt-get", [...APT_LOCK_WAIT, "install", "-y", "chromium"], {
     desc: `install real .deb chromium from ${ppa}`,
     env: { DEBIAN_FRONTEND: "noninteractive" },
   });

@@ -74,10 +74,16 @@ export function detectDistro(sys: Sys): Distro {
 
 // ── package-manager commands ───────────────────────────────────────────────────
 
+// A FRESH Ubuntu/Debian box runs `unattended-upgrades` on first boot, which holds the dpkg lock;
+// a plain `apt-get install` then dies immediately with "Could not get lock /var/lib/dpkg/lock-frontend".
+// Tell apt to WAIT for the lock (up to 10 min) instead of failing, so zero-touch provisioning survives
+// that race. Exported so browser.ts's direct apt-get calls use the same wait.
+export const APT_LOCK_WAIT = ["-o", "DPkg::Lock::Timeout=600"] as const;
+
 export function refreshCmd(pm: PkgManager): { cmd: string; args: string[] } {
   switch (pm) {
     case "apt":
-      return { cmd: "apt-get", args: ["update"] };
+      return { cmd: "apt-get", args: [...APT_LOCK_WAIT, "update"] };
     case "dnf":
       return { cmd: "dnf", args: ["-y", "makecache"] };
     case "pacman":
@@ -88,7 +94,7 @@ export function refreshCmd(pm: PkgManager): { cmd: string; args: string[] } {
 export function installCmd(pm: PkgManager, pkgs: string[]): { cmd: string; args: string[] } {
   switch (pm) {
     case "apt":
-      return { cmd: "apt-get", args: ["install", "-y", "--no-install-recommends", ...pkgs] };
+      return { cmd: "apt-get", args: [...APT_LOCK_WAIT, "install", "-y", "--no-install-recommends", ...pkgs] };
     case "dnf":
       return { cmd: "dnf", args: ["install", "-y", ...pkgs] };
     case "pacman":
