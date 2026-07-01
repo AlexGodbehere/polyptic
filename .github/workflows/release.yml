@@ -100,7 +100,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.1"
+          bun-version: "1.2.2"
 
       - name: Cache Bun install
         uses: actions/cache@v4
@@ -173,7 +173,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.1"
+          bun-version: "1.2.2"
 
       - name: Setup Node (npm registry → GitHub Packages)
         uses: actions/setup-node@v4
