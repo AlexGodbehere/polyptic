@@ -209,12 +209,15 @@ export interface Store {
   /** Insert-or-update a screen row (incl. its friendly name). */
   upsertScreen(screen: PersistedScreen): Promise<void>;
   /**
-   * Permanently forget a single screen: delete its row AND its content + placement rows (defensive —
-   * the control plane also removes it in memory + dissolves any wall first). No-op if absent.
+   * Delete a screen row ONLY (not its content/placement — callers drop those via deleteContent /
+   * deletePlacement). Used both to prune a stale phantom the machine no longer advertises and to
+   * permanently remove a screen from the console (POL-14). No-op if absent.
    */
   deleteScreen(id: string): Promise<void>;
   /** Insert-or-update a screen's content row (canvas + surfaces). */
   upsertContent(content: PersistedContent): Promise<void>;
+  /** Delete a screen's content row. No-op if absent. */
+  deleteContent(screenId: string): Promise<void>;
   /** Persist the global revision counter. */
   setRevision(revision: number): Promise<void>;
 
