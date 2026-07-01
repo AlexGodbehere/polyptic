@@ -2,12 +2,64 @@
 
 Boot a bare machine straight into Polyptic **over the network, into RAM** — no operating system installed, nothing written to the disk. Power on → the box streams a live Polyptic image from the control plane → it comes up as a named, placed screen. Swap a dead panel like a lightbulb: the replacement is generic, because nothing unique ever lived on its disk.
 
-This is the answer to two problems at once (POL-33 / [D45](DECISIONS.md)):
+This is the answer to two problems at once (POL-33 / [D46](DECISIONS.md)):
 
 1. **No hidden install step.** The `curl … /install | sh` one-liner ([DISTRIBUTION.md](DISTRIBUTION.md)) still needs an OS on the box first. Netboot removes that: the box has no OS until it fetches one, and it fetches a *live* one that never touches disk.
 2. **Who owns a booting box on a shared LAN?** **Ownership is by key, not by who-answered-the-network-first.** A box belongs to the server whose **enrolment token** its boot chain carries. So Polyptic never runs DHCP, and two control planes on one VLAN (staging next to production) coexist for free — each box carries exactly one server's key.
 
 > **amd64 first.** The image + boot medium are built for amd64 today; arm64 is a drop-in follow-up (the single `/boot.ipxe` already auto-selects the arch via iPXE `${buildarch}`).
+
+---
+
+## Quick start — end to end (zero to pixels)
+
+Follow these in order. Steps 1–3 run **once** on a Linux build host + the control plane; step 5 is per-box (or one config change for the whole fleet). The later sections drill into each piece.
+
+> **You need:** a **Linux amd64 build host** (`unsquashfs`/`mksquashfs`/`chroot` + the iPXE toolchain — *not* macOS); a **casper live ISO** to base the image on (e.g. `ubuntu-24.04.x-live-server-amd64.iso`); a **running Polyptic control plane**; and the target boxes in **UEFI mode with Secure Boot OFF** (the self-built iPXE is unsigned — see [Secure Boot](#secure-boot)).
+
+**1. Build the three artifacts** (on the Linux build host, from the repo root):
+
+```bash
+deploy/build-agent.sh amd64                                                   # → deploy/dist/polyptic-agent-amd64
+sudo BASE_ISO=/path/ubuntu-24.04.x-live-server-amd64.iso \
+     deploy/build-live-image.sh amd64                                         # → deploy/dist/image/amd64/{vmlinuz,initrd,squashfs}
+POLYPTIC_BASE=https://polyptic.example.com deploy/build-ipxe.sh amd64         # → deploy/dist/ipxe/polyptic-boot-amd64.{efi,img}
+```
+
+(Order matters: the live image bakes in the agent binary, so build the agent first. `POLYPTIC_BASE` is the URL your boxes reach the control plane at — baked into the medium.)
+
+**2. Point the control plane at the artifacts** and restart it:
+
+```bash
+IMAGE_DIST_DIR=/srv/polyptic/image     # copy deploy/dist/image/ here (a mounted volume — the images are large)
+IPXE_DIST_DIR=/srv/polyptic/ipxe       # copy deploy/dist/ipxe/ here
+```
+
+The server's boot banner logs `netboot[image-amd64=true medium-amd64=true]` when it finds them.
+
+**3. Verify the depot is serving** (from anywhere that can reach the server):
+
+```bash
+curl -s https://polyptic.example.com/boot.ipxe        # → an "#!ipxe" script with your base baked in
+curl -sI https://polyptic.example.com/dist/image/amd64/squashfs | grep -i accept-ranges   # → Accept-Ranges: bytes
+```
+
+**4. (Optional but recommended) gate enrolment.** Set an enrolment token (Console ▸ Settings ▸ Enrolment token, or `POLYPTIC_BOOTSTRAP_TOKEN` on the server). Gated mode makes a new box wait for your approval; open mode auto-approves anything that netboots. Either way, `/boot.ipxe` bakes the current token in automatically.
+
+**5. Make a box boot it** — pick **one**:
+
+- **USB dongle (simplest):** Console ▸ Settings ▸ Netboot ▸ **Download boot medium**, then `sudo dd if=polyptic-boot-amd64.img of=/dev/sdX bs=4M` to a USB stick. Plug it into the box, boot from USB, and choose **Boot now (dongle)** or **Offload to this box** at the menu. See [The boot medium](#the-boot-medium--dongle-or-offload).
+- **No medium — UEFI HTTP Boot:** point the box's firmware Boot URI at `https://polyptic.example.com/dist/ipxe/polyptic-boot-amd64.efi`. See [No medium at all](#no-medium-at-all).
+- **No medium — site DHCP:** add one option-67 rule to the DHCP you already run. See [Site DHCP option 67](#site-dhcp-option-67-one-change-to-the-dhcp-you-already-run).
+
+**6. First boot → approve → done.** The box streams the image into RAM, boots diskless, and dials in. In **gated** mode it appears **PENDING** under **Console ▸ Machines** — approve it once; it renders its screen. Place it on a mural like any screen. **Every later cold boot re-attaches automatically** (same stable hardware id + token → no re-approval, placement kept). In **open** mode it's admitted immediately.
+
+**Troubleshooting quick hits:**
+
+- Box won't boot the medium at all → **Secure Boot is still on** (disable it) or the firmware is BIOS/CSM (UEFI only).
+- Boots iPXE but stalls fetching the image → the casper initrd's busybox resolves **IPs, not DNS**; use the server's **IP** in `POLYPTIC_BASE` if the box has no DNS.
+- Boots the image but never appears in Machines → check the box reaches the control plane, and `journalctl -u polyptic-agent-env` (the identity/cmdline oneshot) on the box.
+- A box re-appears as a *new* PENDING machine each boot → its firmware reports no stable DMI UUID and the id fell back to a MAC hash that changed (multi-NIC); see [stable identity](#the-life-of-a-box-power-on-to-pixels).
 
 ---
 
