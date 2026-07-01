@@ -430,6 +430,16 @@ export class PostgresStore implements Store {
     await sql`UPDATE machines SET status = ${status} WHERE id = ${id}`;
   }
 
+  async deleteMachine(id: string): Promise<void> {
+    const sql = this.sql;
+    // Cascade the machine's screens + their content + placements (defensive — the control plane also
+    // removes each in memory + dissolves walls first so memory + broadcasts stay correct).
+    await sql`DELETE FROM screen_content WHERE screen_id IN (SELECT id FROM screens WHERE machine_id = ${id})`;
+    await sql`DELETE FROM placements WHERE screen_id IN (SELECT id FROM screens WHERE machine_id = ${id})`;
+    await sql`DELETE FROM screens WHERE machine_id = ${id}`;
+    await sql`DELETE FROM machines WHERE id = ${id}`;
+  }
+
   async upsertScreen(screen: PersistedScreen): Promise<void> {
     const sql = this.sql;
     await sql`
@@ -440,6 +450,13 @@ export class PostgresStore implements Store {
         machine_id    = EXCLUDED.machine_id,
         connector     = EXCLUDED.connector
     `;
+  }
+
+  async deleteScreen(id: string): Promise<void> {
+    const sql = this.sql;
+    await sql`DELETE FROM screen_content WHERE screen_id = ${id}`;
+    await sql`DELETE FROM placements WHERE screen_id = ${id}`;
+    await sql`DELETE FROM screens WHERE id = ${id}`;
   }
 
   async upsertContent(content: PersistedContent): Promise<void> {
