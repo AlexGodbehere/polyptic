@@ -10,7 +10,14 @@
  * Every response is zod-validated at the edge against the shared contract, same discipline as the
  * wire. No secret (password or hash) is ever sent back by these routes or logged here.
  */
-import { AuthUser, ChangePasswordBody, DisplaySettings, EnrollmentInfo, LoginBody } from "@polyptic/protocol";
+import {
+  AuthUser,
+  ChangePasswordBody,
+  DisplaySettings,
+  EnrollmentInfo,
+  LoginBody,
+  NetbootInfo,
+} from "@polyptic/protocol";
 import type {
   ChangePasswordBody as ChangePasswordBodyT,
   DisplaySettings as DisplaySettingsT,
@@ -86,6 +93,16 @@ export async function getEnrollment(): Promise<EnrollmentInfo> {
 export async function regenerateEnrollment(): Promise<EnrollmentInfo> {
   const raw = await send<unknown>("POST", `${BASE_SETTINGS}/enrollment/regenerate`);
   return unwrapEnrollment(raw);
+}
+
+/**
+ * GET /api/v1/settings/netboot → where a diskless box HTTP-boots from (control-plane base + the
+ * `/boot.ipxe` chain URL) and the optional boot-medium download (POL-33). Secret-free — the enrolment
+ * token the boot flow bakes in lives in the enrollment card, not here.
+ */
+export async function getNetboot(): Promise<NetbootInfo> {
+  const raw = await send<unknown>("GET", `${BASE_SETTINGS}/netboot`);
+  return NetbootInfo.parse(raw);
 }
 
 /** GET /api/v1/settings/display → the current fleet-wide display settings (badge toggle) (POL-6). */

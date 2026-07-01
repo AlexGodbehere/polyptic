@@ -11,6 +11,8 @@ const router = useRouter();
 onMounted(() => {
   // Load the enrollment-token info (open vs gated) so the card can render the real value.
   void store.fetchEnrollment();
+  // Load the netboot info (control-plane base + iPXE URL + boot-medium download) for the Netboot card.
+  void store.fetchNetboot();
   // Load the fleet-wide badge toggle so the card is correct even before the admin/state snapshot lands.
   void store.fetchDisplaySettings();
 });
@@ -67,6 +69,22 @@ async function regenerate(): Promise<void> {
   regenerating.value = true;
   await store.regenerateEnrollment();
   regenerating.value = false;
+}
+
+// ── Netboot (POL-33) ──────────────────────────────────────────────────────────
+// A per-field copy indicator (which URL was last copied) — one helper for the base + iPXE URLs.
+const nbCopied = ref<string | null>(null);
+
+async function copyNetboot(text: string, which: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    nbCopied.value = which;
+    window.setTimeout(() => {
+      if (nbCopied.value === which) nbCopied.value = null;
+    }, 1600);
+  } catch {
+    /* clipboard unavailable (non-secure context) — Copy is best-effort */
+  }
 }
 
 // ── Change password ─────────────────────────────────────────────────────────────
@@ -180,6 +198,76 @@ async function onChangePassword(): Promise<void> {
             </button>
           </div>
           <div class="token-hint">New machines must present this token to dial in.</div>
+        </template>
+      </div>
+
+      <!-- Netboot (POL-33) ------------------------------------------------------ -->
+      <div class="card panel">
+        <div class="panel-title">Netboot</div>
+        <div class="panel-sub">
+          Boot a bare machine straight into Polyptic over the network — no OS install, no disk. Point the
+          machine's iPXE/PXE at the chain URL below, or write the ready-made boot medium to a USB stick.
+        </div>
+
+        <template v-if="store.netboot === null">
+          <div class="token-empty">Loading…</div>
+        </template>
+
+        <template v-else>
+          <label class="field-label">Control-plane URL</label>
+          <div class="token-row">
+            <code class="token">{{ store.netboot.baseUrl }}</code>
+            <button class="btn-ghost-sm" @click="copyNetboot(store.netboot.baseUrl, 'base')">
+              {{ nbCopied === "base" ? "Copied ✓" : "Copy" }}
+            </button>
+          </div>
+
+          <label class="field-label nb-gap">iPXE chain URL</label>
+          <div class="token-row">
+            <code class="token">{{ store.netboot.bootIpxeUrl }}</code>
+            <button class="btn-ghost-sm" @click="copyNetboot(store.netboot.bootIpxeUrl, 'ipxe')">
+              {{ nbCopied === "ipxe" ? "Copied ✓" : "Copy" }}
+            </button>
+          </div>
+
+          <div class="nb-steps">
+            <div class="nb-step">
+              <span class="nb-num">1</span> Chainload
+              <code class="inline-code">{{ store.netboot.bootIpxeUrl }}</code> from your DHCP/PXE server, or
+              write the boot medium to USB.
+            </div>
+            <div class="nb-step">
+              <span class="nb-num">2</span> Power on the bare machine — it streams the kernel, initrd and
+              root image from this server only, into RAM.
+            </div>
+            <div class="nb-step">
+              <span class="nb-num">3</span> It boots diskless into Polyptic and dials in —
+              <template v-if="store.netboot.mode === 'gated'">approve it under Machines.</template>
+              <template v-else>it is auto-approved (open mode).</template>
+            </div>
+          </div>
+
+          <a
+            v-if="store.netboot.bootMediumUrl"
+            class="btn btn-primary save nb-download"
+            :href="store.netboot.bootMediumUrl"
+            download
+            >Download boot medium</a
+          >
+          <div v-else class="token-hint nb-gap">
+            No prebuilt boot medium bundled yet — use the iPXE chain URL above, or build one into
+            <code class="inline-code">IPXE_DIST_DIR</code> on the server.
+          </div>
+
+          <div v-if="store.netboot.mode === 'gated'" class="nb-note">
+            Ownership of the fleet is the enrolment token, which the boot flow above bakes in — so multiple
+            Polyptic instances can share a network without collision. Keep the netboot network
+            operator-only, and regenerate the token (card above) to revoke.
+          </div>
+          <div v-else class="nb-note">
+            Open mode: any machine that netboots is auto-enrolled. Set an enrolment token to gate access and
+            bind boxes to this server by key.
+          </div>
         </template>
       </div>
 
@@ -324,6 +412,45 @@ async function onChangePassword(): Promise<void> {
   font-size: 11.5px;
   color: var(--muted2);
   margin-top: 10px;
+}
+/* ── Netboot card (POL-33) ── */
+.nb-gap {
+  margin-top: 14px;
+}
+.nb-steps {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.nb-step {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.nb-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--muted-bg);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg2);
+}
+.nb-download {
+  display: inline-block;
+  margin-top: 16px;
+  text-decoration: none;
+}
+.nb-note {
+  margin-top: 14px;
+  font-size: 11.5px;
+  color: var(--muted2);
+  line-height: 1.5;
 }
 .inline-code {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;

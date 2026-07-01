@@ -175,7 +175,9 @@ registerOpsRoutes(fastify, {
 // TOP-LEVEL, UNGATED zero-touch provisioning routes (GET /install, /dist/agent/:arch, /dist/deps/**) —
 // NOT /api/v1, so an edge box with no operator session can bootstrap itself entirely from the server.
 const provisionConfig = provisionConfigFromEnv();
-registerProvisionRoutes(fastify, provisionConfig);
+// Pass the live enrollment singleton so GET /boot.ipxe (POL-33) bakes the CURRENT token — the same one
+// the agent WS accepts, so a regenerate re-keys the netboot flow on the next boot with no drift.
+registerProvisionRoutes(fastify, provisionConfig, enrollment);
 attachWebSockets({
   server: fastify.server,
   control,
@@ -211,7 +213,8 @@ if (spaServed.length > 0) {
 }
 
 // Provisioning boot banner: report which zero-touch artifacts are present on disk (install template,
-// agent binaries per arch, deps bundle root) so a misconfigured AGENT_DIST_DIR/DEPS_DIST_DIR is obvious.
+// agent binaries per arch, deps bundle root, netboot image + boot medium) so a misconfigured
+// AGENT_DIST_DIR/DEPS_DIST_DIR/IMAGE_DIST_DIR/IPXE_DIST_DIR is obvious.
 const provisionSummary = await provisionBootSummary(provisionConfig);
 fastify.log.info(
   {
@@ -224,10 +227,16 @@ fastify.log.info(
     agentAmd64: provisionSummary.agentAmd64,
     depsDistDir: provisionConfig.depsDistDir,
     depsDistDirExists: provisionSummary.depsDistDir,
+    imageDistDir: provisionConfig.imageDistDir,
+    imageDistDirExists: provisionSummary.imageDistDir,
+    imageAmd64: provisionSummary.imageAmd64,
+    ipxeDistDir: provisionConfig.ipxeDistDir,
+    bootMediumAmd64: provisionSummary.bootMediumAmd64,
   },
   `provisioning: install=${provisionSummary.installTemplate ? "template" : "fallback"} ` +
     `agent[arm64=${provisionSummary.agentArm64} amd64=${provisionSummary.agentAmd64}] ` +
-    `deps-dir=${provisionSummary.depsDistDir}`,
+    `deps-dir=${provisionSummary.depsDistDir} ` +
+    `netboot[image-amd64=${provisionSummary.imageAmd64} medium-amd64=${provisionSummary.bootMediumAmd64}]`,
 );
 
 // Start the periodic live-preview capture sweep (no-op when CAPTURE_INTERVAL_MS=0).
