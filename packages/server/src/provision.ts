@@ -39,7 +39,7 @@
  * offline-first logic depends on the 404 to fall back), never a traversal or a 500.
  */
 import { createReadStream } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { open, readFile, stat } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -169,6 +169,10 @@ export function toWsAgentUrl(httpBase: string): string {
  *   - `boot=casper iso-url=<url ending .iso>` makes casper wget the WHOLE ISO into RAM (initramfs
  *     tmpfs) and loop-mount the squashfs inside it, nothing touches disk ("live image, no install").
  *     `netboot=http fetch=` does not exist in casper; `iso-url` is the real mechanism.
+ *   - `layerfs-path=filesystem.squashfs` OVERRIDES the layered image name the reused initrd bakes in
+ *     (`/conf/conf.d/default-layer.conf`, e.g. `ubuntu-server-minimal.ubuntu-server.installer...`), so
+ *     casper mounts our single `deploy/build-live-image.sh` squashfs instead of panicking with
+ *     "File system layers are missing". Must match the squashfs filename the image build writes.
  *   - `ip=dhcp` brings the NIC up before the fetch.
  *   - `polyptic.server_url=` / `polyptic.token=` are picked out of /proc/cmdline by the image's
  *     parse-cmdline helper and become the agent's POLYPTIC_SERVER_URL / POLYPTIC_BOOTSTRAP_TOKEN.
@@ -180,6 +184,7 @@ export function toWsAgentUrl(httpBase: string): string {
 function bootKernelCmdline(httpBase: string, token: string | undefined): string {
   const parts = [
     "boot=casper",
+    "layerfs-path=filesystem.squashfs",
     `iso-url=${httpBase}/dist/image/$arch/polyptic.iso`,
     "ip=dhcp",
     // The HTTP base (for the offload flow to fetch the loaders) + the WS agent URL (for the agent).
@@ -270,6 +275,67 @@ export function parseRange(
   if (start > end || start >= size) return { unsatisfiable: true };
   if (end >= size) end = size - 1;
   return { start, end };
+}
+
+/**
+ * Cap under which a boot asset is served as a fully-buffered body (so it carries a Content-Length)
+ * rather than a stream. GRUB's shim_lock verifier and UEFI reject an unknown-size / chunked body
+ * (`verifiers.c`: an unknown size trips the "big file signature isn't implemented yet" guard, so a
+ * Secure-Boot box will NOT load a chunked kernel), and Bun's HTTP server forces
+ * `Transfer-Encoding: chunked` for ANY streamed body EVEN with an explicit Content-Length header, so
+ * a complete Buffer is the only way to emit Content-Length. Every boot-critical artifact (vmlinuz,
+ * initrd, the signed `.efi` loaders, the dongle `.img`) is comfortably under this; only the ~1.5GB
+ * casper ISO exceeds it, and that is fetched by busybox `wget` inside the initramfs (chunked-capable),
+ * never by GRUB, so streaming it is fine and avoids holding it in RAM. 512 MiB.
+ */
+const BOOT_ASSET_BUFFER_MAX = 512 * 1024 * 1024;
+
+/**
+ * Serve `abs` (a known-`size` regular file) as a boot asset: honour a byte Range, and for a non-range
+ * response emit a Content-Length so GRUB/UEFI can verify + size it. Buffers the body up to
+ * {@link BOOT_ASSET_BUFFER_MAX} (Bun only emits Content-Length for a complete Buffer, not a stream);
+ * larger files (the casper ISO) stream. Callers set any extra headers (e.g. Content-Disposition) first.
+ */
+async function sendBootAsset(
+  reply: FastifyReply,
+  abs: string,
+  size: number,
+  rangeHeader: string | string[] | undefined,
+): Promise<unknown> {
+  reply.header("Cache-Control", "no-store");
+  reply.header("X-Content-Type-Options", "nosniff");
+  reply.header("Accept-Ranges", "bytes");
+  reply.type("application/octet-stream");
+
+  const range = parseRange(rangeHeader, size);
+  if (range && "unsatisfiable" in range) {
+    reply.header("Content-Range", `bytes */${size}`);
+    reply.type("text/plain; charset=utf-8");
+    return reply.code(416).send("range not satisfiable");
+  }
+  if (range) {
+    const { start, end } = range;
+    const len = end - start + 1;
+    // Read the (bounded) slice into a Buffer so the 206 carries a real Content-Length, not chunked.
+    const buf = Buffer.allocUnsafe(len);
+    const fh = await open(abs, "r");
+    try {
+      await fh.read(buf, 0, len, start);
+    } finally {
+      await fh.close();
+    }
+    reply.code(206);
+    reply.header("Content-Range", `bytes ${start}-${end}/${size}`);
+    reply.header("Content-Length", String(len));
+    return reply.send(buf);
+  }
+  if (size <= BOOT_ASSET_BUFFER_MAX) {
+    // A Buffer body (not a stream) is what makes Bun emit Content-Length; GRUB requires it.
+    reply.header("Content-Length", String(size));
+    return reply.send(await readFile(abs));
+  }
+  // Only the casper ISO lands here: streamed (chunked), fetched by busybox wget, never by GRUB.
+  return reply.send(createReadStream(abs));
 }
 
 /**
@@ -435,28 +501,9 @@ export function registerProvisionRoutes(
     }
     if (!st.isFile()) return reply.code(404).send({ error: "image not bundled" });
 
-    reply.header("Cache-Control", "no-store");
-    reply.header("X-Content-Type-Options", "nosniff");
-    reply.header("Accept-Ranges", "bytes");
-    reply.type("application/octet-stream");
-
-    const range = parseRange(request.headers.range, st.size);
-    if (range && "unsatisfiable" in range) {
-      // The octet-stream content-type is already set above, so send a plain string (not an object,
-      // which the octet-stream serializer would reject) with a text type for the error body.
-      reply.header("Content-Range", `bytes */${st.size}`);
-      reply.type("text/plain; charset=utf-8");
-      return reply.code(416).send("range not satisfiable");
-    }
-    if (range) {
-      const { start, end } = range;
-      reply.code(206);
-      reply.header("Content-Range", `bytes ${start}-${end}/${st.size}`);
-      reply.header("Content-Length", String(end - start + 1));
-      return reply.send(createReadStream(abs, { start, end }));
-    }
-    reply.header("Content-Length", String(st.size));
-    return reply.send(createReadStream(abs));
+    // vmlinuz + initrd are fetched (and vmlinuz shim_lock-verified) by GRUB, which needs Content-Length;
+    // sendBootAsset buffers them for that. The ~1.5GB ISO streams (wget fetches it). Range-aware (206/416).
+    return sendBootAsset(reply, abs, st.size, request.headers.range);
   });
 
   // ── GET /dist/boot/:file, UNGATED download of the boot depot: the universal dd-able dongle
@@ -477,13 +524,10 @@ export function registerProvisionRoutes(
     }
     if (!st.isFile()) return reply.code(404).send({ error: "boot file not bundled" });
 
-    reply.header("Cache-Control", "no-store");
-    reply.header("X-Content-Type-Options", "nosniff");
-    reply.header("Accept-Ranges", "bytes");
+    // The signed .efi loaders (offload + UEFI HTTP Boot fetch these via shim/firmware) and the dongle
+    // .img all need Content-Length; sendBootAsset buffers them (all well under the cap). Range-aware.
     reply.header("Content-Disposition", `attachment; filename="${file}"`);
-    reply.header("Content-Length", String(st.size));
-    reply.type("application/octet-stream");
-    return reply.send(createReadStream(abs));
+    return sendBootAsset(reply, abs, st.size, request.headers.range);
   });
 
   // ── GET /api/v1/settings/netboot, GATED (auto: /api/v1 prefix → the global preHandler). Secret-free

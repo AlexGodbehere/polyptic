@@ -43,7 +43,10 @@ const TEST_TIMEOUT = 10_000;
 
 // Marker bytes, unique sentinels so an assertion can prove EXACTLY which file answered. The ISO is
 // deliberately long enough to range over.
-const VMLINUZ_BYTES = "FAKE_POLYPTIC_VMLINUZ\x00kernel-marker\n";
+// Deliberately LARGE (~5MB, above Bun's small-stream buffering) so the Content-Length regression test
+// is real: Bun sends any streamed body chunked, and GRUB's shim_lock verifier refuses a chunked
+// (unknown-size) kernel with "big file signature isn't implemented yet", so the route must buffer it.
+const VMLINUZ_BYTES = "FAKE_POLYPTIC_VMLINUZ\x00" + "K".repeat(5_000_000) + "\nkernel-marker\n";
 const INITRD_BYTES = "FAKE_POLYPTIC_INITRD\x00initrd-marker\n";
 const ISO_BYTES =
   "FAKE_POLYPTIC_LIVE_ISO_" + "0123456789abcdef".repeat(8) + "\x00iso-marker\n";
@@ -204,6 +207,9 @@ describe("netboot: GET /boot/grub.cfg", () => {
       expect(body).toContain("--id live");
       expect(body).toContain("--id offload");
       expect(body).toContain(`iso-url=http://${OPEN_HOST}/dist/image/$arch/polyptic.iso`);
+      // Overrides the layered image name the reused initrd bakes in, else casper panics "File system
+      // layers are missing" (verified on the POL-33 arm64 VM boot). Must match build-live-image.sh.
+      expect(body).toContain("layerfs-path=filesystem.squashfs");
       expect(body).toContain(`polyptic.server_url=ws://${OPEN_HOST}/agent`);
       // OPEN mode carries NO enrolment token.
       expect(body).not.toContain("polyptic.token=");
@@ -291,6 +297,23 @@ describe("netboot: GET /dist/image/:arch/:file", () => {
     async () => {
       expect(await (await fetch(`${OPEN_BASE}/dist/image/amd64/vmlinuz`)).text()).toBe(VMLINUZ_BYTES);
       expect(await (await fetch(`${OPEN_BASE}/dist/image/amd64/initrd`)).text()).toBe(INITRD_BYTES);
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
+    "serves the (large) vmlinuz with a real Content-Length, NOT chunked",
+    async () => {
+      // GRUB's shim_lock verifier reads the whole kernel into a buffer to check its signature and bails
+      // on an unknown size ("big file signature isn't implemented yet"), so a Secure-Boot box will not
+      // load a chunked kernel. Bun forces Transfer-Encoding: chunked for ANY streamed body even with an
+      // explicit Content-Length header, so the route must send a Buffer. vmlinuz here is ~5MB (above
+      // Bun's small-stream buffering): without the buffered path this comes back chunked (no
+      // Content-Length) and this assertion fails, exactly as a real Secure-Boot netboot would.
+      const res = await fetch(`${OPEN_BASE}/dist/image/amd64/vmlinuz`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-length")).toBe(String(Buffer.byteLength(VMLINUZ_BYTES)));
+      await res.body?.cancel();
     },
     TEST_TIMEOUT,
   );

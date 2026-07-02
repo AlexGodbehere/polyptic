@@ -33,7 +33,7 @@
 # USAGE:
 #   sudo BASE_ISO=/path/ubuntu-24.04.x-live-server-amd64.iso deploy/build-live-image.sh [amd64|arm64]
 #     env: BASE_ISO (required; a casper live ISO, Server-live keeps the squashfs small)
-#          BROWSER (default cog, Chromium is snap-only on Ubuntu and unreliable in a casper overlay)
+#          BROWSER (default auto: cog if packaged, else surf; Chromium is snap-only + casper-unfriendly)
 #          OUT_DIR SQUASHFS
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$REPO_ROOT"
@@ -44,7 +44,7 @@ case "${1:-amd64}" in
   *) echo "build-live-image: unknown arch '${1:-}' (amd64|arm64)" >&2; exit 2 ;;
 esac
 : "${BASE_ISO:?set BASE_ISO=/path/to/ubuntu-*-live-*.iso (a casper live ISO)}"
-BROWSER="${BROWSER:-cog}"
+BROWSER="${BROWSER:-auto}"   # auto = cog if packaged (<=25.04), else surf (25.10+/26.04); see step 4
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/deploy/dist/image/$ARCH}"
 AGENT_BIN="$REPO_ROOT/deploy/dist/polyptic-agent-$ARCH"
 OVERLAY="$REPO_ROOT/deploy/live"
@@ -86,12 +86,26 @@ echo '==> [3/8] unsquashfs base rootfs'
 rm -rf "$ROOTFS"; unsquashfs -d "$ROOTFS" "$SQUASH"
 
 echo '==> [4/8] chroot: install the substrate via the compiled agent setup'
-cp -f /etc/resolv.conf "$ROOTFS/etc/resolv.conf"   # build-host DNS; the BOX stays air-gapped
+# The chroot needs WORKING DNS to apt-get the substrate. A modern build host's /etc/resolv.conf is the
+# systemd-resolved STUB (nameserver 127.0.0.53), which resolves nothing inside a chroot with no resolved
+# running; prefer systemd-resolved's real-upstream file when present. The image never ships this (step 6
+# deletes it before mksquashfs), so the booted box stays on its own DHCP/agent DNS.
+rm -f "$ROOTFS/etc/resolv.conf"
+if [ -s /run/systemd/resolve/resolv.conf ]; then
+  cp -fL /run/systemd/resolve/resolv.conf "$ROOTFS/etc/resolv.conf"
+else
+  cp -fL /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
+fi
 mount --bind /dev "$ROOTFS/dev"; mount --bind /dev/pts "$ROOTFS/dev/pts"
 mount -t proc proc "$ROOTFS/proc"; mount -t sysfs sys "$ROOTFS/sys"; mount -t tmpfs tmp "$ROOTFS/run"
 install -m0755 "$AGENT_BIN" "$ROOTFS/usr/local/bin/polyptic-agent"
 chroot "$ROOTFS" /bin/sh -eux <<'CHROOT'
 export DEBIAN_FRONTEND=noninteractive
+# A live ISO's rootfs carries a `file:///cdrom` apt source (the install media) that is NOT present in a
+# live-build chroot, so `apt-get update` would hard-fail on its missing Release file. Drop it (both the
+# deb822 cdrom.sources and any legacy `cdrom:` line) so update sees only the real network mirrors.
+rm -f /etc/apt/sources.list.d/cdrom.sources
+[ -f /etc/apt/sources.list ] && sed -i '/cdrom:/d' /etc/apt/sources.list || true
 # Hold the kernel so no apt operation desyncs the squashfs /lib/modules from the reused ISO initrd (the
 # #1 netboot footgun). `apt-mark hold` takes LITERAL package names, a glob would match nothing, so
 # expand the actually-installed kernel packages via dpkg-query first. The metapackages (linux-generic /
@@ -102,6 +116,18 @@ held="$(dpkg-query -W -f='${Package}\n' 'linux-image-*' 'linux-headers-*' 'linux
 [ -n "$held" ] && apt-mark hold $held || echo "no linux-* packages to hold (unusual, verify the ISO)"
 apt-get update
 CHROOT
+# Pick the kiosk browser. `cog` (WPE/WebKit) is the historic Ubuntu/arm64 choice, but it was DROPPED
+# from the archive in 25.10+/26.04; `surf` (suckless WebKitGTK) is the packaged fallback there and the
+# agent has a backend for it. Auto-detect against the chroot's apt so one BASE_ISO release just works
+# (verified on-hardware: cog fails to install on 26.04, POL-33 arm64 VM build). Override with BROWSER=.
+if [ "$BROWSER" = "auto" ]; then
+  if chroot "$ROOTFS" apt-cache policy cog 2>/dev/null | grep -qE 'Candidate: [0-9]'; then
+    BROWSER=cog
+  else
+    BROWSER=surf
+  fi
+  echo "==> browser: auto-selected '$BROWSER'"
+fi
 # No --server-url/--bootstrap-token/--start: those arrive on the kernel cmdline at boot; greetd starts
 # the agent. `setup` writes greetd autologin, the compositor launcher, sway/i3 config + the user unit.
 chroot "$ROOTFS" /usr/local/bin/polyptic-agent setup \
@@ -135,6 +161,12 @@ mkdir -p "$STAGE/casper" "$STAGE/.disk"
 mv "$WORK/filesystem.squashfs" "$STAGE/casper/filesystem.squashfs"
 du -sx --block-size=1 "$ROOTFS" | cut -f1 > "$STAGE/casper/filesystem.size"   # casper sizes the RAM overlay from this
 echo "Polyptic live image ($ARCH)" > "$STAGE/.disk/info"
+# casper's matches_uuid() guards the netboot ISO mount: it checks the downloaded ISO's
+# /.disk/casper-uuid-* against a UUID baked into the REUSED initrd (/conf/uuid.conf). Without a matching
+# file casper rejects the image with "Unable to find a live file system on the network", so copy the
+# base ISO's casper-uuid (same initrd => same UUID). Verified on-hardware (POL-33 arm64 VM boot).
+cp -f "$ISO_MNT"/.disk/casper-uuid-* "$STAGE/.disk/" 2>/dev/null \
+  || echo "warn: base ISO has no .disk/casper-uuid-*; casper matches_uuid may reject the netboot image" >&2
 rm -f "$OUT_DIR/polyptic.iso"
 xorriso -as mkisofs -J -r -V POLYPTIC -o "$OUT_DIR/polyptic.iso" "$STAGE"
 
