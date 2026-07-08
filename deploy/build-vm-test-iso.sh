@@ -105,7 +105,7 @@ set timeout=5
 set default=0
 menuentry "Polyptic (live, enrol into $HOSTPORT)" {
     set gfxpayload=keep
-    linux  /casper/vmlinuz boot=casper layerfs-path=filesystem.squashfs polyptic.server_url=ws://$HOSTPORT/agent polyptic.token=$POLYPTIC_TOKEN quiet splash plymouth.ignore-serial-consoles --- console=tty0
+    linux  /casper/vmlinuz boot=casper layerfs-path=filesystem.squashfs polyptic.server_url=ws://$HOSTPORT/agent polyptic.token=$POLYPTIC_TOKEN multipath=off quiet splash plymouth.ignore-serial-consoles --- console=tty0
     initrd /casper/initrd
 }
 menuentry 'UEFI Firmware Settings' { fwsetup }

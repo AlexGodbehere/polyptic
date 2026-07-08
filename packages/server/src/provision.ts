@@ -202,7 +202,11 @@ function bootKernelCmdline(httpBase: string, token: string | undefined): string 
   // never paint the local display (verified live with plymouthd --debug in the POL-38 UTM boot).
   // A wall renders on its panel by definition, so ignoring serial consoles is always right here.
   // Must sit BEFORE the caller-appended `---` terminator.
-  parts.push("quiet", "splash", "plymouth.ignore-serial-consoles");
+  // `multipath=off` silences the INITRAMFS multipath boot script (stock server initrds carry it):
+  // in a live boot it aborts on its bindings file at ~0.2s and sprays "fatal configuration error"
+  // on the console BEFORE plymouth takes the screen — the rootfs unit mask can't reach it. A kiosk
+  // never boots from SAN multipath, so off is always right here.
+  parts.push("multipath=off", "quiet", "splash", "plymouth.ignore-serial-consoles");
   return parts.join(" ");
 }
 
