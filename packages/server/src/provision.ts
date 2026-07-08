@@ -195,10 +195,14 @@ function bootKernelCmdline(httpBase: string, token: string | undefined): string 
     `polyptic.server_url=${toWsAgentUrl(httpBase)}`,
   ];
   if (token !== undefined) parts.push(`polyptic.token=${token}`);
-  // POL-7/POL-38: boot splash instead of scrolling kernel/systemd text. The live rootfs carries the
-  // Polyptic Plymouth theme (`setup` bakes it into the squashfs); `quiet splash` is what makes
-  // plymouthd actually display it. Must sit BEFORE the caller-appended `---` terminator.
-  parts.push("quiet", "splash");
+  // POL-7/POL-38: boot splash instead of scrolling kernel/systemd text. The live image carries the
+  // Polyptic Plymouth theme (squashfs + an initrd cpio segment); `quiet splash` is what makes
+  // plymouthd display it, and `plymouth.ignore-serial-consoles` is LOAD-BEARING: any serial console
+  // (arm64 VMs get one implicitly from the devicetree) makes plymouth assume a headless server and
+  // never paint the local display (verified live with plymouthd --debug in the POL-38 UTM boot).
+  // A wall renders on its panel by definition, so ignoring serial consoles is always right here.
+  // Must sit BEFORE the caller-appended `---` terminator.
+  parts.push("quiet", "splash", "plymouth.ignore-serial-consoles");
   return parts.join(" ");
 }
 

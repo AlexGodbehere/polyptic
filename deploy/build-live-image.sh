@@ -51,7 +51,7 @@ OVERLAY="$REPO_ROOT/deploy/live"
 
 [ "$(uname -s)" = "Linux" ] || { echo "Linux build host required (got $(uname -s))" >&2; exit 1; }
 [ "$(id -u)" = 0 ]          || { echo "must run as root (chroot + mounts)" >&2; exit 1; }
-for t in unsquashfs mksquashfs rsync xorriso; do command -v "$t" >/dev/null || { echo "missing $t (squashfs-tools/rsync/xorriso)" >&2; exit 1; }; done
+for t in unsquashfs mksquashfs rsync xorriso cpio zstd; do command -v "$t" >/dev/null || { echo "missing $t (squashfs-tools/rsync/xorriso/cpio/zstd)" >&2; exit 1; }; done
 [ -f "$AGENT_BIN" ] || { echo "$AGENT_BIN missing, run deploy/build-agent.sh $ARCH first" >&2; exit 1; }
 [ -d "$OVERLAY" ]   || { echo "$OVERLAY missing, the diskless identity overlay is required" >&2; exit 1; }
 
@@ -134,6 +134,31 @@ chroot "$ROOTFS" /usr/local/bin/polyptic-agent setup \
   --backend wayland-sway --user kiosk --browser "$BROWSER" --render auto
 chroot "$ROOTFS" /bin/sh -c 'apt-get clean'
 
+echo '==> [4b/8] harvest the Plymouth splash closure for the initrd (POL-38)'
+# The casper initrd starts plymouthd LONG before the squashfs is mounted (verified live: plymouthd
+# is already signalling systemd when plymouth-start.service runs), so the theme setup baked into the
+# rootfs never shows at boot — the STOCK initrd only ships the text/details plugins. We never rebuild
+# the casper initrd (D47: kernel+initrd stay Canonical's, casper-uuid intact); instead let Ubuntu's
+# OWN initramfs-tools plymouth hook compute the splash closure (theme, script.so + label plugin,
+# font/lib deps) against the configured rootfs, and later (step 6) append it to the shipped initrd
+# as an extra zstd cpio segment — at kernel unpack, later segments overwrite earlier files, so the
+# initrd plymouthd picks up the Polyptic theme. Best-effort: a missing hook just means text boot.
+PLY_DEST="/polyptic-ply-harvest"
+rm -rf "$ROOTFS$PLY_DEST"
+# Pre-create etc/ (mkinitramfs normally provides the skeleton): the hook does `cp /etc/os-release
+# "${DESTDIR}/etc"`, which with no etc/ DIRECTORY creates a FILE named etc and every later mkdir
+# under it dies with "Not a directory" — silently costing the font/fontconfig closure the label
+# plugin needs (the D45 text-render lesson again).
+mkdir -p "$ROOTFS$PLY_DEST/etc"
+if [ -x "$ROOTFS/usr/share/initramfs-tools/hooks/plymouth" ]; then
+  # FRAMEBUFFER=y is the hook's gate: without it Ubuntu's plymouth hook exits 0 having copied
+  # NOTHING (it is how desktop initramfs builds opt in; casper sets it too).
+  chroot "$ROOTFS" /bin/sh -c "DESTDIR=$PLY_DEST verbose=n FRAMEBUFFER=y /usr/share/initramfs-tools/hooks/plymouth" \
+    || echo 'warn: plymouth initramfs hook failed; the live boot will fall back to text' >&2
+else
+  echo 'warn: no initramfs-tools plymouth hook in the rootfs; the live boot will fall back to text' >&2
+fi
+
 echo '==> [5/8] overlay diskless identity + offload layer'
 rsync -a "$OVERLAY"/ "$ROOTFS"/ --exclude test
 chmod 0755 "$ROOTFS"/usr/local/lib/polyptic/*.sh
@@ -147,11 +172,31 @@ done
 # Empty machine-id so systemd mints a transient one each boot (the agent ignores it, our var wins).
 : > "$ROOTFS/etc/machine-id"; rm -f "$ROOTFS/var/lib/dbus/machine-id"
 
-echo '==> [6/8] mksquashfs'
+echo '==> [6/8] mksquashfs + splash-augmented initrd'
 for m in dev/pts dev proc sys run; do umount -lf "$ROOTFS/$m"; done
 rm -f "$ROOTFS/etc/resolv.conf" "$OUT_DIR/squashfs"   # incl. the pre-D47 bare-squashfs artifact
+# Move the splash harvest OUT of the rootfs before mksquashfs (it must not ship in the squashfs),
+# and make sure the theme selection rides along: the hook copies plugins/themes/fonts but the
+# initrd's plymouthd reads /etc/plymouth/plymouthd.conf, which must name the Polyptic theme.
+if [ -d "$ROOTFS$PLY_DEST" ] && [ -n "$(ls -A "$ROOTFS$PLY_DEST" 2>/dev/null)" ]; then
+  mv "$ROOTFS$PLY_DEST" "$WORK/ply-harvest"
+  if [ -f "$ROOTFS/etc/plymouth/plymouthd.conf" ]; then
+    mkdir -p "$WORK/ply-harvest/etc/plymouth"
+    cp -f "$ROOTFS/etc/plymouth/plymouthd.conf" "$WORK/ply-harvest/etc/plymouth/plymouthd.conf"
+  fi
+else
+  rm -rf "$ROOTFS$PLY_DEST"
+fi
 mksquashfs "$ROOTFS" "$WORK/filesystem.squashfs" -noappend -comp zstd -Xcompression-level 19 -no-progress
 cp -f "$VMLINUZ" "$OUT_DIR/vmlinuz"; cp -f "$INITRD" "$OUT_DIR/initrd"
+chmod u+w "$OUT_DIR/initrd"   # the ISO's initrd is read-only; the splash append below needs +w
+# Append the splash closure as an extra cpio segment (zstd like the main segment; the kernel unpacks
+# concatenated segments in order and later files win). If the harvest is absent this is a no-op.
+if [ -d "$WORK/ply-harvest" ]; then
+  ( cd "$WORK/ply-harvest" && find . | cpio -o -H newc --quiet ) | zstd -q -19 > "$WORK/ply-initrd-segment"
+  cat "$WORK/ply-initrd-segment" >> "$OUT_DIR/initrd"
+  echo "    splash closure appended to initrd ($(du -h "$WORK/ply-initrd-segment" | cut -f1) extra)"
+fi
 
 echo '==> [7/8] wrap the squashfs in a casper ISO'
 # casper has no bare-squashfs fetch (`netboot=http fetch=` does not exist in 20.04-26.04): its iso-url=

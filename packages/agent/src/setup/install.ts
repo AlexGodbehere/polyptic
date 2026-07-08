@@ -517,6 +517,22 @@ function applyPlymouthTheme(sys: Sys, log: Logger, state: SetupState, needsVerif
       desc: "set default plymouth theme (alternative)",
       allowFail: true,
     });
+  } else if (sys.which("update-alternatives")) {
+    // 2b ─ 26.04 dropped plymouth-set-default-theme, but Ubuntu's initramfs-tools plymouth HOOK
+    //      still resolves the boot theme via the `default.plymouth` ALTERNATIVE, ignoring
+    //      plymouthd.conf entirely — with none registered the hook silently harvests NOTHING and
+    //      the initrd boots text-only (found live in the POL-38 UTM boot; the live image's initrd
+    //      starts plymouthd long before the rootfs theme is reachable). Register + pin it directly.
+    const themePlymouth = `${PLYMOUTH_THEME_DIR}/${PLYMOUTH_THEME_NAME}.plymouth`;
+    sys.exec(
+      "update-alternatives",
+      ["--install", "/usr/share/plymouth/themes/default.plymouth", "default.plymouth", themePlymouth, "200"],
+      { desc: "register default.plymouth alternative (initramfs-tools hook reads this)", allowFail: true },
+    );
+    sys.exec("update-alternatives", ["--set", "default.plymouth", themePlymouth], {
+      desc: "pin default.plymouth to the Polyptic theme",
+      allowFail: true,
+    });
   }
 
   // 3 ─ on dracut, force the theme + its script plugin into the initramfs. dracut's plymouth module

@@ -85,8 +85,16 @@ xorriso -osirrox on -indev "$PAYLOAD" -extract /casper/filesystem.squashfs "$TRE
 chmod u+w "$TREE/casper/filesystem.squashfs"
 # casper sizes its RAM overlay from filesystem.size; the payload carries the right value.
 xorriso -osirrox on -indev "$PAYLOAD" -extract /casper/filesystem.size "$TREE/casper/filesystem.size" >/dev/null 2>&1 || true
-# Kernel/initrd/.disk/casper-uuid-* stay the BASE ISO's own: build-live-image.sh never changes the
-# kernel (apt-mark hold), so the base initrd matches the squashfs modules AND its baked casper-uuid.
+# Kernel/.disk/casper-uuid-* stay the BASE ISO's own: build-live-image.sh never changes the kernel
+# (apt-mark hold), so the base initrd matches the squashfs modules AND its baked casper-uuid. The
+# INITRD prefers build-live-image.sh's splash-augmented copy next to the payload when present: same
+# stock initrd + an appended cpio segment carrying the Polyptic Plymouth theme (POL-38), which is
+# what makes `quiet splash` show a branded splash instead of text.
+AUG_INITRD="$(dirname "$PAYLOAD")/initrd"
+if [ -f "$AUG_INITRD" ]; then
+  cp -f "$AUG_INITRD" "$TREE/casper/initrd"; chmod u+w "$TREE/casper/initrd"
+  echo "    using the splash-augmented initrd from $(dirname "$PAYLOAD")"
+fi
 
 echo '==> [3/5] bake the enrolment cmdline into /boot/grub/grub.cfg'
 # `quiet splash` (POL-7/POL-38): the squashfs carries the Polyptic Plymouth theme (baked by `setup`
@@ -97,7 +105,7 @@ set timeout=5
 set default=0
 menuentry "Polyptic (live, enrol into $HOSTPORT)" {
     set gfxpayload=keep
-    linux  /casper/vmlinuz boot=casper layerfs-path=filesystem.squashfs polyptic.server_url=ws://$HOSTPORT/agent polyptic.token=$POLYPTIC_TOKEN quiet splash --- console=tty0
+    linux  /casper/vmlinuz boot=casper layerfs-path=filesystem.squashfs polyptic.server_url=ws://$HOSTPORT/agent polyptic.token=$POLYPTIC_TOKEN quiet splash plymouth.ignore-serial-consoles --- console=tty0
     initrd /casper/initrd
 }
 menuentry 'UEFI Firmware Settings' { fwsetup }
