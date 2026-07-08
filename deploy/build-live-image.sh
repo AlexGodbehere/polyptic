@@ -132,6 +132,10 @@ fi
 # the agent. `setup` writes greetd autologin, the compositor launcher, sway/i3 config + the user unit.
 chroot "$ROOTFS" /usr/local/bin/polyptic-agent setup \
   --backend wayland-sway --user kiosk --browser "$BROWSER" --render auto
+# efibootmgr is NOT in ubuntu-server-minimal, and the OFFLOAD flow needs it to register the UEFI
+# boot entry — without it offload.sh installed the loaders but died before adding the entry, so
+# the box never actually self-booted (found live in the POL-39 UTM offload test).
+chroot "$ROOTFS" /bin/sh -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends efibootmgr'
 chroot "$ROOTFS" /bin/sh -c 'apt-get clean'
 
 echo '==> [4b/8] harvest the Plymouth splash closure for the initrd (POL-38)'

@@ -23,6 +23,12 @@ if [ ! -d /sys/firmware/efi ]; then
   echo "offload: not booted in UEFI mode, cannot add a boot entry; leaving box as dongle-only" >&2
   exit 0
 fi
+# Pre-flight the boot-entry tool BEFORE touching the ESP: with `set -eu` a missing efibootmgr used
+# to kill the script AFTER the loaders were installed but BEFORE the entry existed — a half-offload
+# that looks done and never boots (POL-39). The image build now ships efibootmgr; this guard keeps
+# the failure loud and early if it is ever dropped again.
+command -v efibootmgr >/dev/null 2>&1 \
+  || { echo "offload: efibootmgr is missing from this image, cannot register the UEFI boot entry, aborting (nothing written)" >&2; exit 1; }
 
 # Recover the HTTP control-plane base from the cmdline (the same value GET /boot/grub.cfg baked); GRUB
 # wants it as bare host:port.

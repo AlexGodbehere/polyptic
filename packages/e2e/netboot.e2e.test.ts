@@ -234,6 +234,28 @@ describe("netboot: GET /boot/grub.cfg", () => {
   );
 
   test(
+    "a PORTLESS Host header (GRUB's http client) still bakes the socket's real port into the menu",
+    async () => {
+      // GRUB 2.12 sends `Host: <ip>` with no port; trusting it verbatim once baked port-80 URLs
+      // into the menu and the kernel fetch died with ECONNREFUSED (POL-39, found live in the VM).
+      // Bun's fetch forbids overriding Host, so speak raw HTTP.
+      const net = await import("node:net");
+      const body = await new Promise<string>((resolvePromise, reject) => {
+        const sock = net.connect(OPEN_PORT, "127.0.0.1", () => {
+          sock.write("GET /boot/grub.cfg HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        });
+        let buf = "";
+        sock.on("data", (d) => (buf += d.toString()));
+        sock.on("end", () => resolvePromise(buf));
+        sock.on("error", reject);
+      });
+      expect(body).toContain(`set net=(http,127.0.0.1:${OPEN_PORT})`);
+      expect(body).not.toContain("set net=(http,127.0.0.1)\n");
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
     "only the offload entry tags the cmdline with polyptic.offload=1 (before the --- terminator)",
     async () => {
       const body = await (await fetch(`${OPEN_BASE}/boot/grub.cfg`)).text();

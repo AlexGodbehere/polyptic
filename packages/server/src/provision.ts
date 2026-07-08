@@ -152,7 +152,21 @@ export function computeBaseUrl(request: FastifyRequest, fallback: string): strin
   }
   if (host) {
     const proto = fwdProto || "http";
-    return `${proto}://${host}`.replace(/\/+$/, "");
+    // GRUB's http client (and other minimal fetchers) sends `Host:` WITHOUT the port. Trusting it
+    // verbatim baked port-80 URLs into /boot/grub.cfg, so the very netboot menu we served over
+    // :8080 pointed the kernel fetch at :80 — "connection refused" at the box (found live in the
+    // POL-39 VM netboot; curl masks the bug because it always sends the port). When the header
+    // carries no port and the accepted socket's port is not the protocol default, restore it.
+    let authority = host;
+    const hasPort = authority.startsWith("[") ? /\]:\d+$/.test(authority) : authority.includes(":");
+    // The bound port comes from the listener (Bun's http sockets don't reliably expose localPort).
+    const addr = request.server.server.address();
+    const listenPort =
+      (addr && typeof addr === "object" ? addr.port : undefined) ?? request.socket?.localPort;
+    if (!hasPort && listenPort && listenPort !== (proto === "https" ? 443 : 80)) {
+      authority = `${authority}:${listenPort}`;
+    }
+    return `${proto}://${authority}`.replace(/\/+$/, "");
   }
   return fallback.replace(/\/+$/, "");
 }
@@ -241,12 +255,12 @@ export function buildBootGrubCfg(base: string, token: string | undefined): strin
     `set net=(http,${hostPort})`,
     "set timeout=5",
     "set default=live",
-    'menuentry "Polyptic: boot now (diskless, nothing written to this box)" --id live {',
+    'menuentry "Polyptic (Live Bootloader)" --id live {',
     '  echo "Polyptic: streaming the $arch live image into RAM ..."',
     `  linux  $net/dist/image/$arch/vmlinuz ${cmdline} ---`,
     "  initrd $net/dist/image/$arch/initrd",
     "}",
-    'menuentry "Polyptic: offload to this box, then boot (one-time; adds a loader to the ESP)" --id offload {',
+    'menuentry "Polyptic (Install Bootloader)" --id offload {',
     '  echo "Polyptic: offload mode, the live image will install the loader, then keep booting ..."',
     `  linux  $net/dist/image/$arch/vmlinuz ${cmdline} polyptic.offload=1 ---`,
     "  initrd $net/dist/image/$arch/initrd",
