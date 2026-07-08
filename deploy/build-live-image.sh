@@ -171,6 +171,14 @@ for unit in polyptic-agent-env.service polyptic-offload.service; do
 done
 # Empty machine-id so systemd mints a transient one each boot (the agent ignores it, our var wins).
 : > "$ROOTFS/etc/machine-id"; rm -f "$ROOTFS/var/lib/dbus/machine-id"
+# Kill the per-boot "first boot after update" churn (POL-38): with nothing persisted, systemd's
+# ConditionNeedsUpdate check trips EVERY boot and runs ldconfig.service (a ~40-60s dynamic-linker
+# cache rebuild that stalls the splash), journal-catalog-update, sysusers, etc. Stamping .updated
+# NEWER than /usr (we are past every apt operation here) marks the image up to date, so those units
+# are skipped on the box. The overlay also masks multipathd (SAN storage; crashes noisily in a live
+# env and sprays the console during the plymouth→greetd handoff) and snapd (nothing here uses
+# snaps; seeding only delays boot).
+touch "$ROOTFS/etc/.updated" "$ROOTFS/var/.updated"
 
 echo '==> [6/8] mksquashfs + splash-augmented initrd'
 for m in dev/pts dev proc sys run; do umount -lf "$ROOTFS/$m"; done
@@ -193,6 +201,12 @@ chmod u+w "$OUT_DIR/initrd"   # the ISO's initrd is read-only; the splash append
 # Append the splash closure as an extra cpio segment (zstd like the main segment; the kernel unpacks
 # concatenated segments in order and later files win). If the harvest is absent this is a no-op.
 if [ -d "$WORK/ply-harvest" ]; then
+  # The hook resolves the theme via the `default.plymouth` update-alternatives entry (setup
+  # registers it); if the harvest is missing the theme dir, the registration didn't happen (e.g.
+  # a stale agent binary) and the boot will be text-only — say so loudly instead of shipping 4 KB.
+  if [ ! -d "$WORK/ply-harvest/usr/share/plymouth/themes/polyptic" ]; then
+    echo 'warn: splash harvest has NO polyptic theme (default.plymouth alternative unset in the rootfs?) — the boot will fall back to text' >&2
+  fi
   ( cd "$WORK/ply-harvest" && find . | cpio -o -H newc --quiet ) | zstd -q -19 > "$WORK/ply-initrd-segment"
   cat "$WORK/ply-initrd-segment" >> "$OUT_DIR/initrd"
   echo "    splash closure appended to initrd ($(du -h "$WORK/ply-initrd-segment" | cut -f1) extra)"
