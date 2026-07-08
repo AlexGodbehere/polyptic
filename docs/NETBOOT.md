@@ -176,8 +176,14 @@ only**.
 The default output path (`deploy/dist/image/<arch>/polyptic-vm-test.iso`) is inside the image
 depot, so the server serves it at `GET /dist/image/<arch>/polyptic-vm-test.iso` and **Console ▸
 Settings ▸ Netboot** shows a "Download VM test ISO" button whenever the artifact exists. The baked
-cmdline carries `quiet splash`, so the boot shows the Polyptic Plymouth splash (the theme is baked
-into the squashfs by `setup` at image-build time) instead of scrolling kernel text.
+cmdline carries `quiet splash plymouth.ignore-serial-consoles`, so the boot shows the Polyptic
+Plymouth splash instead of scrolling kernel text. Three load-bearing details behind that (D49): the
+theme rides INSIDE the initrd (an extra cpio segment appended by `build-live-image.sh`, harvested
+with Ubuntu's own initramfs-tools plymouth hook — plymouthd starts long before the squashfs
+exists); the hook resolves the theme via the `default.plymouth` update-alternatives entry (which
+`setup` registers); and `plymouth.ignore-serial-consoles` is required because arm64 VMs get an
+implicit devicetree serial console, which otherwise makes plymouth assume a headless server and
+never paint the display.
 
 **The remaster pitfall this script exists to avoid (POL-38):** on post-20.10 Ubuntu ISOs the EFI
 System Partition is an **appended partition** that the El Torito catalog points into, not a file
