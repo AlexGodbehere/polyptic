@@ -236,11 +236,26 @@ Plug it in and the server-side menu offers:
 - **Boot now (diskless)**, leave the USB in. The box is fully **diskless**; nothing whatsoever is written locally. Best for disposable / hot-swap panels.
 - **Offload to this box, then boot**, writes *just the signed shim + GRUB pair* (the pointer, not the OS) into the box's **existing EFI System Partition** under `EFI/polyptic/`, drops the same stage-1 config at the ESP's `/grub/grub.cfg`, and adds a UEFI boot entry (`efibootmgr`, "Polyptic Netboot"). Pull the USB and the box self-boots the identical HTTP flow forever, **Secure Boot still ON** (the offloaded loaders are the same signed binaries). One USB can walk a rack, offloading each box.
 
+> **The dongle depends on the firmware bringing the NIC up (POL-39).** GRUB carries no NIC
+> drivers of its own — `efinet` can only use a card the firmware has already initialised. Most
+> real UEFI firmware connects the network stack when the NIC is in the boot order (enable
+> network boot / "UEFI network stack" in setup, or one attempted PXE boot); a VM needs the NIC
+> given a `bootindex`. If GRUB comes up from the dongle but `net_ls_cards` prints nothing, the
+> firmware never touched the NIC — enable network boot in firmware setup, or prefer
+> [UEFI HTTP Boot / DHCP option 67](#no-medium-at-all-uefi-http-boot), where the firmware fetches
+> the loader itself and the NIC is up by construction.
+
 **Offload never repartitions, formats, or wipes.** It only adds files to the ESP that's already there plus one boot entry, and it **refuses to overwrite a `/grub/grub.cfg` it didn't write itself** (its own file carries a `# polyptic-offload` marker; a foreign file aborts the offload loudly). The full live OS still streams from the control plane into RAM on every boot, what lands on disk is the few-MB signed loader pair, never an OS, identity, or state. (Mechanically: the offload menu entry adds `polyptic.offload=1` to the kernel cmdline; the live image's `polyptic-offload.service` does the ESP install once, from Linux userland where `efibootmgr` exists, fetching the loaders tokenlessly from `/dist/boot/`.)
 
 ---
 
 ## No medium at all: UEFI HTTP Boot
+
+> **Firmware support varies.** UEFI HTTP Boot needs the firmware's HTTP-Boot driver. Server-class
+> and recent desktop firmware ship it; some builds do NOT — UTM/QEMU's bundled EDK2 for example
+> enumerates only "UEFI PXEv4" (no HTTPv4 option), so in those environments use classic PXE
+> (DHCP option 67 + TFTP for shim/GRUB; GRUB still fetches the OS over HTTP) or the dongle with
+> the NIC in the boot order. The chain and the server surface are identical either way.
 
 For shops whose hardware or network cooperates, skip the USB entirely: the **firmware itself** fetches shim over HTTP, and from there the chain is identical (shim → GRUB → `/boot/grub.cfg`). The server side costs nothing extra, it reuses the exact dongle artifacts. But **client support is firmware-dependent**: common on 2020+ business desktops (often hidden behind "network stack" / "HTTP boot" toggles), spotty on older or consumer boards. **Test one unit before planning a rollout.** The dongle remains the guaranteed path.
 
@@ -278,6 +293,39 @@ Three things make this work: the firmware announces vendor class `HTTPClient` wi
 
 - **shim requests `…//grubx64.efi`, double slash.** shim finds its second stage by taking the URL directory it was fetched from and appending `/grubx64.efi` (`/grubaa64.efi` on arm64), leading slash included. The depot tolerates duplicate slashes, and serves the GRUB binaries in the same `/dist/boot/` directory as shim, which is exactly where shim looks.
 - **An HTTP-booted GRUB asks for `/grub/grub.cfg` at the server root.** grubnet's baked-in config prefix is `/grub`; loaded over HTTP it resolves that against `http://host:port/` (the root of the server it came from), *not* the directory shim was fetched from. That is why the depot serves the same generated menu at `/grub/grub.cfg` (and the per-arch `/grub/x86_64-efi/grub.cfg` + `/grub/arm64-efi/grub.cfg` it probes first) as at the canonical `/boot/grub.cfg`.
+
+---
+
+## Lab: the full netboot chain in a UTM VM (POL-39, verified)
+
+All three flows run end to end in a UTM (QEMU/EDK2, Apple Silicon) VM against a dev control plane
+on the host. UTM's firmware has **no HTTP-Boot driver**, so the firmware stage is PXE; everything
+after GRUB is the identical HTTP flow real hardware uses.
+
+**Shared setup** — the VM needs ONE extra virtio NIC whose DHCP can hand out a boot file, and the
+NIC must be in the firmware boot order (that is what makes EDK2 initialise it; GRUB inherits it).
+In the VM's QEMU arguments:
+
+```
+-netdev user,id=polnet,tftp=/path/to/tftp-root,bootfile=shimaa64.efi
+-device virtio-net-pci,netdev=polnet,bootindex=8
+```
+
+(Use a bootindex UTM hasn't auto-assigned to a drive; keep ONE NIC total — two user-mode NICs get
+identical 10.0.2.x subnets and GRUB's routes become ambiguous. RAM ≥ 8 GiB: casper streams the
+whole image into a RAM tmpfs.)
+
+- **PXE / "site DHCP option 67" flow:** put `shimaa64.efi`, `grubaa64.efi`, and `grub/grub.cfg`
+  (the rendered stage-1 config from `deploy/dongle-grub.cfg.tmpl`) in the TFTP root above; with no
+  bootable drives the firmware PXE-boots: shim + GRUB over TFTP, then GRUB fetches
+  `/boot/grub.cfg`, kernel, initrd, and the image from the control plane over HTTP. Verified:
+  power-on → wall content in ~60 s.
+- **Dongle flow:** attach `polyptic-boot.img` as a USB **disk** drive; the firmware boots it ahead
+  of PXE, and the boot-order NIC is still initialised, so dongle-GRUB is online. Verified: ~30 s
+  to content.
+- **Offload flow:** attach an additional VirtIO disk that has a GPT + FAT32 ESP, boot the dongle,
+  pick the "offload" menu entry; the live boot installs the signed loaders + boot entry on the
+  disk, after which the box boots the same chain with the dongle removed.
 
 ---
 
