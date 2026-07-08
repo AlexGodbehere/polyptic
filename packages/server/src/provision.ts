@@ -92,9 +92,12 @@ export function provisionConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Pr
 
 /** Build target architectures we serve binaries + bundles for. */
 const ARCH_RE = /^(arm64|amd64)$/;
-/** The three netboot live-image artifacts a diskless box streams (POL-33): the Canonical-signed kernel,
- *  the initrd, and the ISO wrapper casper `iso-url=` pulls whole into RAM. Nothing else is servable. */
-const IMAGE_FILE_RE = /^(vmlinuz|initrd|polyptic\.iso)$/;
+/** The netboot live-image artifacts a diskless box streams (POL-33): the Canonical-signed kernel,
+ *  the initrd, and the ISO wrapper casper `iso-url=` pulls whole into RAM — plus the self-contained
+ *  bootable live ISO (POL-38/D49, `build-live-iso.sh`; it bakes the token like `/boot/grub.cfg`
+ *  does, and a leaked token still cannot self-admit a NEW box past the operator). Nothing else is
+ *  servable. */
+const IMAGE_FILE_RE = /^(vmlinuz|initrd|polyptic\.iso|polyptic-live\.iso)$/;
 /** The boot-depot files (POL-33/D47): `polyptic-boot.img` is the universal `dd`-able FAT32 dongle (both
  *  arches on one stick); the four `.efi` files are the SIGNED loaders (shim + network GRUB per arch) for
  *  UEFI HTTP Boot and the offload flow. All TOKENLESS (they only chain `/boot/grub.cfg`), so this route
@@ -192,6 +195,18 @@ function bootKernelCmdline(httpBase: string, token: string | undefined): string 
     `polyptic.server_url=${toWsAgentUrl(httpBase)}`,
   ];
   if (token !== undefined) parts.push(`polyptic.token=${token}`);
+  // POL-7/POL-38: boot splash instead of scrolling kernel/systemd text. The live image carries the
+  // Polyptic Plymouth theme (squashfs + an initrd cpio segment); `quiet splash` is what makes
+  // plymouthd display it, and `plymouth.ignore-serial-consoles` is LOAD-BEARING: any serial console
+  // (arm64 VMs get one implicitly from the devicetree) makes plymouth assume a headless server and
+  // never paint the local display (verified live with plymouthd --debug in the POL-38 UTM boot).
+  // A wall renders on its panel by definition, so ignoring serial consoles is always right here.
+  // Must sit BEFORE the caller-appended `---` terminator.
+  // `multipath=off` is honoured by DRACUT-based initrds only — the initramfs-tools multipath boot
+  // script has no cmdline gate at all, which is why build-live-image.sh overrides it with a no-op
+  // inside the shipped initrd (the real fix for the pre-splash "fatal configuration error" spray).
+  // The flag stays as documentation-of-intent + coverage for future dracut-based images.
+  parts.push("multipath=off", "quiet", "splash", "plymouth.ignore-serial-consoles");
   return parts.join(" ");
 }
 
@@ -536,11 +551,22 @@ export function registerProvisionRoutes(
     const base = computeBaseUrl(request, publicBaseUrl);
     // The universal dd-able dongle image, when bundled (one medium for both arches).
     const medium = await resolveBootMedium(bootDistDir);
+    // The self-contained bootable live ISOs (POL-38/D49), listed per arch when built into the depot.
+    const liveIsos: Array<{ arch: "arm64" | "amd64"; url: string }> = [];
+    for (const arch of ["arm64", "amd64"] as const) {
+      try {
+        const st = await stat(join(imageDistDir, arch, "polyptic-live.iso"));
+        if (st.isFile()) liveIsos.push({ arch, url: `${base}/dist/image/${arch}/polyptic-live.iso` });
+      } catch {
+        // not bundled for this arch — omit the entry
+      }
+    }
     return NetbootInfo.parse({
       baseUrl: base,
       mode: enrollment.open ? "open" : "gated",
       bootConfigUrl: `${base}/boot/grub.cfg`,
       bootMediumUrl: medium ? `${base}/dist/boot/polyptic-boot.img` : null,
+      liveIsos,
     });
   });
 }

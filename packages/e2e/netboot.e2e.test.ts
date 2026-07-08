@@ -256,8 +256,10 @@ describe("netboot: GET /boot/grub.cfg", () => {
       expect(res.status).toBe(200);
       const body = await res.text();
       expect(body).toContain(`set net=(http,${GATED_HOST})`);
-      expect(body).toMatch(new RegExp(`polyptic\\.token=${FLEET_TOKEN} ---`));
-      expect(body).toMatch(new RegExp(`polyptic\\.token=${FLEET_TOKEN} polyptic\\.offload=1 ---`));
+      // The splash args (POL-7/POL-38) sit between the token and the `---` terminator.
+      const SPLASH = "multipath=off quiet splash plymouth\\.ignore-serial-consoles";
+      expect(body).toMatch(new RegExp(`polyptic\\.token=${FLEET_TOKEN} ${SPLASH} ---`));
+      expect(body).toMatch(new RegExp(`polyptic\\.token=${FLEET_TOKEN} ${SPLASH} polyptic\\.offload=1 ---`));
     },
     TEST_TIMEOUT,
   );

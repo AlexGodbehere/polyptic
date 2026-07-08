@@ -51,7 +51,7 @@ OVERLAY="$REPO_ROOT/deploy/live"
 
 [ "$(uname -s)" = "Linux" ] || { echo "Linux build host required (got $(uname -s))" >&2; exit 1; }
 [ "$(id -u)" = 0 ]          || { echo "must run as root (chroot + mounts)" >&2; exit 1; }
-for t in unsquashfs mksquashfs rsync xorriso; do command -v "$t" >/dev/null || { echo "missing $t (squashfs-tools/rsync/xorriso)" >&2; exit 1; }; done
+for t in unsquashfs mksquashfs rsync xorriso cpio zstd; do command -v "$t" >/dev/null || { echo "missing $t (squashfs-tools/rsync/xorriso/cpio/zstd)" >&2; exit 1; }; done
 [ -f "$AGENT_BIN" ] || { echo "$AGENT_BIN missing, run deploy/build-agent.sh $ARCH first" >&2; exit 1; }
 [ -d "$OVERLAY" ]   || { echo "$OVERLAY missing, the diskless identity overlay is required" >&2; exit 1; }
 
@@ -134,9 +134,35 @@ chroot "$ROOTFS" /usr/local/bin/polyptic-agent setup \
   --backend wayland-sway --user kiosk --browser "$BROWSER" --render auto
 chroot "$ROOTFS" /bin/sh -c 'apt-get clean'
 
+echo '==> [4b/8] harvest the Plymouth splash closure for the initrd (POL-38)'
+# The casper initrd starts plymouthd LONG before the squashfs is mounted (verified live: plymouthd
+# is already signalling systemd when plymouth-start.service runs), so the theme setup baked into the
+# rootfs never shows at boot — the STOCK initrd only ships the text/details plugins. We never rebuild
+# the casper initrd (D47: kernel+initrd stay Canonical's, casper-uuid intact); instead let Ubuntu's
+# OWN initramfs-tools plymouth hook compute the splash closure (theme, script.so + label plugin,
+# font/lib deps) against the configured rootfs, and later (step 6) append it to the shipped initrd
+# as an extra zstd cpio segment — at kernel unpack, later segments overwrite earlier files, so the
+# initrd plymouthd picks up the Polyptic theme. Best-effort: a missing hook just means text boot.
+PLY_DEST="/polyptic-ply-harvest"
+rm -rf "$ROOTFS$PLY_DEST"
+# Pre-create etc/ (mkinitramfs normally provides the skeleton): the hook does `cp /etc/os-release
+# "${DESTDIR}/etc"`, which with no etc/ DIRECTORY creates a FILE named etc and every later mkdir
+# under it dies with "Not a directory" — silently costing the font/fontconfig closure the label
+# plugin needs (the D45 text-render lesson again).
+mkdir -p "$ROOTFS$PLY_DEST/etc"
+if [ -x "$ROOTFS/usr/share/initramfs-tools/hooks/plymouth" ]; then
+  # FRAMEBUFFER=y is the hook's gate: without it Ubuntu's plymouth hook exits 0 having copied
+  # NOTHING (it is how desktop initramfs builds opt in; casper sets it too).
+  chroot "$ROOTFS" /bin/sh -c "DESTDIR=$PLY_DEST verbose=n FRAMEBUFFER=y /usr/share/initramfs-tools/hooks/plymouth" \
+    || echo 'warn: plymouth initramfs hook failed; the live boot will fall back to text' >&2
+else
+  echo 'warn: no initramfs-tools plymouth hook in the rootfs; the live boot will fall back to text' >&2
+fi
+
 echo '==> [5/8] overlay diskless identity + offload layer'
 rsync -a "$OVERLAY"/ "$ROOTFS"/ --exclude test
 chmod 0755 "$ROOTFS"/usr/local/lib/polyptic/*.sh
+chmod 0600 "$ROOTFS"/etc/netplan/01-polyptic-dhcp.yaml   # netplan refuses/warns on world-readable configs
 # Enable the system units OFFLINE via the same .wants symlinks `systemctl enable` would create (which
 # is a no-op/warn inside a chroot).
 mkdir -p "$ROOTFS/etc/systemd/system/multi-user.target.wants"
@@ -145,12 +171,64 @@ for unit in polyptic-agent-env.service polyptic-offload.service; do
 done
 # Empty machine-id so systemd mints a transient one each boot (the agent ignores it, our var wins).
 : > "$ROOTFS/etc/machine-id"; rm -f "$ROOTFS/var/lib/dbus/machine-id"
+# Kill the per-boot "first boot after update" churn (POL-38): with nothing persisted, systemd's
+# ConditionNeedsUpdate check trips EVERY boot and runs ldconfig.service (a ~40-60s dynamic-linker
+# cache rebuild that stalls the splash), journal-catalog-update, sysusers, etc. Stamping .updated
+# NEWER than /usr (we are past every apt operation here) marks the image up to date, so those units
+# are skipped on the box. The overlay also masks multipathd (SAN storage; crashes noisily in a live
+# env and sprays the console during the plymouth→greetd handoff) and snapd (nothing here uses
+# snaps; seeding only delays boot).
+touch "$ROOTFS/etc/.updated" "$ROOTFS/var/.updated"
 
-echo '==> [6/8] mksquashfs'
+echo '==> [6/8] mksquashfs + splash-augmented initrd'
 for m in dev/pts dev proc sys run; do umount -lf "$ROOTFS/$m"; done
 rm -f "$ROOTFS/etc/resolv.conf" "$OUT_DIR/squashfs"   # incl. the pre-D47 bare-squashfs artifact
+# Move the splash harvest OUT of the rootfs before mksquashfs (it must not ship in the squashfs),
+# and make sure the theme selection rides along: the hook copies plugins/themes/fonts but the
+# initrd's plymouthd reads /etc/plymouth/plymouthd.conf, which must name the Polyptic theme.
+if [ -d "$ROOTFS$PLY_DEST" ] && [ -n "$(ls -A "$ROOTFS$PLY_DEST" 2>/dev/null)" ]; then
+  mv "$ROOTFS$PLY_DEST" "$WORK/ply-harvest"
+  if [ -f "$ROOTFS/etc/plymouth/plymouthd.conf" ]; then
+    mkdir -p "$WORK/ply-harvest/etc/plymouth"
+    cp -f "$ROOTFS/etc/plymouth/plymouthd.conf" "$WORK/ply-harvest/etc/plymouth/plymouthd.conf"
+  fi
+else
+  rm -rf "$ROOTFS$PLY_DEST"
+fi
 mksquashfs "$ROOTFS" "$WORK/filesystem.squashfs" -noappend -comp zstd -Xcompression-level 19 -no-progress
 cp -f "$VMLINUZ" "$OUT_DIR/vmlinuz"; cp -f "$INITRD" "$OUT_DIR/initrd"
+chmod u+w "$OUT_DIR/initrd"   # the ISO's initrd is read-only; the splash append below needs +w
+# Neuter the initrd's multipath boot scripts (rides the same appended segment): the stock server
+# initrd's scripts/init-top/multipath unconditionally modprobes dm-multipath and starts
+# `multipathd -B` — there is NO cmdline gate in the initramfs-tools version (`multipath=off` is a
+# dracut-ism) — and in a live boot it aborts on /etc/multipath/bindings, spraying "fatal
+# configuration error" on the console at ~0.2s, before plymouth owns the screen. A kiosk never
+# boots from SAN multipath. init-bottom/local-premount are neutered too (they would log
+# "inconsistent PIDs" noise for the daemon that never started).
+mkdir -p "$WORK/ply-harvest"
+for hook in init-top init-bottom local-premount; do
+  mkdir -p "$WORK/ply-harvest/scripts/$hook"
+  cat > "$WORK/ply-harvest/scripts/$hook/multipath" <<'NOOP'
+#!/bin/sh
+# Polyptic live image (POL-38): multipath neutered — see deploy/build-live-image.sh.
+case "$1" in prereqs) echo ""; exit 0 ;; esac
+exit 0
+NOOP
+  chmod 0755 "$WORK/ply-harvest/scripts/$hook/multipath"
+done
+# Append the extras (splash closure + multipath no-ops) as an extra cpio segment (zstd like the
+# main segment; the kernel unpacks concatenated segments in order and later files win).
+if [ -d "$WORK/ply-harvest" ]; then
+  # The hook resolves the theme via the `default.plymouth` update-alternatives entry (setup
+  # registers it); if the harvest is missing the theme dir, the registration didn't happen (e.g.
+  # a stale agent binary) and the boot will be text-only — say so loudly instead of shipping 4 KB.
+  if [ ! -d "$WORK/ply-harvest/usr/share/plymouth/themes/polyptic" ]; then
+    echo 'warn: splash harvest has NO polyptic theme (default.plymouth alternative unset in the rootfs?) — the boot will fall back to text' >&2
+  fi
+  ( cd "$WORK/ply-harvest" && find . | cpio -o -H newc --quiet ) | zstd -q -19 > "$WORK/ply-initrd-segment"
+  cat "$WORK/ply-initrd-segment" >> "$OUT_DIR/initrd"
+  echo "    splash closure appended to initrd ($(du -h "$WORK/ply-initrd-segment" | cut -f1) extra)"
+fi
 
 echo '==> [7/8] wrap the squashfs in a casper ISO'
 # casper has no bare-squashfs fetch (`netboot=http fetch=` does not exist in 20.04-26.04): its iso-url=

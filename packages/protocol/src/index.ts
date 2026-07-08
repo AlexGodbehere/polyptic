@@ -582,6 +582,12 @@ export const NetbootInfo = z.object({
   mode: z.enum(["open", "gated"]),
   bootConfigUrl: z.string(),
   bootMediumUrl: z.string().nullable(),
+  /** Self-contained bootable Polyptic live ISOs in the image depot (POL-38/D49): write to a USB
+   *  stick (or attach to a UEFI VM) and the box boots straight into Polyptic and enrols — the
+   *  manual-provisioning alternative to netboot. One entry per arch whose artifact exists on
+   *  disk. NOTE: unlike everything else here these DO bake the current enrolment token, so the
+   *  FILE is a credential — the console spells that out next to the download. */
+  liveIsos: z.array(z.object({ arch: z.enum(["arm64", "amd64"]), url: z.string() })).default([]),
 });
 export type NetbootInfo = z.infer<typeof NetbootInfo>;
 

@@ -267,6 +267,23 @@ async function onChangePassword(): Promise<void> {
             (see <code class="inline-code">docs/NETBOOT.md</code> for the recipe and the arm64 name).
           </div>
 
+          <template v-if="store.netboot.liveIsos.length > 0">
+            <div class="token-hint nb-gap">
+              Prefer no netboot? Download the self-contained live ISO instead: write it to a USB stick
+              (or attach it to a UEFI VM) and the box boots straight into Polyptic and enrols — nothing
+              installed, nothing on the disk. It bakes the current enrolment token, so treat the file
+              like a credential; regenerate the token above and rebuild to revoke old copies.
+            </div>
+            <a
+              v-for="iso in store.netboot.liveIsos"
+              :key="iso.arch"
+              class="btn btn-primary save nb-download"
+              :href="iso.url"
+              download
+              >Download live ISO ({{ iso.arch }})</a
+            >
+          </template>
+
           <div v-if="store.netboot.mode === 'gated'" class="nb-note">
             Ownership of the fleet is the enrolment token, which the boot flow above bakes in, so multiple
             Polyptic instances can share a network without collision. Keep the netboot network
