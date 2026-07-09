@@ -60,6 +60,12 @@ if [ -z "${SKIP_INSTALL:-}" ]; then
   bun install
 fi
 
+# The protocol's package.json exports point at ./dist — on a FRESH checkout (CI) it has no build
+# yet and `bun build --compile` fails with "Could not resolve: @polyptic/protocol" (found live on
+# the first v0.2.0 release run). Cheap to always rebuild; also stale-proofs dev machines.
+echo "==> build @polyptic/protocol (exports point at ./dist)"
+( cd packages/protocol && bun run build )
+
 # ── Compile the agent entrypoint to a single self-contained executable for the target ────────────
 # Bake the version in at compile time: the standalone binary cannot read package.json off disk (bun
 # compiles sources into a virtual FS), so packages/agent/src/version.ts reads this define instead —
