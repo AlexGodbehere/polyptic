@@ -289,6 +289,14 @@ imageUpdates:
     limits:
       cpu: "4"
       memory: 6Gi
+  # The plain-http control-plane address BAKED into the downloadable media the
+  # rebuild Jobs publish (Console ▸ Settings ▸ Netboot): the boot medium
+  # (BOOT_DIST_DIR/polyptic-boot.img) and the live ISO
+  # (image/<arch>/polyptic-live.iso). Empty derives http://<ingressRoute.bootHost>
+  # when the IngressRoute is enabled; with no address at all the Jobs skip the
+  # media and only publish the netboot image. The live ISO additionally needs a
+  # non-empty secrets.bootstrapToken (the ISO bakes the enrolment token).
+  bakeBase: ""
   # Extra scheduling constraints for the rebuild Jobs (merged with the arch selector).
   nodeSelector: {}
   tolerations: []
