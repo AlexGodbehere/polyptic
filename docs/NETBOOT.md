@@ -296,26 +296,38 @@ Three things make this work: the firmware announces vendor class `HTTPClient` wi
 
 ---
 
-## Keeping the image updated (POL-41)
+## Keeping the image updated (POL-41 + POL-43)
 
 A baked image is convenient and immutable — and immediately starts ageing. The update loop closes
 that gap with **zero per-box work**, because a diskless box re-pulls its whole OS at every boot:
 **an update is just a rebuilt image plus a reboot.**
 
-**Server side — scheduled refresh.** Console ▸ Settings ▸ **Image updates** runs a rebuild hook on
-a schedule (default 01:00, server-local; or the **Rebuild now** button). The hook is a command by
-contract (`IMAGE_REBUILD_CMD`); the ready-made one is:
+**Server side — two scheduled cycles.** Console ▸ Settings ▸ **Image updates** runs rebuild hooks
+on two schedules (plus **Refresh now** / **Full rebuild now** buttons). Each hook is a command by
+contract; the ready-made Docker ones are:
 
 ```bash
-IMAGE_REBUILD_CMD="deploy/rebuild-image-docker.sh arm64"   # privileged Linux container, any host
+IMAGE_REBUILD_CMD="deploy/rebuild-image-docker.sh arm64"            # nightly, default 01:00
+IMAGE_FULL_REBUILD_CMD="deploy/full-rebuild-image-docker.sh arm64"  # weekly, default Sun 02:00
 ```
 
-which runs `deploy/refresh-live-image.sh`: unsquash the CURRENT image, `apt-get upgrade` it in a
-chroot (security + updates pockets), re-wrap, and stamp a **new image id**. Two deliberate
-properties: **nothing to upgrade → nothing changes** (no image-id churn, no pointless fleet
-reboots), and **the kernel stays held** (the D47 signed-kernel/initrd invariant) — kernel CVEs need
-a full `build-live-image.sh` run against a newer base ISO; everything user-space refreshes
-automatically.
+1. **Nightly refresh** — `deploy/refresh-live-image.sh`: unsquash the CURRENT image,
+   `apt-get upgrade` it in a chroot (security + updates pockets), re-wrap, and stamp a **new image
+   id**. Two deliberate properties: **nothing to upgrade → nothing changes** (no image-id churn, no
+   pointless fleet reboots), and **the kernel stays held** (the D47 signed-kernel/initrd invariant).
+2. **Weekly full rebuild** — because of that hold, the nightly cycle can never roll a **kernel
+   CVE**. The weekly cycle rebuilds from the base ISO (`deploy/full-rebuild-image-docker.sh`
+   downloads + caches it under `deploy/dist/cache/`, then runs `build-live-image.sh` in a
+   privileged container), picking up the ISO's current Canonical-signed kernel — Secure Boot keeps
+   working because any Canonical-signed kernel verifies through shim. Everything user-space
+   refreshes nightly; the kernel refreshes weekly.
+
+**Kubernetes.** The Helm chart (`deploy/helm/polyptic`) wires both hooks as
+`bun deploy/k8s-run-job.ts refresh|full`: the server creates a privileged rebuild **Job** from a
+chart-rendered template on a Linux node, waits, and relays the log tail into the Settings card. The
+depot lives on a PVC shared between the server and the Jobs; day-0 bootstrap is just clicking
+**Full rebuild now** (the Job pulls the base ISO straight onto the volume). See the chart README
+for the full story, including the dev workflow against a local OrbStack/kind cluster.
 
 **Box side — the 5-minute poll.** Every netbooted box carries its identity at
 `/etc/polyptic/image-id` and compares it against `GET /dist/image/<arch>/manifest.json`

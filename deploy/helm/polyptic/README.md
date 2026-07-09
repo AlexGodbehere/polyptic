@@ -112,6 +112,70 @@ helm install polyptic deploy/helm/polyptic \
   --set media.persistence.storageClass=fast-rwo
 ```
 
+## Netboot depot + automated image updates (POL-33…43)
+
+The server serves the netboot artifacts — the live image (`GET /dist/image/<arch>/…`)
+and the signed boot loaders (`GET /dist/boot/<file>`) — from a **depot volume**
+(`netboot.persistence`, PVC by default, `helm.sh/resource-policy: keep`). GRUB and
+casper speak **plain HTTP**: netbooting boxes must reach the server over `http://`
+(a LoadBalancer/NodePort on the management LAN), not the HTTPS Ingress. Console and
+players keep using HTTPS; only the boot path is http-by-contract.
+
+With `imageUpdates.enabled=true` (default) the chart wires the two POL-41/POL-43
+update cycles **Kubernetes-natively** — the server keeps its scheduler and the
+console keeps its buttons, but the hook commands create privileged **Jobs** instead
+of running docker:
+
+| Cycle | Default | What it does |
+| --- | --- | --- |
+| Nightly refresh (`IMAGE_REBUILD_CMD` → `bun deploy/k8s-run-job.ts refresh`) | 01:00 | In-place `apt upgrade` of the existing image (kernel held, D47). Exits untouched when there is nothing to upgrade — no image-id churn, no pointless fleet reboots. |
+| Weekly full rebuild (`IMAGE_FULL_REBUILD_CMD` → `bun deploy/k8s-run-job.ts full`) | Sundays 02:00 | Rebuild from the base ISO (`imageUpdates.baseIsoUrl`, default the official Ubuntu `imageUpdates.ubuntuRelease` live-server ISO, downloaded once and cached on the depot volume). **This is the cycle that rolls kernel CVEs.** |
+
+How a rebuild runs: the server POSTs a Job rendered from the
+`<fullname>-rebuild-jobs` ConfigMap, waits, and relays the log tail to
+Console ▸ Settings ▸ Image updates. The Job's initContainer copies the rebuild
+scripts **out of the server image** (version-locked; nothing is duplicated into the
+chart), and the build itself runs privileged (chroot + loop mounts) in a plain
+`imageUpdates.jobImage` container on a Linux node of `imageUpdates.arch`. Because
+the depot PVC is ReadWriteOnce, the Jobs carry a required pod-affinity to the
+server's node; RWX storage lifts that constraint. Finished Jobs are GC'd after
+`imageUpdates.ttlSecondsAfterFinished`.
+
+RBAC (namespace-scoped, created by the chart): `jobs` create/get, `pods` list,
+`pods/log` get — no delete, no exec, no secrets.
+
+**Day-0 bootstrap:** the depot starts empty. Click **Full rebuild now** in
+Console ▸ Settings ▸ Image updates (or wait for Sunday) — the Job downloads the
+base ISO and publishes the first image straight onto the depot volume. For the
+signed loaders, build the boot medium once on any machine
+(`POLYPTIC_BASE=http://<server-lan> deploy/build-boot-medium.sh`) and copy it in:
+`kubectl cp deploy/dist/boot <pod>:/var/lib/polyptic/depot/`.
+
+## Dev workflow (local cluster)
+
+Keep the fast inner loop **on the host** (`bun run dev` — sub-second, no images).
+Use the chart for the integration ring on OrbStack / Docker Desktop Kubernetes /
+kind:
+
+```sh
+# once per code change you want in-cluster (chart-only changes skip this):
+docker build -f deploy/server.Dockerfile -t polyptic-server:dev .
+# kind only: kind load docker-image polyptic-server:dev
+
+# every chart/values iteration (seconds, no image build):
+helm upgrade --install polyptic deploy/helm/polyptic \
+  -f deploy/helm/polyptic/values-dev.yaml \
+  --namespace polyptic --create-namespace
+
+kubectl -n polyptic port-forward svc/polyptic 8080:8080   # http://localhost:8080
+```
+
+`values-dev.yaml` uses the local `polyptic-server:dev` image (`pullPolicy: Never`),
+an in-memory store, plain-HTTP cookies, a seeded `dev@example.com` operator, and
+keeps the depot PVC (a full rebuild caches the ~3GB base ISO — don't redo it per
+pod roll). Note the bonus: your cluster's nodes are **Linux**, so the image
+rebuild Jobs work here even though the host is macOS.
+
 ## Database options
 
 | Goal | Settings |

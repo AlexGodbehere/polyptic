@@ -60,8 +60,10 @@ beforeAll(async () => {
       STORE: "memory",
       AUTH_ENABLED: "false",
       IMAGE_DIST_DIR: imageRoot,
-      // The hook bumps the image id — instant, observable, and exactly what a real refresh does.
+      // The hooks bump the image id — instant, observable, and exactly what a real refresh does.
       IMAGE_REBUILD_CMD: `sh -c 'echo rebuilt-by-test; printf "20260708T111111Z-eeff0011\\n" > ${join(imageRoot, "arm64", "image-id.txt")}'`,
+      // POL-43: the weekly FULL rebuild (kernel + base ISO) is a second, separately-configured hook.
+      IMAGE_FULL_REBUILD_CMD: `sh -c 'echo full-rebuilt-by-test; printf "20260708T222222Z-ffff0022\\n" > ${join(imageRoot, "arm64", "image-id.txt")}'`,
     },
     stdout: "ignore",
     stderr: "ignore",
@@ -108,6 +110,34 @@ describe("image updates (POL-41)", () => {
       expect(body.urgent).toBe(false);
       expect(body.rebuildConfigured).toBe(true);
       expect(Array.isArray(body.images)).toBe(true);
+      // POL-43: the weekly full-rebuild cycle defaults to Sundays 02:00, on.
+      expect(body.fullScheduleEnabled).toBe(true);
+      expect(body.fullScheduleDay).toBe(0);
+      expect(body.fullScheduleTime).toBe("02:00");
+      expect(body.fullRebuildConfigured).toBe(true);
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
+    "PUT persists the weekly full-rebuild schedule and rejects a bad weekday",
+    async () => {
+      const put = await fetch(`${BASE}/api/v1/settings/image`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fullScheduleDay: 3, fullScheduleTime: "04:30" }),
+      });
+      expect(put.status).toBe(200);
+      const body = (await put.json()) as Record<string, unknown>;
+      expect(body.fullScheduleDay).toBe(3);
+      expect(body.fullScheduleTime).toBe("04:30");
+
+      const bad = await fetch(`${BASE}/api/v1/settings/image`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fullScheduleDay: 9 }),
+      });
+      expect(bad.status).toBeGreaterThanOrEqual(400);
     },
     TEST_TIMEOUT,
   );
@@ -178,6 +208,41 @@ describe("image updates (POL-41)", () => {
 
       const manifest = (await (await fetch(`${BASE}/dist/image/arm64/manifest.json`)).json()) as Record<string, unknown>;
       expect(manifest.imageId).toBe("20260708T111111Z-eeff0011");
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
+    "POST /rebuild {kind:'full'} runs the SECOND hook and reports kind on the outcome (POL-43)",
+    async () => {
+      const kicked = (await (
+        await fetch(`${BASE}/api/v1/settings/image/rebuild`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ kind: "full" }),
+        })
+      ).json()) as Record<string, unknown>;
+      expect((kicked.lastBuild as { status: string }).status).toBe("running");
+      expect((kicked.lastBuild as { kind: string }).kind).toBe("full");
+
+      let settled: Record<string, unknown> | null = null;
+      for (let i = 0; i < 50; i++) {
+        const body = (await (await fetch(`${BASE}/api/v1/settings/image`)).json()) as Record<string, unknown>;
+        const lb = body.lastBuild as { status: string } | null;
+        if (lb && lb.status !== "running") {
+          settled = body;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(settled).not.toBeNull();
+      const lb = settled?.lastBuild as { status: string; kind: string; logTail: string };
+      expect(lb.status).toBe("success");
+      expect(lb.kind).toBe("full");
+      expect(lb.logTail).toContain("full-rebuilt-by-test");
+
+      const manifest = (await (await fetch(`${BASE}/dist/image/arm64/manifest.json`)).json()) as Record<string, unknown>;
+      expect(manifest.imageId).toBe("20260708T222222Z-ffff0022");
     },
     TEST_TIMEOUT,
   );

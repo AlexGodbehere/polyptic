@@ -14,7 +14,7 @@ import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import Fastify from "fastify";
 
-import { ImageUpdateInfo, UpdateImageSettingsBody } from "@polyptic/protocol";
+import { ImageUpdateInfo, RebuildImageBody, UpdateImageSettingsBody } from "@polyptic/protocol";
 
 import { ActivityLog } from "./activity";
 import { AdminBroadcaster, AdminHub, Presence } from "./admin";
@@ -184,14 +184,18 @@ registerOpsRoutes(fastify, {
 // NOT /api/v1, so an edge box with no operator session can bootstrap itself entirely from the server.
 const provisionConfig = provisionConfigFromEnv();
 
-// ── Image updates (POL-41): the scheduled rebuild hook + the published manifest + urgency. The hook
-// command comes from IMAGE_REBUILD_CMD (e.g. `deploy/rebuild-image-docker.sh arm64`); without it the
-// schedule and "rebuild now" log a warning instead of building (a laptop server can still SERVE). ──
+// ── Image updates (POL-41): the scheduled rebuild hooks + the published manifest + urgency. The
+// daily refresh comes from IMAGE_REBUILD_CMD (e.g. `deploy/rebuild-image-docker.sh arm64`); the
+// weekly FULL rebuild — the cycle that rolls kernel CVEs (POL-43) — from IMAGE_FULL_REBUILD_CMD
+// (e.g. `deploy/full-rebuild-image-docker.sh arm64`, or a k8s Job trigger in-cluster). Without a
+// hook the schedule and "rebuild now" log a warning instead of building (a laptop server can still
+// SERVE). ──
 const imageUpdates = new ImageUpdates(
   store,
   provisionConfig.imageDistDir,
   process.env.IMAGE_REBUILD_CMD?.trim() || undefined,
   fastify.log,
+  process.env.IMAGE_FULL_REBUILD_CMD?.trim() || undefined,
 );
 imageUpdates.start();
 
@@ -205,13 +209,18 @@ const imageUpdateInfo = async () => {
   return ImageUpdateInfo.parse({
     scheduleEnabled: st.scheduleEnabled,
     scheduleTime: st.scheduleTime,
+    fullScheduleEnabled: st.fullScheduleEnabled,
+    fullScheduleDay: st.fullScheduleDay,
+    fullScheduleTime: st.fullScheduleTime,
     urgent: st.urgent,
     rebuildConfigured: imageUpdates.rebuildConfigured,
+    fullRebuildConfigured: imageUpdates.fullRebuildConfigured,
     lastBuild: st.lastBuildStartedAt
       ? {
           startedAt: st.lastBuildStartedAt,
           finishedAt: st.lastBuildFinishedAt,
           status: st.lastBuildStatus ?? "failure",
+          kind: st.lastBuildKind,
           logTail: st.lastBuildLog ?? "",
         }
       : null,
@@ -224,8 +233,9 @@ fastify.put("/api/v1/settings/image", async (request) => {
   await imageUpdates.updateSettings(body);
   return imageUpdateInfo();
 });
-fastify.post("/api/v1/settings/image/rebuild", async () => {
-  await imageUpdates.trigger("manual");
+fastify.post("/api/v1/settings/image/rebuild", async (request) => {
+  const { kind } = RebuildImageBody.parse(request.body ?? {});
+  await imageUpdates.trigger("manual", kind);
   return imageUpdateInfo();
 });
 attachWebSockets({

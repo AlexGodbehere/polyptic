@@ -119,9 +119,10 @@ export async function updateImageSettings(patch: UpdateImageSettingsBody): Promi
   return ImageUpdateInfo.parse(raw);
 }
 
-/** POST /api/v1/settings/image/rebuild → kick the rebuild hook now (POL-41). */
-export async function rebuildImageNow(): Promise<ImageUpdateInfo> {
-  const raw = await send<unknown>("POST", `${BASE_SETTINGS}/image/rebuild`);
+/** POST /api/v1/settings/image/rebuild → kick a rebuild now: the daily refresh (default) or the
+ *  weekly full rebuild from the base ISO (POL-41/POL-43). */
+export async function rebuildImageNow(kind: "refresh" | "full" = "refresh"): Promise<ImageUpdateInfo> {
+  const raw = await send<unknown>("POST", `${BASE_SETTINGS}/image/rebuild`, { kind });
   return ImageUpdateInfo.parse(raw);
 }
 
