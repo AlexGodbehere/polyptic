@@ -41,7 +41,10 @@ spec:
 {{- if .Values.ingressRoute.bootHost }}
 ---
 # The boot depot, plain HTTP by contract (shim/GRUB/casper have no TLS stack).
-# Path-scoped so nothing operator-facing is ever served over http.
+# Path-scoped so nothing operator-facing is ever served over http. /agent IS
+# included: boot media bake this host as their base, and the kernel cmdline
+# derives the agent's WebSocket (ws://<base>/agent) from it — machine traffic,
+# same trust model as the boot path itself.
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -52,7 +55,7 @@ spec:
   entryPoints:
     {{- toYaml .Values.ingressRoute.bootEntryPoints | nindent 4 }}
   routes:
-    - match: Host(`{{ .Values.ingressRoute.bootHost }}`) && (PathPrefix(`/boot`) || PathPrefix(`/grub`) || PathPrefix(`/dist`) || Path(`/install`) || Path(`/healthz`))
+    - match: Host(`{{ .Values.ingressRoute.bootHost }}`) && (PathPrefix(`/boot`) || PathPrefix(`/grub`) || PathPrefix(`/dist`) || PathPrefix(`/agent`) || Path(`/install`) || Path(`/healthz`))
       kind: Rule
       services:
         - name: {{ include "polyptic.fullname" . }}

@@ -211,10 +211,13 @@ RBAC (namespace-scoped, created by the chart): `jobs` create/get, `pods` list,
 
 **Day-0 bootstrap:** the depot starts empty. Click **Full rebuild now** in
 Console ▸ Settings ▸ Image updates (or wait for Sunday) — the Job downloads the
-base ISO and publishes the first image straight onto the depot volume. For the
-signed loaders, build the boot medium once on any machine
-(`POLYPTIC_BASE=http://<server-lan> deploy/build-boot-medium.sh`) and copy it in:
-`kubectl cp deploy/dist/boot <pod>:/var/lib/polyptic/depot/`.
+base ISO and publishes everything straight onto the depot volume: the netboot
+image, the **downloadable live ISO** (enrolment token baked in), and the
+**boot medium** with the signed loaders — so the Console ▸ Settings ▸ Netboot
+downloads are live with zero manual steps. The media bake
+`imageUpdates.bakeBase` as their control-plane address (defaults to
+`http://<ingressRoute.bootHost>`); without an address the Jobs publish only the
+netboot image. The nightly refresh keeps the live ISO in step with the payload.
 
 ## Dev workflow (local cluster)
 
