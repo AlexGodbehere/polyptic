@@ -91,13 +91,17 @@ async function copyNetboot(text: string, which: string): Promise<void> {
   }
 }
 
-// ── Image updates (POL-41) ──────────────────────────────────────────────────────
+// ── Image updates (POL-41 daily refresh + POL-43 weekly full rebuild) ───────────
 const imgSaving = ref(false);
 const imgTime = ref("");
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 async function applyImageSettings(patch: {
   scheduleEnabled?: boolean;
   scheduleTime?: string;
+  fullScheduleEnabled?: boolean;
+  fullScheduleDay?: number;
+  fullScheduleTime?: string;
   urgent?: boolean;
 }): Promise<void> {
   if (imgSaving.value) return;
@@ -111,11 +115,11 @@ async function applyImageSettings(patch: {
   }
 }
 
-async function rebuildNow(): Promise<void> {
+async function rebuildNow(kind: "refresh" | "full" = "refresh"): Promise<void> {
   if (imgSaving.value) return;
   imgSaving.value = true;
   try {
-    store.imageUpdates = await auth.rebuildImageNow();
+    store.imageUpdates = await auth.rebuildImageNow(kind);
   } catch (err) {
     console.error("[console] rebuild trigger failed", err);
   } finally {
@@ -126,6 +130,11 @@ async function rebuildNow(): Promise<void> {
 function saveScheduleTime(): void {
   const t = imgTime.value.trim();
   if (/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) void applyImageSettings({ scheduleTime: t });
+}
+
+function saveFullScheduleTime(value: string): void {
+  const t = value.trim();
+  if (/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) void applyImageSettings({ fullScheduleTime: t });
 }
 
 // ── Change password ─────────────────────────────────────────────────────────────
@@ -341,9 +350,10 @@ async function onChangePassword(): Promise<void> {
       <div class="card panel">
         <div class="panel-title">Image updates</div>
         <div class="panel-sub">
-          Rebuild the live image with the latest Ubuntu bug/security fixes on a schedule, and roll it
-          across the fleet: netbooted boxes compare image ids with this server every 5 minutes and
-          reboot to re-pull — overnight by default, within minutes when marked urgent.
+          Two update cycles keep the live image current: a nightly in-place refresh (userspace
+          bug/security fixes) and a weekly full rebuild from the base ISO (kernel fixes included).
+          Netbooted boxes compare image ids with this server every 5 minutes and reboot to re-pull —
+          overnight by default, within minutes when marked urgent.
         </div>
 
         <template v-if="store.imageUpdates === null">
@@ -368,7 +378,7 @@ async function onChangePassword(): Promise<void> {
               :aria-disabled="imgSaving"
               @click="applyImageSettings({ scheduleEnabled: true })"
             >
-              ● Nightly rebuild at
+              ● Nightly refresh at
             </div>
             <input
               class="nb-time"
@@ -387,20 +397,70 @@ async function onChangePassword(): Promise<void> {
             </div>
           </div>
           <div class="token-hint" v-if="!store.imageUpdates.rebuildConfigured">
-            This server has no rebuild hook (<code class="inline-code">IMAGE_REBUILD_CMD</code>), so the
-            schedule and “Rebuild now” cannot build from here — set it to e.g.
+            This server has no refresh hook (<code class="inline-code">IMAGE_REBUILD_CMD</code>), so the
+            schedule and “Refresh now” cannot build from here — set it to e.g.
             <code class="inline-code">deploy/rebuild-image-docker.sh arm64</code>.
           </div>
 
-          <button
-            class="btn btn-primary save nb-download"
-            :disabled="imgSaving || !store.imageUpdates.rebuildConfigured || store.imageUpdates.lastBuild?.status === 'running'"
-            @click="rebuildNow"
-          >
-            {{ store.imageUpdates.lastBuild?.status === "running" ? "Rebuilding…" : "Rebuild now" }}
-          </button>
+          <!-- Weekly FULL rebuild (POL-43): the cycle that rolls kernel CVEs. -->
+          <div class="pill-group">
+            <div
+              class="pill"
+              :class="{ active: store.imageUpdates.fullScheduleEnabled }"
+              :aria-disabled="imgSaving"
+              @click="applyImageSettings({ fullScheduleEnabled: true })"
+            >
+              ● Full rebuild (kernel) every
+            </div>
+            <select
+              class="nb-time"
+              :value="store.imageUpdates.fullScheduleDay"
+              :disabled="imgSaving"
+              @change="applyImageSettings({ fullScheduleDay: Number(($event.target as HTMLSelectElement).value) })"
+            >
+              <option v-for="(d, i) in WEEKDAYS" :key="d" :value="i">{{ d }}</option>
+            </select>
+            <input
+              class="nb-time"
+              type="time"
+              :value="store.imageUpdates.fullScheduleTime"
+              :disabled="imgSaving"
+              @change="saveFullScheduleTime(($event.target as HTMLInputElement).value)"
+            />
+            <div
+              class="pill"
+              :class="{ active: !store.imageUpdates.fullScheduleEnabled }"
+              :aria-disabled="imgSaving"
+              @click="applyImageSettings({ fullScheduleEnabled: false })"
+            >
+              ○ Off
+            </div>
+          </div>
+          <div class="token-hint" v-if="!store.imageUpdates.fullRebuildConfigured">
+            The nightly refresh holds the kernel, so kernel fixes need this weekly full rebuild —
+            configure <code class="inline-code">IMAGE_FULL_REBUILD_CMD</code> (e.g.
+            <code class="inline-code">deploy/full-rebuild-image-docker.sh arm64</code>) to enable it.
+          </div>
+
+          <div class="nb-btn-row">
+            <button
+              class="btn btn-primary save nb-download"
+              :disabled="imgSaving || !store.imageUpdates.rebuildConfigured || store.imageUpdates.lastBuild?.status === 'running'"
+              @click="rebuildNow('refresh')"
+            >
+              {{ store.imageUpdates.lastBuild?.status === "running" ? "Rebuilding…" : "Refresh now" }}
+            </button>
+            <button
+              class="btn save nb-download"
+              :disabled="imgSaving || !store.imageUpdates.fullRebuildConfigured || store.imageUpdates.lastBuild?.status === 'running'"
+              @click="rebuildNow('full')"
+            >
+              Full rebuild now
+            </button>
+          </div>
           <div class="token-hint" v-if="store.imageUpdates.lastBuild">
-            Last rebuild: {{ store.imageUpdates.lastBuild.status }}
+            Last rebuild: {{ store.imageUpdates.lastBuild.status
+            }}<span v-if="store.imageUpdates.lastBuild.kind"> ({{ store.imageUpdates.lastBuild.kind === "full" ? "full rebuild" : "refresh" }})</span>
             ({{ new Date(store.imageUpdates.lastBuild.startedAt).toLocaleString() }})
           </div>
 
@@ -571,6 +631,12 @@ async function onChangePassword(): Promise<void> {
   border-radius: 8px;
   padding: 4px 10px;
   font: inherit;
+}
+.nb-btn-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 /* ── Netboot card (POL-33) ── */

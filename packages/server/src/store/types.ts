@@ -177,13 +177,22 @@ export interface PersistedBootstrap {
  */
 export interface PersistedImageRollout {
   scheduleEnabled: boolean;
-  /** Server-local `HH:MM` the rebuild hook fires at. */
+  /** Server-local `HH:MM` the daily refresh hook fires at. */
   scheduleTime: string;
+  /** Weekly FULL rebuild cycle (POL-43): the daily refresh holds the kernel (D47), so this second
+   *  cycle — a rebuild from the base ISO — is what actually rolls kernel CVEs. */
+  fullScheduleEnabled: boolean;
+  /** Day-of-week the full rebuild fires (0 = Sunday … 6 = Saturday). */
+  fullScheduleDay: number;
+  /** Server-local `HH:MM` the full rebuild fires at. */
+  fullScheduleTime: string;
   urgent: boolean;
   lastBuildStartedAt: string | null;
   lastBuildFinishedAt: string | null;
   lastBuildStatus: "running" | "success" | "failure" | null;
   lastBuildLog: string | null;
+  /** Which cycle the last run was: the daily in-place refresh or the weekly full rebuild. */
+  lastBuildKind: "refresh" | "full" | null;
 }
 
 /**

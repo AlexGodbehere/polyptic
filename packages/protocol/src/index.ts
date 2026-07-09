@@ -609,17 +609,28 @@ export type ImageManifest = z.infer<typeof ImageManifest>;
  *  currently published per-arch images. GATED under /api/v1. */
 export const ImageUpdateInfo = z.object({
   scheduleEnabled: z.boolean(),
-  /** Server-local `HH:MM` the rebuild hook fires at (default "01:00"). */
+  /** Server-local `HH:MM` the daily refresh hook fires at (default "01:00"). */
   scheduleTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  /** Weekly FULL rebuild (POL-43): rebuild from the base ISO — the cycle that rolls kernel CVEs
+   *  (the daily refresh holds the kernel, D47). */
+  fullScheduleEnabled: z.boolean(),
+  /** Day-of-week the full rebuild fires (0 = Sunday … 6 = Saturday, default 0). */
+  fullScheduleDay: z.number().int().min(0).max(6),
+  /** Server-local `HH:MM` the full rebuild fires at (default "02:00"). */
+  fullScheduleTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
   urgent: z.boolean(),
-  /** Whether the server has a rebuild hook configured (IMAGE_REBUILD_CMD); without one the
+  /** Whether the server has a daily-refresh hook configured (IMAGE_REBUILD_CMD); without one the
    *  schedule and "rebuild now" can only report, not build. */
   rebuildConfigured: z.boolean(),
+  /** Whether the server has a weekly full-rebuild hook configured (IMAGE_FULL_REBUILD_CMD). */
+  fullRebuildConfigured: z.boolean(),
   lastBuild: z
     .object({
       startedAt: z.string(),
       finishedAt: z.string().nullable(),
       status: z.enum(["running", "success", "failure"]),
+      /** Which cycle ran: the daily in-place refresh or the weekly full rebuild. */
+      kind: z.enum(["refresh", "full"]).nullable(),
       /** Tail of the hook's combined output — enough to see apt's verdict or the failure. */
       logTail: z.string(),
     })
@@ -628,13 +639,22 @@ export const ImageUpdateInfo = z.object({
 });
 export type ImageUpdateInfo = z.infer<typeof ImageUpdateInfo>;
 
-/** Update the image-updates schedule / urgency from the console (POL-41). */
+/** Update the image-updates schedules / urgency from the console (POL-41, POL-43). */
 export const UpdateImageSettingsBody = z.object({
   scheduleEnabled: z.boolean().optional(),
   scheduleTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+  fullScheduleEnabled: z.boolean().optional(),
+  fullScheduleDay: z.number().int().min(0).max(6).optional(),
+  fullScheduleTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
   urgent: z.boolean().optional(),
 });
 export type UpdateImageSettingsBody = z.infer<typeof UpdateImageSettingsBody>;
+
+/** Kick a rebuild from the console: the daily refresh (default) or the weekly full rebuild. */
+export const RebuildImageBody = z.object({
+  kind: z.enum(["refresh", "full"]).default("refresh"),
+});
+export type RebuildImageBody = z.infer<typeof RebuildImageBody>;
 
 /** Update the fleet-wide display settings from the console (POL-6). Currently just the badge toggle. */
 export const UpdateDisplaySettingsBody = z.object({

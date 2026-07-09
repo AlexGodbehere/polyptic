@@ -294,6 +294,11 @@ export class PostgresStore implements Store {
         last_build_log         text
       )
     `;
+    // POL-43: the weekly FULL-rebuild cycle (kernel CVEs) + which cycle the last run was.
+    await sql`ALTER TABLE image_rollout ADD COLUMN IF NOT EXISTS full_schedule_enabled boolean NOT NULL DEFAULT true`;
+    await sql`ALTER TABLE image_rollout ADD COLUMN IF NOT EXISTS full_schedule_day int NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE image_rollout ADD COLUMN IF NOT EXISTS full_schedule_time text NOT NULL DEFAULT '02:00'`;
+    await sql`ALTER TABLE image_rollout ADD COLUMN IF NOT EXISTS last_build_kind text`;
     // Display settings (POL-6): a single row holding the fleet-wide on-screen badge toggle. Absent
     // until an operator first changes it — the control plane falls back to its env default (prod off,
     // dev on) until then, so the row is written on the first mutation, not on migrate.
@@ -820,40 +825,53 @@ export class PostgresStore implements Store {
       {
         schedule_enabled: boolean;
         schedule_time: string;
+        full_schedule_enabled: boolean;
+        full_schedule_day: number;
+        full_schedule_time: string;
         urgent: boolean;
         last_build_started_at: Date | null;
         last_build_finished_at: Date | null;
         last_build_status: string | null;
         last_build_log: string | null;
+        last_build_kind: string | null;
       }[]
-    >`SELECT schedule_enabled, schedule_time, urgent, last_build_started_at, last_build_finished_at, last_build_status, last_build_log FROM image_rollout WHERE id = 1 LIMIT 1`;
+    >`SELECT schedule_enabled, schedule_time, full_schedule_enabled, full_schedule_day, full_schedule_time, urgent, last_build_started_at, last_build_finished_at, last_build_status, last_build_log, last_build_kind FROM image_rollout WHERE id = 1 LIMIT 1`;
     const row = rows[0];
     if (!row) return undefined;
     const status = row.last_build_status;
+    const kind = row.last_build_kind;
     return {
       scheduleEnabled: row.schedule_enabled,
       scheduleTime: row.schedule_time,
+      fullScheduleEnabled: row.full_schedule_enabled,
+      fullScheduleDay: row.full_schedule_day,
+      fullScheduleTime: row.full_schedule_time,
       urgent: row.urgent,
       lastBuildStartedAt: row.last_build_started_at?.toISOString() ?? null,
       lastBuildFinishedAt: row.last_build_finished_at?.toISOString() ?? null,
       lastBuildStatus: status === "running" || status === "success" || status === "failure" ? status : null,
       lastBuildLog: row.last_build_log,
+      lastBuildKind: kind === "refresh" || kind === "full" ? kind : null,
     };
   }
 
   async setImageRollout(rollout: PersistedImageRollout): Promise<void> {
     const sql = this.sql;
     await sql`
-      INSERT INTO image_rollout (id, schedule_enabled, schedule_time, urgent, last_build_started_at, last_build_finished_at, last_build_status, last_build_log)
-      VALUES (1, ${rollout.scheduleEnabled}, ${rollout.scheduleTime}, ${rollout.urgent}, ${rollout.lastBuildStartedAt}, ${rollout.lastBuildFinishedAt}, ${rollout.lastBuildStatus}, ${rollout.lastBuildLog})
+      INSERT INTO image_rollout (id, schedule_enabled, schedule_time, full_schedule_enabled, full_schedule_day, full_schedule_time, urgent, last_build_started_at, last_build_finished_at, last_build_status, last_build_log, last_build_kind)
+      VALUES (1, ${rollout.scheduleEnabled}, ${rollout.scheduleTime}, ${rollout.fullScheduleEnabled}, ${rollout.fullScheduleDay}, ${rollout.fullScheduleTime}, ${rollout.urgent}, ${rollout.lastBuildStartedAt}, ${rollout.lastBuildFinishedAt}, ${rollout.lastBuildStatus}, ${rollout.lastBuildLog}, ${rollout.lastBuildKind})
       ON CONFLICT (id) DO UPDATE SET
         schedule_enabled = EXCLUDED.schedule_enabled,
         schedule_time = EXCLUDED.schedule_time,
+        full_schedule_enabled = EXCLUDED.full_schedule_enabled,
+        full_schedule_day = EXCLUDED.full_schedule_day,
+        full_schedule_time = EXCLUDED.full_schedule_time,
         urgent = EXCLUDED.urgent,
         last_build_started_at = EXCLUDED.last_build_started_at,
         last_build_finished_at = EXCLUDED.last_build_finished_at,
         last_build_status = EXCLUDED.last_build_status,
-        last_build_log = EXCLUDED.last_build_log
+        last_build_log = EXCLUDED.last_build_log,
+        last_build_kind = EXCLUDED.last_build_kind
     `;
   }
 

@@ -38,16 +38,27 @@ type Arch = (typeof ARCHES)[number];
 export const IMAGE_ROLLOUT_DEFAULTS: PersistedImageRollout = {
   scheduleEnabled: true,
   scheduleTime: "01:00",
+  // Weekly FULL rebuild (POL-43): Sundays 02:00 by default — an hour after the daily refresh slot
+  // so a both-scheduled Sunday cannot contend (the refresh finishes in ~2 min).
+  fullScheduleEnabled: true,
+  fullScheduleDay: 0,
+  fullScheduleTime: "02:00",
   urgent: false,
   lastBuildStartedAt: null,
   lastBuildFinishedAt: null,
   lastBuildStatus: null,
   lastBuildLog: null,
+  lastBuildKind: null,
 };
+
+/** The two update cycles: the daily in-place apt refresh (kernel held, ~2 min) and the weekly full
+ *  rebuild from the base ISO (kernel + everything, ~15 min) — the one that rolls kernel CVEs. */
+export type RebuildKind = "refresh" | "full";
 
 /** How much hook output we keep for the Settings card (the tail is where apt's verdict lives). */
 const LOG_TAIL_BYTES = 8 * 1024;
-/** A rebuild that runs longer than this is presumed wedged and killed (image builds take ~15min). */
+/** A rebuild that runs longer than this is presumed wedged and killed. Full rebuilds download the
+ *  base ISO on a cold cache, so the ceiling is generous (~15 min build + the download). */
 const HOOK_TIMEOUT_MS = 45 * 60 * 1000;
 /** Scheduler resolution. The fire guard is per-minute, so 30s ticks cannot double-fire. */
 const TICK_MS = 30 * 1000;
@@ -69,6 +80,9 @@ export class ImageUpdates {
     private readonly imageDistDir: string,
     private readonly rebuildCmd: string | undefined,
     private readonly log: FastifyBaseLogger,
+    /** The weekly full-rebuild hook (IMAGE_FULL_REBUILD_CMD). Optional — without it the weekly
+     *  cycle simply never fires and the console marks it unconfigured. */
+    private readonly fullRebuildCmd: string | undefined = undefined,
   ) {}
 
   /** The persisted state, with defaults before the first mutation. */
@@ -80,10 +94,17 @@ export class ImageUpdates {
     return Boolean(this.rebuildCmd && this.rebuildCmd.trim().length > 0);
   }
 
-  /** Apply operator changes (schedule enable/time, urgency). Returns the new state. */
+  get fullRebuildConfigured(): boolean {
+    return Boolean(this.fullRebuildCmd && this.fullRebuildCmd.trim().length > 0);
+  }
+
+  /** Apply operator changes (schedule enable/time/day, urgency). Returns the new state. */
   async updateSettings(patch: {
     scheduleEnabled?: boolean;
     scheduleTime?: string;
+    fullScheduleEnabled?: boolean;
+    fullScheduleDay?: number;
+    fullScheduleTime?: string;
     urgent?: boolean;
   }): Promise<PersistedImageRollout> {
     const cur = await this.state();
@@ -91,6 +112,9 @@ export class ImageUpdates {
       ...cur,
       ...(patch.scheduleEnabled !== undefined ? { scheduleEnabled: patch.scheduleEnabled } : {}),
       ...(patch.scheduleTime !== undefined ? { scheduleTime: patch.scheduleTime } : {}),
+      ...(patch.fullScheduleEnabled !== undefined ? { fullScheduleEnabled: patch.fullScheduleEnabled } : {}),
+      ...(patch.fullScheduleDay !== undefined ? { fullScheduleDay: patch.fullScheduleDay } : {}),
+      ...(patch.fullScheduleTime !== undefined ? { fullScheduleTime: patch.fullScheduleTime } : {}),
       ...(patch.urgent !== undefined ? { urgent: patch.urgent } : {}),
     };
     await this.store.setImageRollout(next);
@@ -146,15 +170,16 @@ export class ImageUpdates {
    * (status + log tail) for the Settings card; `settled` exposes it for tests. No-ops when a run
    * is already in flight or no hook is configured.
    */
-  async trigger(trigger: "schedule" | "manual"): Promise<PersistedImageRollout> {
+  async trigger(trigger: "schedule" | "manual", kind: RebuildKind = "refresh"): Promise<PersistedImageRollout> {
     if (this.running) {
-      this.log.warn({ event: "image.rebuild.busy", trigger }, "image rebuild already running, ignoring trigger");
+      this.log.warn({ event: "image.rebuild.busy", trigger, kind }, "image rebuild already running, ignoring trigger");
       return this.state();
     }
-    if (!this.rebuildConfigured) {
+    const cmd = kind === "full" ? this.fullRebuildCmd : this.rebuildCmd;
+    if (!cmd || !cmd.trim()) {
       this.log.warn(
-        { event: "image.rebuild.unconfigured", trigger },
-        "no IMAGE_REBUILD_CMD configured — cannot rebuild the image from here",
+        { event: "image.rebuild.unconfigured", trigger, kind },
+        `no ${kind === "full" ? "IMAGE_FULL_REBUILD_CMD" : "IMAGE_REBUILD_CMD"} configured — cannot rebuild the image from here`,
       );
       return this.state();
     }
@@ -167,24 +192,30 @@ export class ImageUpdates {
       lastBuildFinishedAt: null,
       lastBuildStatus: "running",
       lastBuildLog: "",
+      lastBuildKind: kind,
     };
     await this.store.setImageRollout(runningState);
-    this.log.info({ event: "image.rebuild.start", trigger, cmd: this.rebuildCmd }, "image rebuild starting");
-    this.settled = this.execute(trigger, startedAt);
+    this.log.info({ event: "image.rebuild.start", trigger, kind, cmd }, "image rebuild starting");
+    this.settled = this.execute(trigger, kind, cmd, startedAt);
     return runningState;
   }
 
   /** The in-flight run's completion (resolves to the persisted outcome); for tests/await-ers. */
   settled: Promise<PersistedImageRollout> | null = null;
 
-  private async execute(trigger: "schedule" | "manual", startedAt: string): Promise<PersistedImageRollout> {
+  private async execute(
+    trigger: "schedule" | "manual",
+    kind: RebuildKind,
+    cmd: string,
+    startedAt: string,
+  ): Promise<PersistedImageRollout> {
     let tail = "";
     const append = (chunk: Buffer) => {
       tail = (tail + chunk.toString()).slice(-LOG_TAIL_BYTES);
     };
 
     const status: "success" | "failure" = await new Promise((resolvePromise) => {
-      const child = spawn("/bin/sh", ["-c", this.rebuildCmd as string], {
+      const child = spawn("/bin/sh", ["-c", cmd], {
         cwd: HOOK_CWD,
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -211,11 +242,12 @@ export class ImageUpdates {
       lastBuildFinishedAt: new Date().toISOString(),
       lastBuildStatus: status,
       lastBuildLog: tail,
+      lastBuildKind: kind,
     };
     await this.store.setImageRollout(finished);
     this.running = false;
     this.log.info(
-      { event: "image.rebuild.done", trigger, status, imageIds: (await this.manifests()).map((m) => `${m.arch}:${m.imageId}`) },
+      { event: "image.rebuild.done", trigger, kind, status, imageIds: (await this.manifests()).map((m) => `${m.arch}:${m.imageId}`) },
       `image rebuild ${status}`,
     );
     return finished;
@@ -239,13 +271,22 @@ export class ImageUpdates {
   private async tick(): Promise<void> {
     try {
       const st = await this.state();
-      if (!st.scheduleEnabled || !this.rebuildConfigured || this.running) return;
+      if (this.running) return;
       const now = new Date();
       const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
       const minuteKey = `${now.toDateString()} ${hhmm}`;
-      if (hhmm !== st.scheduleTime || minuteKey === this.lastFiredMinute) return;
-      this.lastFiredMinute = minuteKey;
-      await this.trigger("schedule");
+      if (minuteKey === this.lastFiredMinute) return;
+      // The weekly FULL rebuild wins a same-minute collision — it supersedes a refresh (it applies
+      // everything the refresh would, plus the kernel).
+      if (st.fullScheduleEnabled && this.fullRebuildConfigured && now.getDay() === st.fullScheduleDay && hhmm === st.fullScheduleTime) {
+        this.lastFiredMinute = minuteKey;
+        await this.trigger("schedule", "full");
+        return;
+      }
+      if (st.scheduleEnabled && this.rebuildConfigured && hhmm === st.scheduleTime) {
+        this.lastFiredMinute = minuteKey;
+        await this.trigger("schedule", "refresh");
+      }
     } catch (err) {
       this.log.error({ event: "image.rebuild.tick_error", err: (err as Error).message }, "image update tick failed");
     }

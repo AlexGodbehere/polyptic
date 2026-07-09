@@ -296,26 +296,38 @@ Three things make this work: the firmware announces vendor class `HTTPClient` wi
 
 ---
 
-## Keeping the image updated (POL-41)
+## Keeping the image updated (POL-41 + POL-43)
 
 A baked image is convenient and immutable — and immediately starts ageing. The update loop closes
 that gap with **zero per-box work**, because a diskless box re-pulls its whole OS at every boot:
 **an update is just a rebuilt image plus a reboot.**
 
-**Server side — scheduled refresh.** Console ▸ Settings ▸ **Image updates** runs a rebuild hook on
-a schedule (default 01:00, server-local; or the **Rebuild now** button). The hook is a command by
-contract (`IMAGE_REBUILD_CMD`); the ready-made one is:
+**Server side — two scheduled cycles.** Console ▸ Settings ▸ **Image updates** runs rebuild hooks
+on two schedules (plus **Refresh now** / **Full rebuild now** buttons). Each hook is a command by
+contract; the ready-made Docker ones are:
 
 ```bash
-IMAGE_REBUILD_CMD="deploy/rebuild-image-docker.sh arm64"   # privileged Linux container, any host
+IMAGE_REBUILD_CMD="deploy/rebuild-image-docker.sh arm64"            # nightly, default 01:00
+IMAGE_FULL_REBUILD_CMD="deploy/full-rebuild-image-docker.sh arm64"  # weekly, default Sun 02:00
 ```
 
-which runs `deploy/refresh-live-image.sh`: unsquash the CURRENT image, `apt-get upgrade` it in a
-chroot (security + updates pockets), re-wrap, and stamp a **new image id**. Two deliberate
-properties: **nothing to upgrade → nothing changes** (no image-id churn, no pointless fleet
-reboots), and **the kernel stays held** (the D47 signed-kernel/initrd invariant) — kernel CVEs need
-a full `build-live-image.sh` run against a newer base ISO; everything user-space refreshes
-automatically.
+1. **Nightly refresh** — `deploy/refresh-live-image.sh`: unsquash the CURRENT image,
+   `apt-get upgrade` it in a chroot (security + updates pockets), re-wrap, and stamp a **new image
+   id**. Two deliberate properties: **nothing to upgrade → nothing changes** (no image-id churn, no
+   pointless fleet reboots), and **the kernel stays held** (the D47 signed-kernel/initrd invariant).
+2. **Weekly full rebuild** — because of that hold, the nightly cycle can never roll a **kernel
+   CVE**. The weekly cycle rebuilds from the base ISO (`deploy/full-rebuild-image-docker.sh`
+   downloads + caches it under `deploy/dist/cache/`, then runs `build-live-image.sh` in a
+   privileged container), picking up the ISO's current Canonical-signed kernel — Secure Boot keeps
+   working because any Canonical-signed kernel verifies through shim. Everything user-space
+   refreshes nightly; the kernel refreshes weekly.
+
+**Kubernetes.** The Helm chart (`deploy/helm/polyptic`) wires both hooks as
+`bun deploy/k8s-run-job.ts refresh|full`: the server creates a privileged rebuild **Job** from a
+chart-rendered template on a Linux node, waits, and relays the log tail into the Settings card. The
+depot lives on a PVC shared between the server and the Jobs; day-0 bootstrap is just clicking
+**Full rebuild now** (the Job pulls the base ISO straight onto the volume). See the chart README
+for the full story, including the dev workflow against a local OrbStack/kind cluster.
 
 **Box side — the 5-minute poll.** Every netbooted box carries its identity at
 `/etc/polyptic/image-id` and compares it against `GET /dist/image/<arch>/manifest.json`
@@ -363,6 +375,48 @@ whole image into a RAM tmpfs.)
 - **Offload flow:** attach an additional VirtIO disk that has a GPT + FAT32 ESP, boot the dongle,
   pick the "offload" menu entry; the live boot installs the signed loaders + boot entry on the
   disk, after which the box boots the same chain with the dongle removed.
+
+---
+
+## Troubleshooting: the control-plane address is BAKED into boot media
+
+Seen live (2026-07-09): the dev host moved to a different network, its IP changed, and **every
+previously-built medium went stale at once**. Know the symptoms:
+
+| Medium | Symptom when the baked address is dead |
+| --- | --- |
+| Dongle / offloaded disk | GRUB drops to the fallback menu — `Retry (DHCP + chain again) / Reboot / Firmware setup` — because `configfile $net/boot/grub.cfg` can't fetch the server menu. |
+| Downloadable live ISO | Boots normally all the way to the splash, then sits at **"Starting up"** forever: the agent can't reach `polyptic.server_url` on its cmdline. The box never appears in the console. |
+| Server env `PLAYER_BASE_URL` | The sneakiest one: the box boots, **enrols, and shows Online in the console** — but the screen shows a white page reading **"Operation was cancelled"** (WebKit's error page). The agent reached the server fine; the *browser* couldn't load the player from the stale `PLAYER_BASE_URL` the server advertises. The agent's own capture thumbnail (Machines view) shows the same white page — that's how you tell it's the guest's browser, not the display. Restart the server with the corrected `PLAYER_BASE_URL`; agents re-apply on reconnect. |
+
+What carries a baked address (goes stale when the server moves):
+
+- the **dongle**'s stage-1 `grub/<arch>-efi/grub.cfg` (`set net=(http,HOST:PORT)`),
+- an **offloaded disk's ESP** (the same stage-1, copied at offload time),
+- the **live ISO**'s kernel cmdline (`polyptic.base` / `polyptic.server_url` / token).
+
+What does **not** (server-derived per request, immune to moves): the netboot payload
+(`polyptic.iso`), `/boot/grub.cfg` menu URLs, the update-poll manifest — all derive from the HTTP
+`Host` header of the request that fetched them.
+
+Fixes, fastest first:
+
+1. **Re-bake the media** for the new address: `POLYPTIC_BASE=http://<new-host>:8080
+   deploy/build-boot-medium.sh` and re-download/rebuild the live ISO (`deploy/build-live-iso.sh`);
+   reflash sticks, re-attach ISOs.
+2. **Patch an offloaded ESP in place** (no reflash — handy for VMs): find the ESP partition offset
+   in the disk image (GPT LBA×512), then
+   `mcopy -i "<disk.img>@@<offset>" ::/grub/arm64-efi/grub.cfg /tmp/g && sed -i '' 's/OLD:8080/NEW:8080/' /tmp/g && mcopy -o -i "<disk.img>@@<offset>" /tmp/g ::/grub/arm64-efi/grub.cfg`.
+3. **The real fix: bake a NAME, not an IP.** Give the control plane a stable DNS name (in
+   Kubernetes: the chart's `ingressRoute.bootHost`, a plain-HTTP Traefik router for the boot
+   paths) and build all media against `http://boot.your-domain`. Media then survive any move of
+   the control plane. Caveat: GRUB resolves DNS fine, but the casper initrd's busybox `wget`
+   resolves **IPs more reliably than names** on some releases — verify a name-based `iso-url=`
+   boots on your target release before fleet-wide rollout (the D47 note).
+
+Related black-screen gotcha (not address-related): a UTM VM whose display is `virtio-gpu-pci`
+(no GL) boots to the splash and then goes **black** — sway has no GL renderer. Use
+`virtio-gpu-gl-pci` ("GPU Supported"), the same D48 lesson.
 
 ---
 
