@@ -203,7 +203,13 @@ function bootKernelCmdline(httpBase: string, token: string | undefined): string 
  * box has no operator session at boot, so the route is ungated; a leaked token cannot self-admit (a NEW
  * machine still lands PENDING for an operator to approve, see enroll.ts case 1). `$grub_cpu` selects
  * amd64/arm64 at boot so one menu serves both arches. The `--id offload` entry tags the cmdline so the
- * live image writes the signed loaders to the box's ESP once, then boots the same flow forever. Every
+ * live image writes the signed loaders to the box's ESP once, then boots the same flow forever. The
+ * `--id debug` entry is the live boot plus `systemd.debug-shell=1` — a passwordless root shell on tty9
+ * (Ctrl+Alt+F9), the ONLY interactive access a sealed kiosk image has (no passwords, no SSH). A menu
+ * item because hand-appending it in GRUB's editor (a wrapped multi-line `linux` line, a 5-second
+ * timeout) proved miserable at a hot box in the field. It grants nothing an attacker with keyboard +
+ * power didn't already have: GRUB configs are unverified in the shim model (D47), so anyone at the
+ * menu can already edit the cmdline; the entry never auto-boots (default stays `live`). Every
  * `$var` in the emitted config is GRUB runtime syntax, written literally (never JS interpolation); the
  * commands are plain `linux`/`initrd` (noble's signed GRUB has no linuxefi). When the computed base is
  * https, http is emitted anyway: GRUB has no TLS, the boot depot is plain-HTTP by contract.
@@ -236,6 +242,11 @@ export function buildBootGrubCfg(base: string, token: string | undefined): strin
     'menuentry "Polyptic (Install Bootloader)" --id offload {',
     '  echo "Polyptic: offload mode, the live image will install the loader, then keep booting ..."',
     `  linux  $net/dist/image/$arch/vmlinuz ${cmdline} polyptic.offload=1`,
+    "  initrd $net/dist/image/$arch/initrd",
+    "}",
+    'menuentry "Polyptic (Debug Console)" --id debug {',
+    '  echo "Polyptic: live boot + root shell on tty9 (Ctrl+Alt+F9) ..."',
+    `  linux  $net/dist/image/$arch/vmlinuz ${cmdline} systemd.debug-shell=1`,
     "  initrd $net/dist/image/$arch/initrd",
     "}",
   );

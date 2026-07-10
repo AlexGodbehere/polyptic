@@ -209,6 +209,7 @@ describe("netboot: GET /boot/grub.cfg", () => {
       // Both menu entries by --id; dracut fetches the BARE squashfs; WS agent URL baked.
       expect(body).toContain("--id live");
       expect(body).toContain("--id offload");
+      expect(body).toContain("--id debug");
       expect(body).toContain(`root=live:http://${OPEN_HOST}/dist/image/$arch/rootfs.squashfs`);
       // The writable layer is an overlayfs in RAM. `rd.live.ram=1` must NEVER appear: it dd's a
       // SECOND full copy of the image into RAM on top of the one livenet already downloaded.
@@ -280,6 +281,23 @@ describe("netboot: GET /boot/grub.cfg", () => {
       const offloadEntry = body.slice(offloadStart);
       expect(liveEntry).not.toContain("polyptic.offload=1");
       expect(offloadEntry).toContain("polyptic.offload=1");
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
+    "the debug entry (and ONLY it) carries systemd.debug-shell=1, and never auto-boots",
+    async () => {
+      const body = await (await fetch(`${OPEN_BASE}/boot/grub.cfg`)).text();
+      const debugStart = body.indexOf("--id debug");
+      expect(debugStart).toBeGreaterThan(-1);
+      const beforeDebug = body.slice(0, debugStart);
+      const debugEntry = body.slice(debugStart);
+      // The root-shell arg must not leak into the live/offload entries a wall boots unattended.
+      expect(beforeDebug).not.toContain("systemd.debug-shell=1");
+      expect(debugEntry).toContain("systemd.debug-shell=1");
+      // A debug boot is an operator CHOICE at the menu: the default entry stays the live boot.
+      expect(body).toContain("set default=live");
     },
     TEST_TIMEOUT,
   );
