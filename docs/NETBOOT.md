@@ -456,6 +456,11 @@ Both floors dropped by roughly a factor of two in POL-35/[D55](DECISIONS.md), wh
 stopped being a 1.4 GiB casper ISO and became a ~500 MiB bare squashfs. Measured on the 26.04 arm64
 build: `rootfs.squashfs` **491.8 MiB**, `initrd` **91.7 MiB**, `vmlinuz` **22.7 MiB**.
 
+POL-53/[D64](DECISIONS.md) then grew the initrd again — it now carries the real KMS drivers, without
+which the boot splash is stuck at the firmware's framebuffer resolution. Expect roughly **+13 MiB on
+arm64** and **+47 MiB on amd64** (where the Intel and AMD graphics firmware blobs ride along). The
+floors above are unchanged: an initrd of that size is noise next to the ~500 MiB root image.
+
 The image still lands in the initramfs tmpfs, which the kernel caps at **50 % of RAM** by default —
 so the naive ceiling would be twice the image. The initrd's `polyptic-live` dracut module
 (`deploy/live/usr/lib/dracut/modules.d/50polyptic-live/`) raises that cap to 90 % before livenet

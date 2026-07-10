@@ -228,6 +228,12 @@ echo '==> [6/8] chroot: dracut initramfs (--no-hostonly), matched to this kernel
 # files, no dbus needed). The omitted modules are storage stacks a diskless kiosk never has —
 # multipath in particular used to spray "fatal configuration error" across the console before
 # plymouth owned the screen (POL-38).
+#
+# `drm` is NOT listed here but IS in the initramfs: step 4's `polyptic-agent setup` wrote
+# /etc/dracut.conf.d/polyptic-splash.conf, which asks for it (POL-53 — without a real KMS driver the
+# splash renders at the firmware's framebuffer resolution and the panel upscales it). That drop-in is
+# the single place both this image and an installed box get it from; see packages/agent/src/setup/
+# plymouth.ts. It costs ~47 MiB of initramfs on amd64, ~13 MiB on arm64.
 chroot "$ROOTFS" /bin/sh -eux <<CHROOT
 dracut --force --no-hostonly --no-hostonly-cmdline \
   --add "dmsquash-live livenet polyptic-live plymouth systemd-resolved" \
