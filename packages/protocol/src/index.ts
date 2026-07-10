@@ -703,7 +703,7 @@ export type ImageManifest = z.infer<typeof ImageManifest>;
  *  older build is therefore a fleet ROLLBACK — boxes see an id they don't match on their 5-minute
  *  poll and reboot into it per the urgency policy. `liveIsoUrl` is the standalone bootable ISO for
  *  that build when one was built (`polyptic-live.iso`, D49), which is NOT the same artifact as the
- *  netboot payload `polyptic.iso` that casper streams into RAM. */
+ *  netboot payload `rootfs.squashfs` that dracut streams into RAM. */
 export const ImageBuild = z.object({
   arch: z.enum(["arm64", "amd64"]),
   imageId: z.string(),

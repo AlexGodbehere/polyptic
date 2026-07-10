@@ -14,7 +14,7 @@
 #
 # USAGE:
 #   deploy/test-rebuild-job.sh [full|refresh] [amd64|arm64]
-#     env: BASE_ISO   pre-downloaded casper ISO (STRONGLY recommended; else it downloads ~3GB)
+#     env: BASE_ISO   pre-downloaded Ubuntu live ISO for the live-ISO stage (optional)
 #          DEPOT      scratch depot dir (default deploy/dist/test-depot; reused across runs)
 #          MEDIA_ONLY=1  skip the image build and only exercise the live-ISO + boot-medium steps
 #                        (needs a previous run's payload in the depot) — the fast inner loop
@@ -96,7 +96,9 @@ fi
 echo "==> checks:"
 FAIL=0
 check() { if [ -s "$1" ]; then echo "    ok   $(basename "$1")"; else echo "    MISS $1"; FAIL=1; fi; }
-check "$DEPOT/image/$ARCH/polyptic.iso"
+check "$DEPOT/image/$ARCH/rootfs.squashfs"
+check "$DEPOT/image/$ARCH/vmlinuz"
+check "$DEPOT/image/$ARCH/initrd"
 check "$DEPOT/image/$ARCH/image-id.txt"
 check "$DEPOT/image/$ARCH/polyptic-live.iso"     # the console's "Download live ISO"
 if [ "$KIND" = "full" ]; then

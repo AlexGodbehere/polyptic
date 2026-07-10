@@ -10,7 +10,7 @@
  *                                              the Host header, enrolment token baked in GATED mode only.
  *   - GET /grub/grub.cfg (+ per-arch aliases) → the same menu where an HTTP-booted grubnet looks
  *                                              ($prefix resolves to (http,host:port)/grub at server root).
- *   - GET /dist/image/:arch/{vmlinuz,initrd,polyptic.iso} → the live-image artifacts, Range-streamed (206).
+ *   - GET /dist/image/:arch/{vmlinuz,initrd,rootfs.squashfs} → the live-image artifacts, Range-streamed (206).
  *   - GET /dist/boot/:file                   → the tokenless universal dongle (polyptic-boot.img) + the
  *                                              four signed loaders (shim + GRUB .efi). shim fetches its
  *                                              second stage as <dir>//grubx64.efi (double slash).
@@ -48,9 +48,9 @@ const TEST_TIMEOUT = 10_000;
 // (unknown-size) kernel with "big file signature isn't implemented yet", so the route must buffer it.
 const VMLINUZ_BYTES = "FAKE_POLYPTIC_VMLINUZ\x00" + "K".repeat(5_000_000) + "\nkernel-marker\n";
 const INITRD_BYTES = "FAKE_POLYPTIC_INITRD\x00initrd-marker\n";
-const ISO_BYTES =
-  "FAKE_POLYPTIC_LIVE_ISO_" + "0123456789abcdef".repeat(8) + "\x00iso-marker\n";
-// A decoy by the OLD artifact name: proves the /dist/image 404 is the whitelist, not mere absence.
+const ROOTFS_BYTES =
+  "FAKE_POLYPTIC_ROOTFS_SQUASHFS_" + "0123456789abcdef".repeat(8) + "\x00rootfs-marker\n";
+// A decoy by the OLD casper artifact name: proves the /dist/image 404 is the whitelist, not mere absence.
 const SQUASHFS_DECOY_BYTES = "FAKE_POLYPTIC_SQUASHFS_DECOY_MUST_NOT_BE_SERVED\n";
 const BOOT_MEDIUM_NAME = "polyptic-boot.img";
 const BOOT_MEDIUM_BYTES = "FAKE_POLYPTIC_BOOT_IMG\x00FAT32-marker\n";
@@ -79,8 +79,8 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Temp dist roots: fabricate the netboot artifact layout WITHOUT a real image build.
-//   imageDir/amd64/{vmlinuz,initrd,polyptic.iso,squashfs}   (squashfs is a whitelist decoy;
-//                                                            NO arm64 dir, asserts a clean 404)
+//   imageDir/amd64/{vmlinuz,initrd,rootfs.squashfs,filesystem.squashfs}   (the casper-era name is a
+//                                          whitelist decoy; NO arm64 dir, asserts a clean 404)
 //   bootDir/{polyptic-boot.img,shimx64.efi,shimaa64.efi,grubx64.efi,grubaa64.efi}
 //   rootDir/secret.txt                                       (traversal canary, OUTSIDE both roots)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -98,8 +98,8 @@ function fabricateDistRoots(): void {
   mkdirSync(amd64, { recursive: true });
   writeFileSync(join(amd64, "vmlinuz"), VMLINUZ_BYTES, "binary");
   writeFileSync(join(amd64, "initrd"), INITRD_BYTES, "binary");
-  writeFileSync(join(amd64, "polyptic.iso"), ISO_BYTES, "binary");
-  writeFileSync(join(amd64, "squashfs"), SQUASHFS_DECOY_BYTES, "binary");
+  writeFileSync(join(amd64, "rootfs.squashfs"), ROOTFS_BYTES, "binary");
+  writeFileSync(join(amd64, "filesystem.squashfs"), SQUASHFS_DECOY_BYTES, "binary");
 
   mkdirSync(bootDir, { recursive: true });
   writeFileSync(join(bootDir, BOOT_MEDIUM_NAME), BOOT_MEDIUM_BYTES, "binary");
@@ -203,13 +203,20 @@ describe("netboot: GET /boot/grub.cfg", () => {
 
       // The GRUB net device is the exact host the box fetched from (Host header), like /install.
       expect(body).toContain(`set net=(http,${OPEN_HOST})`);
-      // Both menu entries by --id; casper pulls the whole ISO (URL must end .iso); WS agent URL baked.
+      // Both menu entries by --id; dracut fetches the BARE squashfs; WS agent URL baked.
       expect(body).toContain("--id live");
       expect(body).toContain("--id offload");
-      expect(body).toContain(`iso-url=http://${OPEN_HOST}/dist/image/$arch/polyptic.iso`);
-      // Overrides the layered image name the reused initrd bakes in, else casper panics "File system
-      // layers are missing" (verified on the POL-33 arm64 VM boot). Must match build-live-image.sh.
-      expect(body).toContain("layerfs-path=filesystem.squashfs");
+      expect(body).toContain(`root=live:http://${OPEN_HOST}/dist/image/$arch/rootfs.squashfs`);
+      // The writable layer is an overlayfs in RAM. `rd.live.ram=1` must NEVER appear: it dd's a
+      // SECOND full copy of the image into RAM on top of the one livenet already downloaded.
+      expect(body).toContain("rd.overlay=1");
+      expect(body).not.toContain("rd.live.ram");
+      // dracut waits for the NIC before livenet's fetch.
+      expect(body).toContain("rd.neednet=1");
+      // casper is gone (POL-35/D55): no ISO wrapper, no layered-image override.
+      expect(body).not.toContain("boot=casper");
+      expect(body).not.toContain("iso-url=");
+      expect(body).not.toContain("layerfs-path=");
       expect(body).toContain(`polyptic.server_url=ws://${OPEN_HOST}/agent`);
       // OPEN mode carries NO enrolment token.
       expect(body).not.toContain("polyptic.token=");
@@ -218,14 +225,17 @@ describe("netboot: GET /boot/grub.cfg", () => {
   );
 
   test(
-    "the menu speaks noble GRUB: plain linux/initrd, --- terminator, no iPXE remnants",
+    "the menu speaks noble GRUB: plain linux/initrd, no `---` terminator, no iPXE remnants",
     async () => {
       const body = await (await fetch(`${OPEN_BASE}/boot/grub.cfg`)).text();
       // Noble's signed GRUB dropped linuxefi/initrdefi; only plain `linux` + `initrd` exist.
       expect(body).not.toContain("linuxefi");
       expect(body).not.toContain("initrdefi");
-      expect(body).toMatch(/^ {2}linux {2}\$net\/dist\/image\/\$arch\/vmlinuz .+ ---$/m);
+      expect(body).toMatch(/^ {2}linux {2}\$net\/dist\/image\/\$arch\/vmlinuz .+$/m);
       expect(body).toMatch(/^ {2}initrd \$net\/dist\/image\/\$arch\/initrd$/m);
+      // `---` is a casper/live-installer convention (the kernel hands everything after it to init);
+      // dracut has no use for it, so the cmdline must not end with one.
+      expect(body).not.toContain(" ---");
       // The iPXE first stage is gone (D47): no shebang, no chain URL.
       expect(body).not.toContain("#!ipxe");
       expect(body).not.toContain("boot.ipxe");
@@ -256,7 +266,7 @@ describe("netboot: GET /boot/grub.cfg", () => {
   );
 
   test(
-    "only the offload entry tags the cmdline with polyptic.offload=1 (before the --- terminator)",
+    "only the offload entry tags the cmdline with polyptic.offload=1",
     async () => {
       const body = await (await fetch(`${OPEN_BASE}/boot/grub.cfg`)).text();
       const liveStart = body.indexOf("--id live");
@@ -266,22 +276,22 @@ describe("netboot: GET /boot/grub.cfg", () => {
       const liveEntry = body.slice(liveStart, offloadStart);
       const offloadEntry = body.slice(offloadStart);
       expect(liveEntry).not.toContain("polyptic.offload=1");
-      expect(offloadEntry).toContain("polyptic.offload=1 ---");
+      expect(offloadEntry).toContain("polyptic.offload=1");
     },
     TEST_TIMEOUT,
   );
 
   test(
-    "GATED mode: bakes in the current enrolment token, inside the arg list (before ---)",
+    "GATED mode: bakes in the current enrolment token, ahead of the splash args",
     async () => {
       const res = await fetch(`${GATED_BASE}/boot/grub.cfg`);
       expect(res.status).toBe(200);
       const body = await res.text();
       expect(body).toContain(`set net=(http,${GATED_HOST})`);
-      // The splash args (POL-7/POL-38) sit between the token and the `---` terminator.
+      // The splash args (POL-7/POL-38) trail the token; the offload tag trails those.
       const SPLASH = "multipath=off quiet splash plymouth\\.ignore-serial-consoles";
-      expect(body).toMatch(new RegExp(`polyptic\\.token=${FLEET_TOKEN} ${SPLASH} ---`));
-      expect(body).toMatch(new RegExp(`polyptic\\.token=${FLEET_TOKEN} ${SPLASH} polyptic\\.offload=1 ---`));
+      expect(body).toMatch(new RegExp(`polyptic\\.token=${FLEET_TOKEN} ${SPLASH}$`, "m"));
+      expect(body).toMatch(new RegExp(`polyptic\\.token=${FLEET_TOKEN} ${SPLASH} polyptic\\.offload=1$`, "m"));
     },
     TEST_TIMEOUT,
   );
@@ -308,10 +318,10 @@ describe("netboot: GET /dist/image/:arch/:file", () => {
   test(
     "streams the full ISO (200) with Accept-Ranges",
     async () => {
-      const res = await fetch(`${OPEN_BASE}/dist/image/amd64/polyptic.iso`);
+      const res = await fetch(`${OPEN_BASE}/dist/image/amd64/rootfs.squashfs`);
       expect(res.status).toBe(200);
       expect((res.headers.get("accept-ranges") ?? "").toLowerCase()).toBe("bytes");
-      expect(await res.text()).toBe(ISO_BYTES);
+      expect(await res.text()).toBe(ROOTFS_BYTES);
     },
     TEST_TIMEOUT,
   );
@@ -345,13 +355,13 @@ describe("netboot: GET /dist/image/:arch/:file", () => {
   test(
     "honours a byte Range with a 206 + exact Content-Range + partial body",
     async () => {
-      const res = await fetch(`${OPEN_BASE}/dist/image/amd64/polyptic.iso`, {
+      const res = await fetch(`${OPEN_BASE}/dist/image/amd64/rootfs.squashfs`, {
         headers: { Range: "bytes=0-9" },
       });
       expect(res.status).toBe(206);
-      expect(res.headers.get("content-range")).toBe(`bytes 0-9/${ISO_BYTES.length}`);
+      expect(res.headers.get("content-range")).toBe(`bytes 0-9/${ROOTFS_BYTES.length}`);
       expect(res.headers.get("content-length")).toBe("10");
-      expect(await res.text()).toBe(ISO_BYTES.slice(0, 10));
+      expect(await res.text()).toBe(ROOTFS_BYTES.slice(0, 10));
     },
     TEST_TIMEOUT,
   );
@@ -359,13 +369,13 @@ describe("netboot: GET /dist/image/:arch/:file", () => {
   test(
     "a suffix Range (last N bytes) returns the tail",
     async () => {
-      const res = await fetch(`${OPEN_BASE}/dist/image/amd64/polyptic.iso`, {
+      const res = await fetch(`${OPEN_BASE}/dist/image/amd64/rootfs.squashfs`, {
         headers: { Range: "bytes=-8" },
       });
       expect(res.status).toBe(206);
-      const len = ISO_BYTES.length;
+      const len = ROOTFS_BYTES.length;
       expect(res.headers.get("content-range")).toBe(`bytes ${len - 8}-${len - 1}/${len}`);
-      expect(await res.text()).toBe(ISO_BYTES.slice(len - 8));
+      expect(await res.text()).toBe(ROOTFS_BYTES.slice(len - 8));
     },
     TEST_TIMEOUT,
   );
@@ -373,8 +383,8 @@ describe("netboot: GET /dist/image/:arch/:file", () => {
   test(
     "a Range past EOF is 416 with a Content-Range of the size",
     async () => {
-      const len = ISO_BYTES.length;
-      const res = await fetch(`${OPEN_BASE}/dist/image/amd64/polyptic.iso`, {
+      const len = ROOTFS_BYTES.length;
+      const res = await fetch(`${OPEN_BASE}/dist/image/amd64/rootfs.squashfs`, {
         headers: { Range: `bytes=${len}-${len + 10}` },
       });
       expect(res.status).toBe(416);
@@ -384,9 +394,9 @@ describe("netboot: GET /dist/image/:arch/:file", () => {
   );
 
   test(
-    "404 for squashfs: dropped from the whitelist (D47), even though a file by that name exists",
+    "404 for the casper-era filesystem.squashfs: not on the whitelist, even though the file exists",
     async () => {
-      const res = await fetch(`${OPEN_BASE}/dist/image/amd64/squashfs`);
+      const res = await fetch(`${OPEN_BASE}/dist/image/amd64/filesystem.squashfs`);
       expect(res.status).toBe(404);
       const body = await res.text();
       expect(body).not.toContain(SQUASHFS_DECOY_BYTES.trim());
@@ -395,7 +405,7 @@ describe("netboot: GET /dist/image/:arch/:file", () => {
   );
 
   test(
-    "404 for a file outside the {vmlinuz,initrd,polyptic.iso} whitelist (never leaks a sibling)",
+    "404 for a file outside the {vmlinuz,initrd,rootfs.squashfs} whitelist (never leaks a sibling)",
     async () => {
       const res = await fetch(`${OPEN_BASE}/dist/image/amd64/passwd`);
       expect(res.status).toBe(404);
@@ -409,7 +419,7 @@ describe("netboot: GET /dist/image/:arch/:file", () => {
     "404 for an unknown arch, and for an arch with no image bundled (arm64)",
     async () => {
       expect((await fetch(`${OPEN_BASE}/dist/image/x86/vmlinuz`)).status).toBe(404);
-      expect((await fetch(`${OPEN_BASE}/dist/image/arm64/polyptic.iso`)).status).toBe(404);
+      expect((await fetch(`${OPEN_BASE}/dist/image/arm64/rootfs.squashfs`)).status).toBe(404);
     },
     TEST_TIMEOUT,
   );

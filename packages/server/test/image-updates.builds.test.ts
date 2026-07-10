@@ -29,10 +29,10 @@ function depotWithPublished(imageId: string): string {
   const arch = join(root, "arm64");
   mkdirSync(arch, { recursive: true });
   writeFileSync(join(arch, "image-id.txt"), `${imageId}\n`);
-  writeFileSync(join(arch, "polyptic.iso"), `iso-${imageId}`);
+  writeFileSync(join(arch, "rootfs.squashfs"), `rootfs-${imageId}`);
   writeFileSync(join(arch, "vmlinuz"), `vmlinuz-${imageId}`);
   writeFileSync(join(arch, "initrd"), `initrd-${imageId}`);
-  writeFileSync(join(arch, "SHA256SUMS"), `deadbeef  polyptic.iso\n`);
+  writeFileSync(join(arch, "SHA256SUMS"), `deadbeef  rootfs.squashfs\n`);
   return root;
 }
 
@@ -40,18 +40,18 @@ function depotWithPublished(imageId: string): string {
 function seedBuild(root: string, imageId: string, opts: { liveIso?: boolean } = {}): void {
   const dir = join(root, "arm64", "builds", imageId);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "polyptic.iso"), `iso-${imageId}`);
+  writeFileSync(join(dir, "rootfs.squashfs"), `rootfs-${imageId}`);
   writeFileSync(join(dir, "vmlinuz"), `vmlinuz-${imageId}`);
   writeFileSync(join(dir, "initrd"), `initrd-${imageId}`);
-  writeFileSync(join(dir, "SHA256SUMS"), `sha-${imageId}  polyptic.iso\n`);
+  writeFileSync(join(dir, "SHA256SUMS"), `sha-${imageId}  rootfs.squashfs\n`);
   if (opts.liveIso) writeFileSync(join(dir, "polyptic-live.iso"), `live-${imageId}`);
 }
 
-/** builds() sorts on the payload ISO's mtime, so give the seeded builds distinct, ordered times. */
+/** builds() sorts on the payload's mtime, so give the seeded builds distinct, ordered times. */
 function stampMtime(root: string, imageId: string, epochSeconds: number): void {
-  const iso = join(root, "arm64", "builds", imageId, "polyptic.iso");
+  const payload = join(root, "arm64", "builds", imageId, "rootfs.squashfs");
   const t = new Date(epochSeconds * 1000);
-  utimesSync(iso, t, t);
+  utimesSync(payload, t, t);
 }
 
 function makeUpdates(root: string, retain = 3): ImageUpdates {
@@ -72,7 +72,7 @@ describe("image build retention (POL-45)", () => {
     expect(builds[0]!.active).toBe(true);
     expect(builds[0]!.hasLiveIso).toBe(false);
     // The arch root is untouched — the boot chain still serves what it always did.
-    expect(readFileSync(join(root, "arm64", "polyptic.iso"), "utf8")).toBe("iso-20260701T000000Z-aaaaaaaa");
+    expect(readFileSync(join(root, "arm64", "rootfs.squashfs"), "utf8")).toBe("rootfs-20260701T000000Z-aaaaaaaa");
   });
 
   test("adopt() is idempotent and a no-op on an arch with no published image", async () => {
@@ -94,14 +94,14 @@ describe("image build retention (POL-45)", () => {
     const archRoot = join(root, "arm64");
     const buildDir = join(archRoot, "builds", "20260701T000000Z-aaaaaaaa");
 
-    // polyptic.iso: same inode → the multi-GB artifact costs nothing twice.
-    expect(statSync(join(archRoot, "polyptic.iso")).ino).toBe(statSync(join(buildDir, "polyptic.iso")).ino);
+    // rootfs.squashfs: same inode → the big artifact costs nothing twice.
+    expect(statSync(join(archRoot, "rootfs.squashfs")).ino).toBe(statSync(join(buildDir, "rootfs.squashfs")).ino);
     // SHA256SUMS: distinct inodes → truncating the root copy leaves the build's intact.
     expect(statSync(join(archRoot, "SHA256SUMS")).ino).not.toBe(statSync(join(buildDir, "SHA256SUMS")).ino);
 
     // Simulate refresh-live-image.sh's `sha256sum … > SHA256SUMS` on the arch root.
-    writeFileSync(join(archRoot, "SHA256SUMS"), "cafebabe  polyptic.iso\n");
-    expect(readFileSync(join(buildDir, "SHA256SUMS"), "utf8")).toBe("deadbeef  polyptic.iso\n");
+    writeFileSync(join(archRoot, "SHA256SUMS"), "cafebabe  rootfs.squashfs\n");
+    expect(readFileSync(join(buildDir, "SHA256SUMS"), "utf8")).toBe("deadbeef  rootfs.squashfs\n");
   });
 
   test("activate() repoints the arch root and republishes the id — the fleet rollback path", async () => {
@@ -114,17 +114,17 @@ describe("image build retention (POL-45)", () => {
     await iu.activate("arm64", "20260701T000000Z-oldoldoo");
 
     const archRoot = join(root, "arm64");
-    // What every netbooted box polls, and what casper streams, are both the older build now.
+    // What every netbooted box polls, and what dracut streams, are both the older build now.
     expect(readFileSync(join(archRoot, "image-id.txt"), "utf8").trim()).toBe("20260701T000000Z-oldoldoo");
-    expect(readFileSync(join(archRoot, "polyptic.iso"), "utf8")).toBe("iso-20260701T000000Z-oldoldoo");
+    expect(readFileSync(join(archRoot, "rootfs.squashfs"), "utf8")).toBe("rootfs-20260701T000000Z-oldoldoo");
     expect((await iu.manifest("arm64"))!.imageId).toBe("20260701T000000Z-oldoldoo");
 
     const builds = await iu.builds("arm64");
     expect(builds.find((b) => b.imageId === "20260701T000000Z-oldoldoo")!.active).toBe(true);
     expect(builds.find((b) => b.imageId === "20260703T000000Z-newnewnn")!.active).toBe(false);
     // Rolling back did not destroy the build we rolled back FROM.
-    expect(readFileSync(join(archRoot, "builds", "20260703T000000Z-newnewnn", "polyptic.iso"), "utf8")).toBe(
-      "iso-20260703T000000Z-newnewnn",
+    expect(readFileSync(join(archRoot, "builds", "20260703T000000Z-newnewnn", "rootfs.squashfs"), "utf8")).toBe(
+      "rootfs-20260703T000000Z-newnewnn",
     );
   });
 
@@ -186,7 +186,7 @@ describe("image build retention (POL-45)", () => {
     expect(builds[1]!.sha256).toBe("deadbeef");
   });
 
-  test("a directory without a payload ISO is not a build", async () => {
+  test("a directory without a payload root image is not a build", async () => {
     const root = depotWithPublished("20260702T000000Z-bbbbbbbb");
     mkdirSync(join(root, "arm64", "builds", "half-written"), { recursive: true });
     const iu = makeUpdates(root);

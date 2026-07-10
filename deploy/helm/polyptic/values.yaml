@@ -207,7 +207,7 @@ media:
 #     session is an http-only cookie, and splitting console/api onto different
 #     subdomains would break it. WebSockets pass through Traefik natively.
 #   * `bootHost` (PLAIN HTTP, web) — the boot depot only (/boot, /grub, /dist,
-#     /install). GRUB and casper speak no TLS, so this router must stay http.
+#     /install). GRUB speaks no TLS, so this router must stay http.
 #     THIS hostname is what you bake into boot media and live ISOs:
 #         POLYPTIC_BASE=http://boot.polyptic.example.com deploy/build-boot-medium.sh
 #         POLYPTIC_BASE=http://boot.polyptic.example.com ... deploy/build-live-iso.sh arm64
@@ -234,7 +234,7 @@ ingressRoute:
 #   The server serves the live image (GET /dist/image/<arch>/…) and the signed
 #   boot loaders (GET /dist/boot/<file>) from two directories; both live on one
 #   depot volume so the rebuild Jobs and the server share the artifacts.
-#   NOTE: GRUB + casper speak PLAIN HTTP (no TLS) — netbooting boxes must reach
+#   NOTE: GRUB speaks PLAIN HTTP (no TLS) — netbooting boxes must reach
 #   the server over http:// (a LoadBalancer/NodePort on the management LAN), not
 #   the HTTPS Ingress. Consoles/players keep HTTPS; only the boot path is
 #   http-by-contract.
@@ -243,6 +243,13 @@ netboot:
   # Mount path of the depot volume; IMAGE_DIST_DIR/BOOT_DIST_DIR derive from it
   # (<depotDir>/image and <depotDir>/boot).
   depotDir: /var/lib/polyptic/depot
+  # Build the downloadable boot medium (polyptic-boot.img + signed loaders) onto
+  # the depot via a post-install/post-upgrade hook Job, so the console's
+  # bootloader download works from minute one. Needs an address to bake
+  # (imageUpdates.bakeBase or ingressRoute.bootHost) and a persistent depot;
+  # without either the hook is skipped. The weekly full rebuild also (re)builds
+  # the medium, exactly as before — this hook just removes the day-0 wait.
+  autoBuildMedium: true
   persistence:
     # Back the depot with a PVC. The live image is rebuilt nightly/weekly and
     # must survive pod restarts — without persistence every restart would need a
@@ -278,12 +285,14 @@ imageUpdates:
   arch: arm64
   # How many builds the depot keeps PER ARCH (POL-45). The newest is served; any
   # retained build can be made active from Console ▸ Settings ▸ Onboard Screens,
-  # which rolls the fleet back to it. Each retained build costs ~2GB of ISO on
-  # the depot volume — raise netboot.persistence.size if you raise this.
+  # which rolls the fleet back to it. Each retained build costs ~600MB of root
+  # image on the depot volume — raise netboot.persistence.size if you raise this.
   retainBuilds: 3
-  # Base ISO for the weekly full rebuild. Empty derives the official Ubuntu
-  # live-server URL from ubuntuRelease + arch. Downloaded once onto the depot
-  # volume and cached under cache/.
+  # Base ISO used ONLY to source the signed EFI System Partition for the
+  # DOWNLOADABLE live ISO — the netboot image is built from ubuntu-base and needs
+  # no ISO at all. Empty derives the official Ubuntu live-server URL from
+  # ubuntuRelease + arch. Downloaded once onto the depot volume, cached under
+  # cache/, and skipped entirely when no live ISO is being baked.
   baseIsoUrl: ""
   ubuntuRelease: "26.04"
   # Image the rebuild Jobs run in (needs apt; the scripts install their tools).

@@ -35,7 +35,7 @@ set -euo pipefail
 
 : "${POLYPTIC_BASE:?set POLYPTIC_BASE, e.g. http://10.0.0.5:8080 (baked into the medium)}"
 case "$POLYPTIC_BASE" in
-  https://*) echo "build-boot-medium: POLYPTIC_BASE is https, but GRUB and casper speak PLAIN HTTP only (no TLS).
+  https://*) echo "build-boot-medium: POLYPTIC_BASE is https, but GRUB speaks PLAIN HTTP only (no TLS).
 The boot depot is plain-http by contract: keep it on the LAN / management VLAN and pass http://host:port." >&2; exit 2 ;;
   http://*) ;;
   *) echo "build-boot-medium: POLYPTIC_BASE must look like http://host[:port] (got '$POLYPTIC_BASE')" >&2; exit 2 ;;

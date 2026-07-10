@@ -1,0 +1,97 @@
+{{- /*
+Helm-hook Job (POL-35): build the downloadable boot medium (polyptic-boot.img +
+the four signed loaders) onto the depot PVC at install/upgrade time, so the
+console's "Download bootloader" button works from minute one instead of waiting
+for the first weekly full rebuild (which also builds it, and keeps doing so).
+
+Renders only when BOTH hold:
+  - the chart knows the plain-http address to BAKE into the stick's stage-1
+    grub.cfg (imageUpdates.bakeBase, else derived from ingressRoute.bootHost) —
+    with no address there is nothing safe to bake, and silently baking a
+    LoadBalancer IP is exactly the stale-address trap NETBOOT.md warns about;
+  - the depot is persistent (with an emptyDir depot the Job's output would land
+    on a volume no other pod can even see).
+
+The build is UNPRIVILEGED (curl + ar/tar/zstd + mtools, no root requirement
+beyond the container default) and takes ~30 s: it downloads the four pinned
+signed loader debs, verifies their sha256 pins, and assembles one FAT32 image.
+A re-run is deterministic, so post-upgrade simply re-bakes — which is what you
+want when bootHost changes. The scripts come from an initContainer running the
+SERVER image (version-locked, no chart-side copies), the same pattern as the
+rebuild Jobs. Pod affinity to the server pins the Job to the node holding the
+ReadWriteOnce depot PVC.
+
+Opt out with netboot.autoBuildMedium=false (the weekly full rebuild still
+builds the medium as before).
+*/ -}}
+{{- $bakeBase := .Values.imageUpdates.bakeBase }}
+{{- if and (not $bakeBase) .Values.ingressRoute.enabled .Values.ingressRoute.bootHost }}
+{{- $bakeBase = printf "http://%s" .Values.ingressRoute.bootHost }}
+{{- end }}
+{{- if and .Values.netboot.autoBuildMedium .Values.netboot.persistence.enabled $bakeBase }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "polyptic.fullname" . }}-boot-medium
+  labels:
+    {{- include "polyptic.labels" . | nindent 4 }}
+    app.kubernetes.io/component: boot-medium
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: {{ int .Values.imageUpdates.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: polyptic
+        app.kubernetes.io/component: boot-medium
+    spec:
+      restartPolicy: Never
+      # The depot PVC is ReadWriteOnce by default: land on the node already
+      # holding it (the server's node), same constraint as the rebuild Jobs.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {{ include "polyptic.name" . }}
+                  app.kubernetes.io/instance: {{ .Release.Name }}
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: payload
+          image: {{ include "polyptic.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sh", "-c", "mkdir -p /repo/deploy && cp -a /app/deploy/. /repo/deploy/"]
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+      containers:
+        - name: build
+          image: {{ .Values.imageUpdates.jobImage }}
+          command:
+            - bash
+            - -c
+            - >-
+              set -eu;
+              export DEBIAN_FRONTEND=noninteractive;
+              apt-get update -qq;
+              apt-get install -y -qq curl ca-certificates mtools binutils xz-utils zstd >/dev/null;
+              POLYPTIC_BASE={{ $bakeBase | quote }} bash /repo/deploy/build-boot-medium.sh;
+              mkdir -p /depot/boot;
+              cp -f /repo/deploy/dist/boot/* /depot/boot/;
+              echo "boot medium published to /depot/boot"
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+            - name: depot
+              mountPath: /depot
+      volumes:
+        - name: repo
+          emptyDir: {}
+        - name: depot
+          persistentVolumeClaim:
+            claimName: {{ include "polyptic.depot.pvcName" . }}
+{{- end }}

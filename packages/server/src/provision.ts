@@ -20,7 +20,7 @@
  *   GET /grub/grub.cfg (+ per-arch aliases)       → the SAME menu where an HTTP-booted grubnet looks:
  *                                                   its baked prefix resolves to (http,host:port)/grub
  *                                                   at the server root, not next to the shim URL.
- *   GET /dist/image/:arch/{vmlinuz,initrd,polyptic.iso} → the live-image artifacts, Range-streamed to RAM.
+ *   GET /dist/image/:arch/{vmlinuz,initrd,rootfs.squashfs} → the live-image artifacts, Range-streamed to RAM.
  *   GET /dist/boot/:file                          → the dd-able universal dongle (polyptic-boot.img) and
  *                                                   the four signed loaders (shim + GRUB .efi), TOKENLESS
  *                                                   so ungated (UEFI HTTP Boot / offload).
@@ -66,7 +66,7 @@ export interface ProvisionConfig {
   agentDistDir: string;
   /** Directory holding bundled substrate packages: `<distro>/<arch>/{manifest.json,*.deb}`. */
   depsDistDir: string;
-  /** Directory holding the netboot live-image artifacts: `<arch>/{vmlinuz,initrd,polyptic.iso}` (POL-33). */
+  /** Directory holding the netboot live-image artifacts: `<arch>/{vmlinuz,initrd,rootfs.squashfs}` (POL-33). */
   imageDistDir: string;
   /** Directory holding the boot depot: `polyptic-boot.img` + the four signed loaders (POL-33/D47). */
   bootDistDir: string;
@@ -93,11 +93,12 @@ export function provisionConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Pr
 /** Build target architectures we serve binaries + bundles for. */
 const ARCH_RE = /^(arm64|amd64)$/;
 /** The netboot live-image artifacts a diskless box streams (POL-33): the Canonical-signed kernel,
- *  the initrd, and the ISO wrapper casper `iso-url=` pulls whole into RAM — plus the self-contained
- *  bootable live ISO (POL-38/D49, `build-live-iso.sh`; it bakes the token like `/boot/grub.cfg`
- *  does, and a leaked token still cannot self-admit a NEW box past the operator). Nothing else is
- *  servable. */
-const IMAGE_FILE_RE = /^(vmlinuz|initrd|polyptic\.iso|polyptic-live\.iso)$/;
+ *  the dracut initrd, and the BARE `rootfs.squashfs` that dracut's `root=live:` pulls whole into RAM
+ *  (POL-35/D55 — casper's `iso-url=` wanted a whole `.iso` around the same squashfs) — plus the
+ *  self-contained bootable live ISO (POL-38/D49, `build-live-iso.sh`; it bakes the token like
+ *  `/boot/grub.cfg` does, and a leaked token still cannot self-admit a NEW box past the operator).
+ *  Nothing else is servable. */
+const IMAGE_FILE_RE = /^(vmlinuz|initrd|rootfs\.squashfs|polyptic-live\.iso)$/;
 /** A build's image id, as stamped by the build scripts: `<UTC timestamp>-<8 hex>`. The leading
  *  alphanumeric rules out `.`/`..`, so it can never escape the builds/ directory (POL-45). */
 const IMAGE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -184,45 +185,42 @@ export function toWsAgentUrl(httpBase: string): string {
 }
 
 /**
- * The kernel command line a diskless box boots with (POL-33/D47). CENTRALISED here so the casper
- * contract is a one-line change once validated on real hardware (the one piece not testable in-repo):
- *   - `boot=casper iso-url=<url ending .iso>` makes casper wget the WHOLE ISO into RAM (initramfs
- *     tmpfs) and loop-mount the squashfs inside it, nothing touches disk ("live image, no install").
- *     `netboot=http fetch=` does not exist in casper; `iso-url` is the real mechanism.
- *   - `layerfs-path=filesystem.squashfs` OVERRIDES the layered image name the reused initrd bakes in
- *     (`/conf/conf.d/default-layer.conf`, e.g. `ubuntu-server-minimal.ubuntu-server.installer...`), so
- *     casper mounts our single `deploy/build-live-image.sh` squashfs instead of panicking with
- *     "File system layers are missing". Must match the squashfs filename the image build writes.
- *   - `ip=dhcp` brings the NIC up before the fetch.
+ * The kernel command line a diskless box boots with (POL-33/D47, dracut since POL-35/D55).
+ * CENTRALISED here because it is the one half of the boot contract that lives in the server:
+ *   - `root=live:<url of a bare squashfs>` is dracut's live-image mechanism. `livenet` curls the
+ *     image into the initramfs tmpfs and `dmsquash-live` loop-mounts it, nothing touches disk
+ *     ("live image, no install"). It replaces casper's `boot=casper iso-url=<url ending .iso>`,
+ *     which needed a whole ISO wrapper around the same squashfs.
+ *   - `rd.overlay=1` gives the writable layer as an overlayfs in RAM rather than a device-mapper
+ *     snapshot (dracut-ng 110's name; `rd.live.overlay.overlayfs` is its deprecated alias). NEVER
+ *     add `rd.live.ram=1`: it `dd`s a SECOND full copy of the image into RAM on top of the one
+ *     livenet already downloaded.
+ *   - `ip=dhcp rd.neednet=1` bring the NIC up and make dracut wait for it before the fetch.
  *   - `polyptic.server_url=` / `polyptic.token=` are picked out of /proc/cmdline by the image's
  *     parse-cmdline helper and become the agent's POLYPTIC_SERVER_URL / POLYPTIC_BOOTSTRAP_TOKEN.
- * `$arch` is a GRUB runtime variable expanded at boot; the http URLs are literals (GRUB/casper have no
- * TLS, the boot depot is plain http by contract) and the token (when gated) is a baked literal. The
- * caller appends `polyptic.offload=1` (offload entry only) and the Ubuntu `---` arg-list terminator,
- * so every polyptic.* arg here stays BEFORE the `---`.
+ * `$arch` is a GRUB runtime variable expanded at boot; the http URLs are literals (GRUB has no TLS,
+ * the boot depot is plain http by contract) and the token (when gated) is a baked literal. The caller
+ * appends `polyptic.offload=1` on the offload entry only.
  */
 function bootKernelCmdline(httpBase: string, token: string | undefined): string {
   const parts = [
-    "boot=casper",
-    "layerfs-path=filesystem.squashfs",
-    `iso-url=${httpBase}/dist/image/$arch/polyptic.iso`,
+    `root=live:${httpBase}/dist/image/$arch/rootfs.squashfs`,
+    "rd.overlay=1",
     "ip=dhcp",
+    "rd.neednet=1",
     // The HTTP base (for the offload flow to fetch the loaders) + the WS agent URL (for the agent).
     `polyptic.base=${httpBase}`,
     `polyptic.server_url=${toWsAgentUrl(httpBase)}`,
   ];
   if (token !== undefined) parts.push(`polyptic.token=${token}`);
   // POL-7/POL-38: boot splash instead of scrolling kernel/systemd text. The live image carries the
-  // Polyptic Plymouth theme (squashfs + an initrd cpio segment); `quiet splash` is what makes
-  // plymouthd display it, and `plymouth.ignore-serial-consoles` is LOAD-BEARING: any serial console
-  // (arm64 VMs get one implicitly from the devicetree) makes plymouth assume a headless server and
-  // never paint the local display (verified live with plymouthd --debug in the POL-38 UTM boot).
-  // A wall renders on its panel by definition, so ignoring serial consoles is always right here.
-  // Must sit BEFORE the caller-appended `---` terminator.
-  // `multipath=off` is honoured by DRACUT-based initrds only — the initramfs-tools multipath boot
-  // script has no cmdline gate at all, which is why build-live-image.sh overrides it with a no-op
-  // inside the shipped initrd (the real fix for the pre-splash "fatal configuration error" spray).
-  // The flag stays as documentation-of-intent + coverage for future dracut-based images.
+  // Polyptic Plymouth theme, and dracut's plymouth module bundles it into the initramfs (the theme
+  // is named in /etc/dracut.conf.d/polyptic-splash.conf, which `polyptic-agent setup` writes);
+  // `quiet splash` is what makes plymouthd display it. `plymouth.ignore-serial-consoles` is
+  // LOAD-BEARING: any serial console (arm64 VMs get one implicitly from the devicetree) makes
+  // plymouth assume a headless server and never paint the local display (verified live with
+  // plymouthd --debug in the POL-38 UTM boot). A wall renders on its panel by definition.
+  // `multipath=off` is a dracut cmdline gate; the image also omits the module outright.
   parts.push("multipath=off", "quiet", "splash", "plymouth.ignore-serial-consoles");
   return parts.join(" ");
 }
@@ -236,7 +234,7 @@ function bootKernelCmdline(httpBase: string, token: string | undefined): string 
  * live image writes the signed loaders to the box's ESP once, then boots the same flow forever. Every
  * `$var` in the emitted config is GRUB runtime syntax, written literally (never JS interpolation); the
  * commands are plain `linux`/`initrd` (noble's signed GRUB has no linuxefi). When the computed base is
- * https, http is emitted anyway: GRUB/casper have no TLS, the boot depot is plain-HTTP by contract.
+ * https, http is emitted anyway: GRUB has no TLS, the boot depot is plain-HTTP by contract.
  */
 export function buildBootGrubCfg(base: string, token: string | undefined): string {
   const hostPort = base.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
@@ -250,7 +248,7 @@ export function buildBootGrubCfg(base: string, token: string | undefined): strin
   ];
   if (base.startsWith("https://")) {
     lines.push(
-      "# The operator base is https, but GRUB/casper have no TLS: the boot depot speaks plain http.",
+      "# The operator base is https, but GRUB has no TLS: the boot depot speaks plain http.",
     );
   }
   lines.push(
@@ -260,12 +258,12 @@ export function buildBootGrubCfg(base: string, token: string | undefined): strin
     "set default=live",
     'menuentry "Polyptic (Live Bootloader)" --id live {',
     '  echo "Polyptic: streaming the $arch live image into RAM ..."',
-    `  linux  $net/dist/image/$arch/vmlinuz ${cmdline} ---`,
+    `  linux  $net/dist/image/$arch/vmlinuz ${cmdline}`,
     "  initrd $net/dist/image/$arch/initrd",
     "}",
     'menuentry "Polyptic (Install Bootloader)" --id offload {',
     '  echo "Polyptic: offload mode, the live image will install the loader, then keep booting ..."',
-    `  linux  $net/dist/image/$arch/vmlinuz ${cmdline} polyptic.offload=1 ---`,
+    `  linux  $net/dist/image/$arch/vmlinuz ${cmdline} polyptic.offload=1`,
     "  initrd $net/dist/image/$arch/initrd",
     "}",
   );
@@ -273,8 +271,8 @@ export function buildBootGrubCfg(base: string, token: string | undefined): strin
 }
 
 /**
- * Parse a single `Range: bytes=start-end` header against a known `size`. The live ISO is hundreds of
- * MB and casper's fetch can issue byte-range GETs while streaming it, so `/dist/image` serves real
+ * Parse a single `Range: bytes=start-end` header against a known `size`. The root image is hundreds
+ * of MB and dracut's curl can issue byte-range GETs while streaming it, so `/dist/image` serves real
  * 206 partial content. Returns `null` for an absent / multi-range / malformed header (caller streams the
  * full 200), `{ unsatisfiable: true }` for a start past EOF (→ 416), else the inclusive `{ start, end }`.
  * Supports the suffix form `bytes=-N` (last N bytes). Mirrors the media store's range handling.
@@ -316,9 +314,9 @@ export function parseRange(
  * Secure-Boot box will NOT load a chunked kernel), and Bun's HTTP server forces
  * `Transfer-Encoding: chunked` for ANY streamed body EVEN with an explicit Content-Length header, so
  * a complete Buffer is the only way to emit Content-Length. Every boot-critical artifact (vmlinuz,
- * initrd, the signed `.efi` loaders, the dongle `.img`) is comfortably under this; only the ~1.5GB
- * casper ISO exceeds it, and that is fetched by busybox `wget` inside the initramfs (chunked-capable),
- * never by GRUB, so streaming it is fine and avoids holding it in RAM. 512 MiB.
+ * initrd, the signed `.efi` loaders, the dongle `.img`) is comfortably under this; only the root image
+ * and the downloadable live ISO can exceed it, and those are fetched by dracut's curl inside the
+ * initramfs (chunked-capable) or by a browser, never by GRUB, so streaming them is fine. 512 MiB.
  */
 const BOOT_ASSET_BUFFER_MAX = 512 * 1024 * 1024;
 
@@ -326,7 +324,7 @@ const BOOT_ASSET_BUFFER_MAX = 512 * 1024 * 1024;
  * Serve `abs` (a known-`size` regular file) as a boot asset: honour a byte Range, and for a non-range
  * response emit a Content-Length so GRUB/UEFI can verify + size it. Buffers the body up to
  * {@link BOOT_ASSET_BUFFER_MAX} (Bun only emits Content-Length for a complete Buffer, not a stream);
- * larger files (the casper ISO) stream. Callers set any extra headers (e.g. Content-Disposition) first.
+ * larger files (the root image) stream. Callers set any extra headers (e.g. Content-Disposition) first.
  */
 async function sendBootAsset(
   reply: FastifyReply,
@@ -366,7 +364,7 @@ async function sendBootAsset(
     reply.header("Content-Length", String(size));
     return reply.send(await readFile(abs));
   }
-  // Only the casper ISO lands here: streamed (chunked), fetched by busybox wget, never by GRUB.
+  // Only the large root images land here: streamed (chunked), fetched by curl, never by GRUB.
   return reply.send(createReadStream(abs));
 }
 
@@ -523,8 +521,8 @@ export function registerProvisionRoutes(
   fastify.get("/grub/x86_64-efi/grub.cfg", serveBootConfig);
   fastify.get("/grub/arm64-efi/grub.cfg", serveBootConfig);
 
-  // ── GET /dist/image/:arch/:file, the live-image artifacts (vmlinuz|initrd|polyptic.iso), Range-aware
-  //    (the ISO is large and streamed into RAM). 404 → the box's boot cleanly stalls. ──
+  // ── GET /dist/image/:arch/:file, the live-image artifacts (vmlinuz|initrd|rootfs.squashfs),
+  //    Range-aware (the squashfs is large and streamed into RAM). 404 → the box's boot cleanly stalls. ──
   // ── GET /dist/image/:arch/manifest.json — the published image identity + roll-out urgency
   //    (POL-41). UNGATED like the artifacts themselves (the box has no session) and secret-free:
   //    an image id + checksum reveal nothing an attacker can use, and the urgency flag only makes
@@ -710,7 +708,7 @@ export async function provisionBootSummary(config: ProvisionConfig): Promise<{
       isFile(resolve(config.agentDistDir, "polyptic-agent-arm64")),
       isFile(resolve(config.agentDistDir, "polyptic-agent-amd64")),
       isDir(config.imageDistDir),
-      isFile(resolve(config.imageDistDir, "amd64", "polyptic.iso")),
+      isFile(resolve(config.imageDistDir, "amd64", "rootfs.squashfs")),
       resolveBootMedium(config.bootDistDir).then((p) => p !== null),
       // Serving UEFI HTTP Boot / offload needs ALL FOUR loaders (shim + network GRUB, both arches).
       Promise.all(

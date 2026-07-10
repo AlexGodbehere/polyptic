@@ -47,11 +47,11 @@ beforeAll(async () => {
   imageRoot = mkdtempSync(join(tmpdir(), "pol41-image-"));
   mkdirSync(join(imageRoot, "arm64"), { recursive: true });
   writeFileSync(join(imageRoot, "arm64", "image-id.txt"), "20260708T000000Z-aabbccdd\n");
-  writeFileSync(join(imageRoot, "arm64", "polyptic.iso"), "fake-iso");
+  writeFileSync(join(imageRoot, "arm64", "rootfs.squashfs"), "fake-rootfs");
   writeFileSync(
     join(imageRoot, "arm64", "SHA256SUMS"),
     "1111111111111111111111111111111111111111111111111111111111111111  vmlinuz\n" +
-      "2222222222222222222222222222222222222222222222222222222222222222  polyptic.iso\n",
+      "2222222222222222222222222222222222222222222222222222222222222222  rootfs.squashfs\n",
   );
   proc = Bun.spawn(["bun", SERVER_ENTRY], {
     env: {
@@ -277,12 +277,12 @@ describe("image build history (POL-45)", () => {
       const active = (body.builds as Array<{ arch: string; imageId: string; active: boolean }>).find(
         (b) => b.arch === "arm64" && b.active,
       )!;
-      const res = await fetch(`${BASE}/dist/image/arm64/builds/${active.imageId}/polyptic.iso`);
+      const res = await fetch(`${BASE}/dist/image/arm64/builds/${active.imageId}/rootfs.squashfs`);
       expect(res.status).toBe(200);
-      expect(await res.text()).toBe("fake-iso");
+      expect(await res.text()).toBe("fake-rootfs");
 
       expect((await fetch(`${BASE}/dist/image/arm64/builds/${active.imageId}/manifest.json`)).status).toBe(404);
-      expect((await fetch(`${BASE}/dist/image/arm64/builds/20260101T000000Z-nosuchhh/polyptic.iso`)).status).toBe(404);
+      expect((await fetch(`${BASE}/dist/image/arm64/builds/20260101T000000Z-nosuchhh/rootfs.squashfs`)).status).toBe(404);
     },
     TEST_TIMEOUT,
   );
@@ -295,7 +295,7 @@ describe("image build history (POL-45)", () => {
       // Only an encoded SLASH keeps the segment intact; it lands on the handler as the id, where
       // IMAGE_ID_RE rejects it. (safeResolve is the second line of defence, unit-tested separately.)
       for (const id of ["..%2f..", "%2e%2e%2f%2e%2e"]) {
-        const res = await fetch(`${BASE}/dist/image/arm64/builds/${id}/polyptic.iso`);
+        const res = await fetch(`${BASE}/dist/image/arm64/builds/${id}/rootfs.squashfs`);
         expect(res.status).toBe(404);
       }
     },
