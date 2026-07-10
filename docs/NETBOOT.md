@@ -4,7 +4,7 @@ Boot a bare machine straight into Polyptic **over the network, into RAM**, no op
 
 This is the answer to two problems at once (POL-33 / [D46](DECISIONS.md), loader pivoted to the signed chain in [D47](DECISIONS.md)):
 
-1. **No hidden install step.** The `curl … /install | sh` one-liner ([DISTRIBUTION.md](DISTRIBUTION.md)) still needs an OS on the box first. Netboot removes that: the box has no OS until it fetches one, and it fetches a *live* one that never touches disk.
+1. **No hidden install step.** The old `curl … | sh` one-liner needed an OS on the box first, and it is gone (D58). Netboot removes the step entirely: the box has no OS until it fetches one, and it fetches a *live* one that never touches disk.
 2. **Who owns a booting box on a shared LAN?** **Ownership is by key, not by who-answered-the-network-first.** A box belongs to the server whose **enrolment token** its boot chain carries. So Polyptic never runs DHCP, and two control planes on one VLAN (staging next to production) coexist for free, each box carries exactly one server's key.
 
 And it does both **without touching Secure Boot**: the first boot stage is Ubuntu's already-signed shim + network GRUB, the exact binaries Canonical ships for its own netboot installer. Polyptic signs nothing and manages no keys. See [Secure Boot](#secure-boot) for precisely what is verified and what is not.
@@ -105,11 +105,11 @@ The **stable machine-id is the whole trick.** A diskless live image regenerates 
 
 ## The boot depot (server routes)
 
-All in [`packages/server/src/provision.ts`](../packages/server/src/provision.ts), alongside `/install` + `/dist/agent`:
+All in [`packages/server/src/provision.ts`](../packages/server/src/provision.ts), alongside `/dist/agent`:
 
 | Route | Gate | What |
 |---|---|---|
-| `GET /boot/grub.cfg` | **ungated** | The generated GRUB menu (boot now / install-the-bootloader, the latter behind a confirmation submenu). Bakes the control-plane base from the request `Host` (like `/install`) and, in gated mode, the current enrolment token into the kernel cmdline. The box has no operator session at boot, so this is ungated. |
+| `GET /boot/grub.cfg` | **ungated** | The generated GRUB menu (boot now / install-the-bootloader, the latter behind a confirmation submenu). Bakes the control-plane base from the request `Host` and, in gated mode, the current enrolment token into the kernel cmdline. The box has no operator session at boot, so this is ungated. |
 | `POST /boot/report` | **token** | How a box's bootloader install went (POL-58) → one line in the Live Activity feed. The reporter is mid-boot with no agent session, hence not under `/api/v1`; in gated mode it must present the fleet enrolment token it netbooted with, in open mode it is ungated like the rest of the depot. Read-only against the registry, throttled, and the body can only produce one bounded line. |
 | `GET /grub/grub.cfg` (+ `/grub/x86_64-efi/grub.cfg`, `/grub/arm64-efi/grub.cfg`) | **ungated** | **Aliases of the same menu**, at the paths an HTTP-booted GRUB actually asks for: grubnet's baked-in prefix is `/grub`, resolved against the **server root** of the host it was fetched from. See [the appendix](#no-medium-at-all-uefi-http-boot). |
 | `GET /dist/image/:arch/{vmlinuz,initrd,rootfs.squashfs}` | **ungated** | The **active** live-image artifacts, streamed with real HTTP **Range** (206/416); the root image is hundreds of MB and streamed into RAM. |
