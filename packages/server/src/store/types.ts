@@ -212,6 +212,22 @@ export interface PersistedBootstrap {
 }
 
 /**
+ * POL-25 — the deployment's own agent CA for mTLS client certificates. Generated once on the first
+ * boot with `AGENT_MTLS_PORT` set, then reused forever: every client cert the fleet holds chains to
+ * THIS key, so losing the row would orphan the whole fleet's certs (they'd re-enrol via the app-level
+ * credential seam, but only after their mTLS dials start failing). The private key never leaves the
+ * server; it is exactly as sensitive as the machine credential hashes stored alongside it.
+ */
+export interface PersistedMtlsCa {
+  /** The CA certificate (PEM) — sent to agents as their pinned trust root. */
+  certPem: string;
+  /** The CA private key (PKCS#8 PEM). Signs client CSRs and the listener's own server cert. */
+  keyPem: string;
+  /** ISO-8601 creation timestamp. */
+  createdAt: string;
+}
+
+/**
  * Image-updates state (POL-41): the scheduled-rebuild settings, the urgent roll-out switch, and the
  * last rebuild-hook run. One row; absent until first mutated (defaults: schedule on at 01:00,
  * urgent off).
@@ -384,6 +400,12 @@ export interface Store {
   getBootstrap(): Promise<PersistedBootstrap | undefined>;
   /** Persist the enrollment bootstrap (single row). */
   setBootstrap(bootstrap: PersistedBootstrap): Promise<void>;
+
+  // ── mTLS agent CA (POL-25) ─────────────────────────────────────────────────
+  /** The persisted agent CA (cert + key). Undefined until first generated. */
+  getMtlsCa(): Promise<PersistedMtlsCa | undefined>;
+  /** Persist the agent CA (single row, written once on first mTLS boot). */
+  setMtlsCa(ca: PersistedMtlsCa): Promise<void>;
 
   // ── Display settings (POL-6) ───────────────────────────────────────────────
   /** The persisted fleet-wide display settings (badge toggle). Undefined until first changed. */

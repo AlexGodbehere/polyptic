@@ -4,8 +4,9 @@
  * After a successful first-contact enrollment the server replies `server/enrolled` with a random,
  * durable `credential`. The server keeps only `sha256(credential)`; the agent persists the RAW
  * credential locally and presents it on every subsequent reconnect (instead of the one-time
- * bootstrap token). This is the agent's app-level identity — mTLS transport hardening is a
- * separate, later layer (D12 / deploy).
+ * bootstrap token). This is the agent's app-level identity — the mTLS transport layer deferred at
+ * D12 landed with POL-25 (see ./mtls.ts) and sits ON TOP of it: the client cert gates the
+ * transport, this credential still names the machine.
  *
  * Storage: one file per machine at
  *   `${POLYPTIC_STATE_DIR ?? ($HOME + "/.polyptic")}/credential-<machineId>`

@@ -18,6 +18,7 @@ export type {
   PersistedContentSource,
   PersistedCredentialProfile,
   PersistedMachine,
+  PersistedMtlsCa,
   PersistedMural,
   PersistedPlacement,
   PersistedScene,

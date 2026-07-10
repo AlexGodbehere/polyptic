@@ -38,8 +38,10 @@ import {
   ServerToPlayerSettings,
   parseMessage,
 } from "@polyptic/protocol";
+import type { MtlsBundle } from "@polyptic/protocol";
 import type { FastifyBaseLogger } from "fastify";
 import type { Server } from "node:http";
+import type { Server as HttpsServer } from "node:https";
 import type { RawData } from "ws";
 
 import { hashCredential } from "./enroll";
@@ -74,7 +76,37 @@ interface WsDeps {
   log: FastifyBaseLogger;
   /** Allowed browser origins for the /admin WS upgrade (anti-CSWSH); from CORS_ORIGIN. */
   allowedOrigins: string[];
+  /** POL-25 — the mTLS agent channel; undefined when AGENT_MTLS_PORT is unset. */
+  agentMtls?: AgentMtlsChannel;
 }
+
+/**
+ * POL-25 — everything the agent handler needs to run the mTLS channel policy. The `server` is the
+ * dedicated TLS listener (already listening, `requestCert` + `rejectUnauthorized` against the
+ * deployment's own CA), so any socket that reaches its `upgrade` event has ALREADY presented a
+ * valid client cert — that is the transport-layer rejection the ticket demands. This context also
+ * drives cert ISSUANCE on the plain channel: an authenticated hello carrying a CSR gets it signed
+ * and receives the bundle in `server/enrolled.mtls`.
+ */
+export interface AgentMtlsChannel {
+  /** The dedicated TLS listener; serves ONLY /agent (any other path is destroyed). */
+  server: HttpsServer;
+  /** The deployment CA (PEM) agents pin — sent inside every issued bundle. */
+  caPem: string;
+  /** Sign an agent CSR into a client cert, CN forced to `machineId`. Throws on a bad CSR. */
+  signCsr(csrPem: string, machineId: string): Promise<string>;
+  /** What `server/enrolled.mtls` advertises: the listener port (+ optional full URL override). */
+  advertise: { port: number; url?: string };
+  /**
+   * When true the PLAIN /agent channel never admits a machine: it authenticates, issues the cert
+   * bundle, answers, and CLOSES — every live agent session must ride the mTLS listener. When false
+   * (roll-out mode) the plain channel keeps admitting while the fleet picks its certs up.
+   */
+  require: boolean;
+}
+
+/** Which listener an agent socket arrived on (POL-25). */
+type AgentChannel = "plain" | "mtls";
 
 /** The CDP WebSocket path the proxied DevTools frontend connects back on (see devtools-routes.ts):
  *  /api/v1/screens/<screenId>/devtools/<box path>. Returns null for any other path. */
@@ -91,7 +123,7 @@ export function parseDevtoolsUpgradePath(pathname: string): { screenId: string; 
 }
 
 export function attachWebSockets(deps: WsDeps): ShellRelay {
-  const { server, control, enrollment, auth, hub, agentHub, adminHub, presence, broadcaster, activity, capture, devtoolsRelay, log, allowedOrigins } =
+  const { server, control, enrollment, auth, hub, agentHub, adminHub, presence, broadcaster, activity, capture, devtoolsRelay, log, allowedOrigins, agentMtls } =
     deps;
 
   // The remote-shell relay (POL-59) bridges an operator's /admin socket to a machine's /agent socket.
@@ -114,7 +146,7 @@ export function attachWebSockets(deps: WsDeps): ShellRelay {
 
     if (pathname === "/agent") {
       // Device channel — authenticated via enrollment credentials on agent/hello, NOT a user session.
-      agentWss.handleUpgrade(req, socket, head, (ws) => agentWss.emit("connection", ws, req));
+      agentWss.handleUpgrade(req, socket, head, (ws) => agentWss.emit("connection", ws, "plain"));
     } else if (pathname === "/player") {
       // Device channel — players carry no user session; not gated.
       playerWss.handleUpgrade(req, socket, head, (ws) => playerWss.emit("connection", ws, req));
@@ -197,9 +229,29 @@ export function attachWebSockets(deps: WsDeps): ShellRelay {
     }
   });
 
-  agentWss.on("connection", (ws: WebSocket) =>
-    handleAgent(ws, control, enrollment, agentHub, presence, broadcaster, activity, capture, shellRelay, devtoolsRelay, log),
+  agentWss.on("connection", (ws: WebSocket, channel: AgentChannel) =>
+    handleAgent(ws, channel ?? "plain", agentMtls, control, enrollment, agentHub, presence, broadcaster, activity, capture, shellRelay, devtoolsRelay, log),
   );
+
+  // POL-25 — the mTLS agent channel: a second listener whose TLS handshake already rejected any
+  // client without a cert chaining to the deployment's CA. Only /agent lives here; the handler is
+  // the SAME one as the plain channel, marked `mtls` so the require-mode policy can tell them apart.
+  if (agentMtls) {
+    agentMtls.server.on("upgrade", (req, socket, head) => {
+      let pathname: string;
+      try {
+        pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+      } catch {
+        socket.destroy();
+        return;
+      }
+      if (pathname !== "/agent") {
+        socket.destroy();
+        return;
+      }
+      agentWss.handleUpgrade(req, socket, head, (ws) => agentWss.emit("connection", ws, "mtls"));
+    });
+  }
   playerWss.on("connection", (ws: WebSocket) =>
     handlePlayer(ws, control, hub, presence, broadcaster, activity, log),
   );
@@ -212,6 +264,8 @@ export function attachWebSockets(deps: WsDeps): ShellRelay {
 
 function handleAgent(
   ws: WebSocket,
+  channel: AgentChannel,
+  agentMtls: AgentMtlsChannel | undefined,
   control: ControlPlane,
   enrollment: Enrollment,
   agentHub: AgentHub,
@@ -223,7 +277,7 @@ function handleAgent(
   devtoolsRelay: DevtoolsRelay,
   log: FastifyBaseLogger,
 ): void {
-  log.info({ event: "agent.connected" }, "agent socket opened");
+  log.info({ event: "agent.connected", channel }, "agent socket opened");
   let machineId: string | null = null;
   let presenceMarked = false;
   let hubRegistered = false;
@@ -240,12 +294,18 @@ function handleAgent(
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(apply));
   }
 
-  function sendEnrolled(targetMachineId: string, credential: string, status: "pending" | "approved"): void {
+  function sendEnrolled(
+    targetMachineId: string,
+    credential: string | undefined,
+    status: "pending" | "approved",
+    mtls?: MtlsBundle,
+  ): void {
     const enrolled = ServerToAgentEnrolled.parse({
       t: "server/enrolled",
       machineId: targetMachineId,
-      credential,
+      ...(credential ? { credential } : {}),
       status,
+      ...(mtls ? { mtls } : {}),
     });
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(enrolled));
   }
@@ -289,16 +349,45 @@ function handleAgent(
       return;
     }
 
+    // POL-25 — cert issuance rides the 2b seam: ANY hello that authenticated (we are past the reject
+    // path, so it presented a valid token or credential — or arrived over the mTLS listener, whose
+    // handshake already proved a fleet cert) gets its CSR signed. The CSR's subject is ignored; the
+    // CN is forced to the machine id. A malformed CSR issues nothing and is never fatal. In OPEN
+    // mode this hands a cert to any device that asks — open mode is explicitly the low-trust dev
+    // default and its boot banner already owns that trade-off.
+    let mtlsBundle: MtlsBundle | undefined;
+    if (agentMtls && msg.csrPem) {
+      try {
+        const certPem = await agentMtls.signCsr(msg.csrPem, msg.machineId);
+        mtlsBundle = {
+          caPem: agentMtls.caPem,
+          certPem,
+          port: agentMtls.advertise.port,
+          ...(agentMtls.advertise.url ? { url: agentMtls.advertise.url } : {}),
+        };
+      } catch (err) {
+        log.warn(
+          { event: "agent.csr.invalid", machineId: msg.machineId, err: String(err) },
+          "could not sign agent CSR — no client cert issued",
+        );
+      }
+    }
+
+    // POL-25 require mode: the PLAIN channel exists only to authenticate + hand out cert bundles.
+    // Nothing on it is admitted, marked online, or kept open past this hello's answer — every live
+    // agent session must arrive through the mTLS listener.
+    const issueOnly = channel === "plain" && agentMtls?.require === true;
+
     // From here the connection is kept: mark presence + register the socket by machineId.
     machineId = msg.machineId;
-    if (!hubRegistered) {
+    if (!issueOnly && !hubRegistered) {
       agentHub.add(machineId, ws);
       hubRegistered = true;
     }
     // True online edge: emit ONE "connected" line only when the machine goes 0→online (a second
     // overlapping agent socket for the same machine doesn't re-announce).
     let cameOnline = false;
-    if (!presenceMarked) {
+    if (!issueOnly && !presenceMarked) {
       cameOnline = !presence.isMachineOnline(machineId);
       presence.agentConnected(machineId);
       presenceMarked = true;
@@ -321,16 +410,34 @@ function handleAgent(
           // re-issued (token re-enrol of an approved machine), persist its hash + announce it first.
           const credentialHash = decision.credential ? hashCredential(decision.credential) : undefined;
           const { changed, assignments } = await control.registerMachine(input, credentialHash);
-          if (decision.credential) {
-            sendEnrolled(msg.machineId, decision.credential, "approved");
+          if (decision.credential || mtlsBundle) {
+            sendEnrolled(msg.machineId, decision.credential, "approved", mtlsBundle);
+          }
+          if (issueOnly) {
+            // POL-25 require mode: an admissible machine on the PLAIN channel gets its answer (and
+            // its cert bundle, when it asked) but never a `server/apply` — it must come back through
+            // the mTLS listener, where the handshake itself is the credential check the ticket wants.
+            log.info(
+              {
+                event: "agent.mtls.issue_only",
+                machineId: msg.machineId,
+                decision: decision.kind,
+                issuedCert: Boolean(mtlsBundle),
+              },
+              "mTLS required — answered on the plain channel without admitting; closing so the agent reconnects over mTLS",
+            );
+            ws.close();
+            break;
           }
           sendApply(msg.machineId, assignments);
           log.info(
             {
               event: "agent.hello",
               mode: enrollment.open ? "open" : "gated",
+              channel,
               decision: decision.kind,
               reissued: Boolean(decision.credential),
+              issuedCert: Boolean(mtlsBundle),
               machineId: msg.machineId,
               agentVersion: msg.agentVersion,
               backend: msg.backend,
@@ -349,17 +456,19 @@ function handleAgent(
           // hash, hand the agent its durable credential, then park it pending. No screens, no apply.
           const credential = decision.credential ?? "";
           await control.enrollPending(input, hashCredential(credential));
-          sendEnrolled(msg.machineId, credential, "pending");
+          sendEnrolled(msg.machineId, credential, "pending", mtlsBundle);
           sendPending(decision.reason, msg.machineId);
           log.info(
             {
               event: "agent.enrolled",
               machineId: msg.machineId,
               outputs: msg.outputs.length,
+              issuedCert: Boolean(mtlsBundle),
               status: "pending",
             },
             "new machine enrolled — awaiting operator approval",
           );
+          if (issueOnly) ws.close();
           break;
         }
 
@@ -372,9 +481,10 @@ function handleAgent(
               hashCredential(decision.credential),
               msg.outputs,
             );
-            sendEnrolled(msg.machineId, decision.credential, "pending");
+            sendEnrolled(msg.machineId, decision.credential, "pending", mtlsBundle);
           } else {
             await control.touchMachine(msg.machineId, msg.outputs);
+            if (mtlsBundle) sendEnrolled(msg.machineId, undefined, "pending", mtlsBundle);
           }
           sendPending(decision.reason, msg.machineId);
           log.info(
@@ -382,9 +492,13 @@ function handleAgent(
               event: "agent.pending",
               machineId: msg.machineId,
               reissued: Boolean(decision.credential),
+              issuedCert: Boolean(mtlsBundle),
             },
             "agent pending — awaiting operator approval",
           );
+          // POL-25 require mode: a pending machine parks on the mTLS channel, not here — close so it
+          // reconnects with its fresh bundle (the pending board re-appears over the mTLS socket).
+          if (issueOnly) ws.close();
           break;
         }
       }

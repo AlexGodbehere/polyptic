@@ -22,6 +22,7 @@ import { AuthService, authConfigFromEnv } from "./auth-local";
 import { registerAuthRoutes } from "./auth-routes";
 import { CaptureCoordinator, ThumbnailStore } from "./capture";
 import { Enrollment } from "./enroll";
+import { AgentMtls } from "./mtls";
 import { AgentHub, PlayerHub } from "./hub";
 import { MediaStore, registerMediaServeRoute } from "./media";
 import { DEFAULT_RETAIN_BUILDS, ImageUpdates } from "./image-updates";
@@ -70,6 +71,23 @@ const CORS_ORIGIN = (
   .map((o) => o.trim())
   .filter((o) => o.length > 0);
 const PLAYER_BASE_URL = process.env.PLAYER_BASE_URL ?? "http://localhost:5173";
+
+// ── mTLS agent identity (POL-25): a dedicated TLS listener for the /agent channel. ──
+// AGENT_MTLS_PORT enables it: enrolment then issues per-machine client certs (CN = machine id,
+// signed by the deployment's own persisted CA) and agents reconnect over wss:// on this port, where
+// a wrong/absent cert fails the TLS HANDSHAKE — rejected before any app code. AGENT_MTLS_REQUIRE=1
+// additionally stops the PLAIN /agent channel from admitting anyone (it only authenticates + issues
+// bundles), which is the enforced end-state; leave it unset while a live fleet picks up its certs.
+const AGENT_MTLS_PORT = Number(process.env.AGENT_MTLS_PORT ?? 0);
+const AGENT_MTLS_REQUIRE = /^(1|true|yes)$/i.test(process.env.AGENT_MTLS_REQUIRE?.trim() ?? "");
+// Full wss:// URL override for deployments where the mTLS endpoint is not same-host:port from the
+// agent's point of view (e.g. a separate LoadBalancer in Kubernetes). Advertised verbatim.
+const AGENT_MTLS_PUBLIC_URL = process.env.AGENT_MTLS_PUBLIC_URL?.trim() || undefined;
+// Extra SANs for the listener's server cert — every hostname/IP agents may dial it by.
+const AGENT_MTLS_SANS = (process.env.AGENT_MTLS_SANS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
 
 // ── Media (Phase 7): uploads land on a disk VOLUME (MEDIA_DIR) and are served over plain HTTP. ──
 // MEDIA_DIR defaults to ./media in dev (a mounted volume / /var/lib/polyptic/media in prod). The serve
@@ -203,6 +221,57 @@ registerAuthRoutes(fastify, auth, enrollment);
 // the agent WS — the POL-59 shell pattern. Built before the WS channels (agent frames route into it)
 // and handed to REST so disarming a screen closes its live sessions instantly.
 const devtoolsRelay = new DevtoolsRelay(agentHub, control, presence, activity, fastify.log);
+
+// ── mTLS agent channel (POL-25): CA + dedicated TLS listener + the boot self-test. ──
+// The self-test is load-bearing, not paranoia: Bun ≤ 1.2 implemented `requestCert` as PRESENCE-only
+// (any cert from any CA passed the handshake, measured on 1.2.2). A server that cannot actually
+// verify client certs must refuse to offer mTLS rather than serve a fake gate — so we dial our own
+// listener with a rogue-CA cert and with no cert and demand both handshakes FAIL before going up.
+let agentMtlsChannel: import("./ws").AgentMtlsChannel | undefined;
+if (Number.isFinite(AGENT_MTLS_PORT) && AGENT_MTLS_PORT > 0) {
+  const sanHosts = [...AGENT_MTLS_SANS];
+  for (const url of [AGENT_MTLS_PUBLIC_URL, process.env.PUBLIC_BASE_URL?.trim()]) {
+    if (!url) continue;
+    try {
+      sanHosts.push(new URL(url).hostname);
+    } catch {
+      // Not a parseable URL — the SANs env is the explicit escape hatch.
+    }
+  }
+  const mtls = await AgentMtls.init(
+    store,
+    { port: AGENT_MTLS_PORT, publicUrl: AGENT_MTLS_PUBLIC_URL, sanHosts },
+    fastify.log,
+  );
+  const listener = mtls.createListener();
+  await new Promise<void>((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(AGENT_MTLS_PORT, HOST, () => resolve());
+  });
+  const selfTestHost = HOST === "0.0.0.0" || HOST === "::" ? "127.0.0.1" : HOST;
+  const verdict = await mtls.selfTest(AGENT_MTLS_PORT, selfTestHost);
+  if (!verdict.safe) {
+    fastify.log.error(
+      { event: "mtls.selftest.failed", reason: verdict.reason },
+      `FATAL: the mTLS listener failed its client-cert verification self-test — ${verdict.reason}. ` +
+        "Refusing to start rather than serve an agent channel that LOOKS mutually authenticated but is not.",
+    );
+    process.exit(1);
+  }
+  agentMtlsChannel = {
+    server: listener,
+    caPem: mtls.caPem,
+    signCsr: (csrPem, machineId) => mtls.signCsr(csrPem, machineId),
+    advertise: { port: AGENT_MTLS_PORT, ...(AGENT_MTLS_PUBLIC_URL ? { url: AGENT_MTLS_PUBLIC_URL } : {}) },
+    require: AGENT_MTLS_REQUIRE,
+  };
+  fastify.log.info(
+    { event: "mtls.listening", port: AGENT_MTLS_PORT, require: AGENT_MTLS_REQUIRE, publicUrl: AGENT_MTLS_PUBLIC_URL },
+    `mTLS agent channel up on :${AGENT_MTLS_PORT} (self-test passed: no-cert and rogue-CA handshakes rejected)` +
+      (AGENT_MTLS_REQUIRE ? " — REQUIRED: the plain /agent channel only enrols + issues certs" : " — roll-out mode: the plain /agent channel still admits"),
+  );
+}
+
 // The WS channels attach first so the remote-shell relay (POL-59) exists before REST — the
 // arm/disarm endpoint closes a box's live sessions the instant it is disarmed.
 const shellRelay = attachWebSockets({
@@ -220,6 +289,7 @@ const shellRelay = attachWebSockets({
   devtoolsRelay,
   log: fastify.log,
   allowedOrigins: CORS_ORIGIN,
+  agentMtls: agentMtlsChannel,
 });
 shellRelay.startArmingSweep(SHELL_ARM_TTL_MS);
 registerRestRoutes(
@@ -433,6 +503,7 @@ async function shutdown(signal: string): Promise<void> {
   fastify.log.info({ event: "server.shutdown", signal }, "shutting down");
   capture.stop();
   tokens.stop();
+  agentMtlsChannel?.server.close();
   try {
     await fastify.close();
   } catch (err) {
@@ -460,6 +531,7 @@ try {
       playerBaseUrl: PLAYER_BASE_URL,
       store: storeKind,
       enrollment: enrollment.open ? "open" : "gated",
+      agentMtls: agentMtlsChannel ? `:${AGENT_MTLS_PORT}${AGENT_MTLS_REQUIRE ? " (required)" : ""}` : "off",
       revision: control.state.revision,
       screens: control.getScreens().length,
       machines: control.getMachines().length,

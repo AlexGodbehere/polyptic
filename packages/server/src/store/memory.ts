@@ -15,6 +15,7 @@ import type {
   PersistedDisplaySettings,
   PersistedImageRollout,
   PersistedMachine,
+  PersistedMtlsCa,
   PersistedMural,
   PersistedPlacement,
   PersistedScene,
@@ -60,6 +61,8 @@ export class MemoryStore implements Store {
   private readonly sessions = new Map<string, PersistedSession>();
   /** The enrollment bootstrap (mode + token), seeded on first boot. */
   private bootstrap: PersistedBootstrap | undefined;
+  /** The mTLS agent CA (POL-25), generated on the first boot with AGENT_MTLS_PORT set. */
+  private mtlsCa: PersistedMtlsCa | undefined;
   /** Fleet-wide display settings (POL-6), undefined until first changed. */
   private displaySettings: PersistedDisplaySettings | undefined;
   private revision = 0;
@@ -318,6 +321,16 @@ export class MemoryStore implements Store {
 
   async setBootstrap(bootstrap: PersistedBootstrap): Promise<void> {
     this.bootstrap = clone(bootstrap);
+  }
+
+  // ── mTLS agent CA (POL-25) ───────────────────────────────────────────────────
+
+  async getMtlsCa(): Promise<PersistedMtlsCa | undefined> {
+    return this.mtlsCa ? clone(this.mtlsCa) : undefined;
+  }
+
+  async setMtlsCa(ca: PersistedMtlsCa): Promise<void> {
+    this.mtlsCa = clone(ca);
   }
 
   // ── Display settings (POL-6) ─────────────────────────────────────────────────
