@@ -835,8 +835,8 @@ async function onSignOut(): Promise<void> {
               <div class="step-body">
                 <div class="step-title">Optional: install the bootloader, then take the USB back</div>
                 <div class="step-text">
-                  At the boot menu choose <b>Install the Polyptic bootloader on this machine</b> and confirm. The screen
-                  then boots Polyptic on its own, and the same stick can walk down the rack.
+                  At the boot menu choose <b>Polyptic (Offload Bootloader)</b>. The screen then boots Polyptic on its
+                  own, and the same stick can walk down the rack.
                 </div>
                 <div class="step-aside">
                   <b>Nothing is erased.</b> This copies a signed 4 MB loader to the EFI partition and puts Polyptic first

@@ -3,9 +3,9 @@
 # not the OS) onto THIS box's existing EFI System Partition + make it the firmware's first boot option,
 # so it self-boots the identical HTTP flow on every power-on with no dongle attached. The pair is
 # Ubuntu's Microsoft-signed shim + the Canonical-signed network GRUB, the same chain as the dongle, so
-# Secure Boot stays ON. Triggered by `polyptic.offload=1` on the kernel cmdline (the "Yes, install it"
-# entry in the server's /boot/grub.cfg confirmation submenu). Runs from the booted live image via
-# polyptic-offload.service (ConditionKernelCommandLine=polyptic.offload=1).
+# Secure Boot stays ON. Triggered by `polyptic.offload=1` on the kernel cmdline, which the server's
+# /boot/grub.cfg tags onto its "Polyptic (Offload Bootloader)" entry. Runs from the booted live image
+# via polyptic-offload.service (ConditionKernelCommandLine=polyptic.offload=1).
 #
 # HARD RULE: never repartition, format, or wipe. This ONLY (a) drops shim+GRUB into our own subdir on
 # the EXISTING ESP, (b) writes the stage-1 config at paths it owns (refusing to touch a foreign file),
