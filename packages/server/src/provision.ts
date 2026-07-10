@@ -221,10 +221,11 @@ function bootKernelCmdline(httpBase: string, token: string | undefined): string 
  * commands are plain `linux`/`initrd` (noble's signed GRUB has no linuxefi). When the computed base is
  * https, http is emitted anyway: GRUB has no TLS, the boot depot is plain-HTTP by contract.
  *
- * POL-58: the install now sits behind a CONFIRMATION SUBMENU that defaults to "no". The operator who
- * hit this expected to be asked "are you sure you want to erase this disk?", and the honest answer —
- * Polyptic never erases anything — is exactly what is worth saying at the moment of choosing. GRUB
- * paints its menu over any `echo`, so the explanation has to live in the entry titles themselves.
+ * The menu is FLAT: three sibling entries, no submenu. A confirmation submenu was tried (POL-58) and
+ * reverted — it broke the very entry it guarded (see the `export` note below), and the reassurance it
+ * carried belongs in the console, where the operator reads it before walking to the box, not in a GRUB
+ * menu they are trying to get past. Offload is non-destructive by construction; nothing here needs a
+ * safety interlock.
  */
 export function buildBootGrubCfg(base: string, token: string | undefined): string {
   const hostPort = base.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
@@ -244,29 +245,25 @@ export function buildBootGrubCfg(base: string, token: string | undefined): strin
   lines.push(
     'if [ "$grub_cpu" = "x86_64" ]; then set arch=amd64; else set arch=arm64; fi',
     `set net=(http,${hostPort})`,
+    // `export` is LOAD-BEARING, not tidiness (POL-58). GRUB opens a fresh environment context for a
+    // `submenu` (`normal/menu.c`: `if (entry->submenu) grub_env_context_open()`), and ONLY exported
+    // variables cross a context boundary. A submenu wrapped around these entries therefore saw `$net`
+    // and `$arch` as empty and asked the firmware for `/dist/image//vmlinuz` — "file not found", on a
+    // box that had booted the identical top-level entry moments before. Exporting them makes the menu
+    // safe to nest; a plain top-level menuentry never opened a context and always worked.
+    "export arch",
+    "export net",
     "set timeout=5",
     "set default=live",
-    'menuentry "Boot Polyptic now (this machine is not touched)" --id live {',
+    'menuentry "Polyptic (Live)" --id live {',
     '  echo "Polyptic: streaming the $arch live image into RAM ..."',
     `  linux  $net/dist/image/$arch/vmlinuz ${cmdline}`,
     "  initrd $net/dist/image/$arch/initrd",
     "}",
-    // The confirmation gate. `default=cancel` means a stray Enter (or the 60s timeout, which reloads
-    // this menu and boots the wall) can never install anything; the operator has to choose "Yes".
-    'submenu "Install the Polyptic bootloader on this machine ..." --id install {',
-    "  set timeout=60",
-    "  set default=cancel",
-    '  menuentry "No - go back, change nothing (or press Escape)" --id cancel {',
-    "    configfile $net/boot/grub.cfg",
-    "  }",
-    '  menuentry "Yes - add Polyptic to the UEFI boot menu and boot it first from now on" --id offload {',
-    '    echo "Polyptic: installing the signed bootloader onto this machine\'s EFI partition ..."',
-    `    linux  $net/dist/image/$arch/vmlinuz ${cmdline} polyptic.offload=1`,
-    "    initrd $net/dist/image/$arch/initrd",
-    "  }",
-    '  menuentry "Nothing is erased: your disks, partitions and existing OS are left as they are" --id note-1 { true }',
-    '  menuentry "It copies a signed 4 MB loader to the EFI partition; the OS still streams from the network" --id note-2 { true }',
-    `  menuentry 'To undo: delete the "Polyptic Netboot" boot entry in your firmware setup' --id note-3 { true }`,
+    'menuentry "Polyptic (Offload Bootloader)" --id offload {',
+    '  echo "Polyptic: offload mode, the live image will install the loader, then keep booting ..."',
+    `  linux  $net/dist/image/$arch/vmlinuz ${cmdline} polyptic.offload=1`,
+    "  initrd $net/dist/image/$arch/initrd",
     "}",
     'menuentry "Polyptic (Debug Console)" --id debug {',
     '  echo "Polyptic: live boot + root shell on tty9 (Ctrl+Alt+F9) ..."',

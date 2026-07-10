@@ -270,22 +270,38 @@ describe("netboot: GET /boot/grub.cfg", () => {
   );
 
   test(
-    "installing the bootloader sits behind a confirmation submenu that defaults to NO (POL-58)",
+    "the menu is three flat entries with the names operators know, and no submenu",
     async () => {
       const body = await (await fetch(`${OPEN_BASE}/boot/grub.cfg`)).text();
-      // A single keypress must never install anything: the install lives inside a submenu whose
-      // default entry is the cancel entry (a stray Enter, or the timeout, boots the wall instead).
-      expect(body).toContain('submenu "Install the Polyptic bootloader on this machine ..." --id install');
-      const submenu = body.slice(body.indexOf("--id install"));
-      expect(submenu).toContain("set default=cancel");
-      expect(submenu.indexOf("--id cancel")).toBeLessThan(submenu.indexOf("--id offload"));
-      // The operator asked to be told what installing does. It does not erase; say so where they look.
-      expect(body).toContain("Nothing is erased");
-      expect(body).toContain("--id note-1");
-      // And the top-level entry that changes nothing says so too.
-      expect(body).toContain('menuentry "Boot Polyptic now (this machine is not touched)" --id live');
-      // Cancel re-sources the menu, so backing out lands you exactly where you started.
-      expect(submenu).toContain("configfile $net/boot/grub.cfg");
+      expect(body).toContain('menuentry "Polyptic (Live)" --id live');
+      expect(body).toContain('menuentry "Polyptic (Offload Bootloader)" --id offload');
+      expect(body).toContain('menuentry "Polyptic (Debug Console)" --id debug');
+      // A submenu opens a fresh GRUB environment context, which is what broke `$net`/`$arch` below.
+      expect(body).not.toContain("submenu ");
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
+    "`arch` and `net` are EXPORTED, so a nested entry can never resolve them to empty (POL-58)",
+    async () => {
+      const body = await (await fetch(`${OPEN_BASE}/boot/grub.cfg`)).text();
+      // GRUB opens a new env context for a `submenu` and copies only EXPORTED variables into it. A
+      // confirmation submenu once wrapped the offload entry, so `$net` and `$arch` came out empty and
+      // GRUB asked for `/dist/image//vmlinuz` — file not found, on a box whose live entry booted fine.
+      // Both are set before any entry, and both are exported.
+      const archSet = body.indexOf("set arch=amd64");
+      const exportArch = body.indexOf("export arch");
+      const exportNet = body.indexOf("export net");
+      const firstEntry = body.indexOf("menuentry ");
+      expect(archSet).toBeGreaterThan(-1);
+      expect(exportArch).toBeGreaterThan(archSet);
+      expect(exportNet).toBeGreaterThan(-1);
+      expect(exportArch).toBeLessThan(firstEntry);
+      expect(exportNet).toBeLessThan(firstEntry);
+      // And no entry may hardcode an arch into the artifact path — `$arch` is the only selector.
+      expect(body).not.toContain("/dist/image/amd64/vmlinuz");
+      expect(body).not.toContain("/dist/image//vmlinuz");
     },
     TEST_TIMEOUT,
   );

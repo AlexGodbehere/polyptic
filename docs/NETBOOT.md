@@ -49,7 +49,7 @@ curl -sI http://10.0.0.5:8080/dist/image/amd64/rootfs.squashfs | grep -i accept-
 
 **5. Make a box boot it**, pick **one**:
 
-- **USB dongle (simplest):** Console ▸ Settings ▸ Onboard Screens ▸ **Download bootloader**, then `sudo dd if=polyptic-boot.img of=/dev/sdX bs=4M` to a USB stick. The same stick boots amd64 **and** arm64 boxes. Plug it in, boot from USB with Secure Boot ON, and choose **boot now** or **install the bootloader** at the menu. See [The boot medium](#the-boot-medium-dongle-or-offload).
+- **USB dongle (simplest):** Console ▸ Settings ▸ Onboard Screens ▸ **Download bootloader**, then `sudo dd if=polyptic-boot.img of=/dev/sdX bs=4M` to a USB stick. The same stick boots amd64 **and** arm64 boxes. Plug it in, boot from USB with Secure Boot ON, and choose **Polyptic (Live)** or **Polyptic (Offload Bootloader)** at the menu. See [The boot medium](#the-boot-medium-dongle-or-offload).
 - **No medium, UEFI HTTP Boot:** point the box's firmware Boot URI at `http://10.0.0.5:8080/dist/boot/shimx64.efi` (arm64: `shimaa64.efi`). See [No medium at all](#no-medium-at-all-uefi-http-boot).
 - **No medium, site DHCP:** add one option-67 rule to the DHCP you already run. See [Site DHCP option 67](#site-dhcp-option-67-one-change-to-the-dhcp-you-already-run).
 
@@ -110,7 +110,7 @@ All in [`packages/server/src/provision.ts`](../packages/server/src/provision.ts)
 
 | Route | Gate | What |
 |---|---|---|
-| `GET /boot/grub.cfg` | **ungated** | The generated GRUB menu (boot now / install-the-bootloader, the latter behind a confirmation submenu). Bakes the control-plane base from the request `Host` and, in gated mode, the current enrolment token into the kernel cmdline. The box has no operator session at boot, so this is ungated. |
+| `GET /boot/grub.cfg` | **ungated** | The generated GRUB menu: `Polyptic (Live)` / `Polyptic (Offload Bootloader)` / `Polyptic (Debug Console)`, three flat entries. Bakes the control-plane base from the request `Host` and, in gated mode, the current enrolment token into the kernel cmdline. The box has no operator session at boot, so this is ungated. |
 | `POST /boot/report` | **token** | How a box's bootloader install went (POL-58) → one line in the Live Activity feed. The reporter is mid-boot with no agent session, hence not under `/api/v1`; in gated mode it must present the fleet enrolment token it netbooted with, in open mode it is ungated like the rest of the depot. Read-only against the registry, throttled, and the body can only produce one bounded line. |
 | `GET /grub/grub.cfg` (+ `/grub/x86_64-efi/grub.cfg`, `/grub/arm64-efi/grub.cfg`) | **ungated** | **Aliases of the same menu**, at the paths an HTTP-booted GRUB actually asks for: grubnet's baked-in prefix is `/grub`, resolved against the **server root** of the host it was fetched from. See [the appendix](#no-medium-at-all-uefi-http-boot). |
 | `GET /dist/image/:arch/{vmlinuz,initrd,rootfs.squashfs}` | **ungated** | The **active** live-image artifacts, streamed with real HTTP **Range** (206/416); the root image is hundreds of MB and streamed into RAM. |
@@ -239,7 +239,7 @@ Download it from **Console ▸ Settings ▸ Onboard Screens ▸ Download bootloa
 Plug it in and the server-side menu offers:
 
 - **Boot Polyptic now**, leave the USB in. The box is fully **diskless**; nothing whatsoever is written locally. Best for disposable / hot-swap panels.
-- **Install the Polyptic bootloader on this machine**, behind a confirmation submenu that defaults to *No*. It writes *just the signed shim + GRUB pair* (the pointer, not the OS) into the box's **existing EFI System Partition** under `EFI/polyptic/`, drops the same stage-1 config at the ESP's `/grub/<arch>-efi/grub.cfg` (and `/grub/grub.cfg` when that path is free), and makes a UEFI boot entry (`efibootmgr`, "Polyptic Netboot") the firmware's **first** boot option. Pull the USB and the box self-boots the identical HTTP flow forever, **Secure Boot still ON** (the installed loaders are the same signed binaries). One USB can walk a rack, installing on each box.
+- **Polyptic (Offload Bootloader)** writes *just the signed shim + GRUB pair* (the pointer, not the OS) into the box's **existing EFI System Partition** under `EFI/polyptic/`, drops the same stage-1 config at the ESP's `/grub/<arch>-efi/grub.cfg` (and `/grub/grub.cfg` when that path is free), and makes a UEFI boot entry (`efibootmgr`, "Polyptic Netboot") the firmware's **first** boot option. Pull the USB and the box self-boots the identical HTTP flow forever, **Secure Boot still ON** (the installed loaders are the same signed binaries). One USB can walk a rack, installing on each box.
 
 > **The dongle depends on the firmware bringing the NIC up (POL-39).** GRUB carries no NIC
 > drivers of its own — `efinet` can only use a card the firmware has already initialised. Most
@@ -433,9 +433,9 @@ whole root image into a RAM tmpfs.)
 - **Dongle flow:** attach `polyptic-boot.img` as a USB **disk** drive; the firmware boots it ahead
   of PXE, and the boot-order NIC is still initialised, so dongle-GRUB is online. Verified: ~30 s
   to content.
-- **Install-the-bootloader flow:** attach an additional VirtIO disk that has a GPT + FAT32 ESP, boot
-  the dongle, open the install submenu and confirm; the live boot writes the signed loaders + boot
-  entry on the disk, after which the box boots the same chain with the dongle removed.
+- **Offload flow:** attach an additional VirtIO disk that has a GPT + FAT32 ESP, boot the dongle and
+  pick **Polyptic (Offload Bootloader)**; the live boot writes the signed loaders + boot entry on the
+  disk, after which the box boots the same chain with the dongle removed.
   A VM's blank ESP exercises none of the firmware states that broke this on real hardware, which is
   what `deploy/live/test/offload.test.sh` is for: it drives the whole decision tree (removable media,
   several ESPs, a firmware that keeps the entry but refuses to reorder, one that forgets it, a
