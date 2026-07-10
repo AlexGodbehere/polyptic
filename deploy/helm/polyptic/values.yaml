@@ -243,6 +243,13 @@ netboot:
   # Mount path of the depot volume; IMAGE_DIST_DIR/BOOT_DIST_DIR derive from it
   # (<depotDir>/image and <depotDir>/boot).
   depotDir: /var/lib/polyptic/depot
+  # Build the downloadable boot medium (polyptic-boot.img + signed loaders) onto
+  # the depot via a post-install/post-upgrade hook Job, so the console's
+  # bootloader download works from minute one. Needs an address to bake
+  # (imageUpdates.bakeBase or ingressRoute.bootHost) and a persistent depot;
+  # without either the hook is skipped. The weekly full rebuild also (re)builds
+  # the medium, exactly as before — this hook just removes the day-0 wait.
+  autoBuildMedium: true
   persistence:
     # Back the depot with a PVC. The live image is rebuilt nightly/weekly and
     # must survive pod restarts — without persistence every restart would need a

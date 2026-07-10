@@ -208,15 +208,18 @@ server's node; RWX storage lifts that constraint. Finished Jobs are GC'd after
 RBAC (namespace-scoped, created by the chart): `jobs` create/get, `pods` list,
 `pods/log` get — no delete, no exec, no secrets.
 
-**Day-0 bootstrap:** the depot starts empty. Click **Full rebuild now** in
-Console ▸ Settings ▸ Image updates (or wait for Sunday) — the Job downloads the
-base ISO and publishes everything straight onto the depot volume: the netboot
-image, the **downloadable live ISO** (enrolment token baked in), and the
-**boot medium** with the signed loaders — so the Console ▸ Settings ▸ Netboot
-downloads are live with zero manual steps. The media bake
-`imageUpdates.bakeBase` as their control-plane address (defaults to
-`http://<ingressRoute.bootHost>`); without an address the Jobs publish only the
-netboot image. The nightly refresh keeps the live ISO in step with the payload.
+**Day-0 bootstrap:** the **boot medium** (signed loaders + `polyptic-boot.img`)
+is built automatically by a post-install/post-upgrade hook Job whenever the
+chart knows the address to bake (`imageUpdates.bakeBase`, defaulting to
+`http://<ingressRoute.bootHost>`) and the depot is persistent — the Console's
+bootloader download is live from minute one, and a `bootHost` change re-bakes
+it on the next `helm upgrade` (opt out: `netboot.autoBuildMedium=false`). The
+image depot itself starts empty: click **Full rebuild now** in Console ▸
+Settings (or wait for Sunday) — the Job builds the rootfs from `ubuntu-base`
+and publishes the netboot image plus the **downloadable live ISO** (enrolment
+token baked in) straight onto the depot volume. Without a bake address the
+Jobs publish only the netboot image. The nightly refresh keeps the live ISO in
+step with the payload.
 
 ## Dev workflow (local cluster)
 
