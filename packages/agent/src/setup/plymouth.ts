@@ -41,14 +41,38 @@ export const PLYMOUTHD_CONF_PATH = "/etc/plymouth/plymouthd.conf";
 export const PLYMOUTH_DRACUT_CONF_PATH = "/etc/dracut.conf.d/polyptic-splash.conf";
 
 /**
- * A dracut drop-in that force-bundles the given files into the initramfs.
+ * A dracut drop-in that force-bundles the given files into the initramfs, and puts the real KMS
+ * drivers in there alongside them.
  *
- * WHY (POL-7): dracut's `plymouth` module runs `plymouth-populate-initrd`, which only bundles the
- * *default* theme — and on Ubuntu 26.04 (no `plymouth-set-default-theme` helper, no `default.plymouth`
- * symlink) it silently resolves NO custom default and bundles only the text fallbacks. So our theme +
- * its `script` plugin never make it into the image and the splash falls back to the stock/console. We
- * bypass that entirely by naming the files in `install_items` so dracut copies them verbatim; plymouthd
- * (reading the bundled `plymouthd.conf` `Theme=`) then loads them at boot.
+ * WHY `install_items` (POL-7): dracut's `plymouth` module runs `plymouth-populate-initrd`, which only
+ * bundles the *default* theme — and on Ubuntu 26.04 (no `plymouth-set-default-theme` helper, no
+ * `default.plymouth` symlink) it silently resolves NO custom default and bundles only the text
+ * fallbacks. So our theme + its `script` plugin never make it into the image and the splash falls back
+ * to the stock/console. We bypass that entirely by naming the files in `install_items` so dracut copies
+ * them verbatim; plymouthd (reading the bundled `plymouthd.conf` `Theme=`) then loads them at boot.
+ *
+ * WHY `add_dracutmodules+=" drm "` (POL-53): without it the splash renders at the firmware's
+ * framebuffer resolution — commonly 1024×768 — and the panel upscales it, so a 1440p/4K wall shows a
+ * soft, blocky logo. The chain: Ubuntu's `plymouthd.defaults` sets `UseSimpledrm=1`; dracut's
+ * `plymouth` module reads that key and, when set, `depends()` on `simpledrm` INSTEAD of `drm`; the
+ * `drm` module's own `check()` returns 255, so nothing else ever pulls it in. `simpledrm` is built
+ * into Ubuntu's kernel (`CONFIG_DRM_SIMPLEDRM=y`) — a fixed-mode shim over whatever framebuffer the
+ * firmware left behind, which cannot mode-set — while i915/amdgpu/… are modules the initramfs then
+ * does not carry. So the console never leaves the firmware's mode, and by the time the real driver
+ * loads off the root filesystem, plymouth has already read `Window.GetWidth()` once and laid the
+ * whole splash out for the small framebuffer.
+ *
+ * Naming `drm` here puts the real KMS drivers in the initramfs; udev autoloads one by PCI modalias,
+ * plymouth drops the simpledrm renderer for a real DRM one
+ * (`create_devices_for_terminal_and_renderer_type` → `free_simpledrm_renderer`) and mode-sets the
+ * connector's PREFERRED mode — so the panel is already at its native resolution before plymouth
+ * starts.
+ *
+ * Cost: ~47 MiB of initramfs (73 → 120 MiB, measured on 26.04/amd64; ~13 MiB on arm64, which has no
+ * Intel/AMD graphics firmware), all of it GPU modules plus the firmware they declare. A driver whose
+ * firmware is outside the image's curated set simply fails to probe and the splash falls back to
+ * simpledrm exactly as it does today — `FULL_FIRMWARE=1` (see deploy/build-live-image.sh) ships the
+ * lot for hardware we did not anticipate.
  */
 export function plymouthDracutConf(includePaths: readonly string[]): string {
   return `# ${MANAGED}
@@ -56,6 +80,13 @@ export function plymouthDracutConf(includePaths: readonly string[]): string {
 # dracut's plymouth-populate-initrd does not reliably bundle a non-default theme on Ubuntu 26.04, so
 # we include the files explicitly; plymouthd loads them at boot via plymouthd.conf's Theme=.
 install_items+=" ${includePaths.join(" ")} "
+
+# Pull the real KMS drivers into the initramfs (POL-53). dracut's plymouth module depends on
+# 'simpledrm' rather than 'drm' whenever plymouthd.defaults says UseSimpledrm=1 (Ubuntu's default),
+# and 'drm' is never auto-detected — so without this line the only DRM driver in the initramfs is a
+# fixed-mode shim over the firmware's framebuffer, and the splash is stuck at ~1024x768 on any panel.
+# With a real driver loaded, plymouth mode-sets the connector's preferred (native) resolution.
+add_dracutmodules+=" drm "
 `;
 }
 

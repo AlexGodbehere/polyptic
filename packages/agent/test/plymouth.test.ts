@@ -65,6 +65,15 @@ describe("plymouthDracutConf — force the theme into the dracut initramfs", () 
     expect(conf).toContain("/x/script.so");
     expect(conf).toContain("/t/polyptic.plymouth");
   });
+
+  test("requests the drm module, so the splash is not stuck at the firmware's resolution (POL-53)", () => {
+    // Ubuntu's plymouthd.defaults sets UseSimpledrm=1, which makes dracut's plymouth module depend on
+    // `simpledrm` rather than `drm`; `drm` is never auto-detected. Without this line the initramfs
+    // carries no real KMS driver, plymouth composes the splash on the firmware's ~1024x768 framebuffer
+    // and a 1440p panel upscales the result. `+=` (not `=`) so we add to, not replace, dracut's set.
+    const conf = plymouthDracutConf(["/etc/plymouth/plymouthd.conf"]);
+    expect(conf).toMatch(/^add_dracutmodules\+=" *drm *"$/m);
+  });
 });
 
 describe("plymouthScript — must never hold an image-less sprite (plymouth 5.x segfault, POL-7)", () => {
