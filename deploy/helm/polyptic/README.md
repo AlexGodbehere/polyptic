@@ -150,7 +150,7 @@ On a Traefik cluster, prefer `ingressRoute.enabled=true` over the generic Ingres
   console/api across subdomains would break sign-in. Traefik proxies the
   WebSockets natively.
 - **`ingressRoute.bootHost`** (plain HTTP, `web`) — the boot depot only
-  (`/boot`, `/grub`, `/dist`, `/install`), because shim/GRUB/casper have no TLS
+  (`/boot`, `/grub`, `/dist`, `/install`), because shim and GRUB have no TLS
   stack. **This is the address you bake into boot media**:
 
 ```sh
@@ -161,10 +161,9 @@ POLYPTIC_BASE=http://boot.polyptic.example.com POLYPTIC_TOKEN=… BASE_ISO=… d
 Media bake their control-plane address at build time — dongles, offloaded disks,
 and live ISOs all go stale the moment a bare-IP server moves (see NETBOOT.md's
 troubleshooting section for the symptoms). A stable `bootHost` name ends that
-class of failure: the control plane can move freely behind the name. One caveat
-carried over from D47: GRUB resolves DNS fine, but casper's busybox `wget` is
-more reliable with IPs on some releases — verify a name-based boot on your
-target release before a fleet-wide rollout.
+class of failure: the control plane can move freely behind the name. (D47's caveat
+about the casper initrd's busybox `wget` preferring IPs to names retired with
+casper itself in D55: dracut's initramfs fetches the root image with `curl`.)
 
 ```sh
 helm upgrade --install polyptic deploy/helm/polyptic \
@@ -181,8 +180,8 @@ helm upgrade --install polyptic deploy/helm/polyptic \
 
 The server serves the netboot artifacts — the live image (`GET /dist/image/<arch>/…`)
 and the signed boot loaders (`GET /dist/boot/<file>`) — from a **depot volume**
-(`netboot.persistence`, PVC by default, `helm.sh/resource-policy: keep`). GRUB and
-casper speak **plain HTTP**: netbooting boxes must reach the server over `http://`
+(`netboot.persistence`, PVC by default, `helm.sh/resource-policy: keep`). shim and
+GRUB speak **plain HTTP**: netbooting boxes must reach the server over `http://`
 (a LoadBalancer/NodePort on the management LAN), not the HTTPS Ingress. Console and
 players keep using HTTPS; only the boot path is http-by-contract.
 

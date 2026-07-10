@@ -23,4 +23,4 @@ exec docker run --rm --privileged --platform "$PLATFORM" \
   -e "FORCE=${FORCE:-0}" \
   -v "$REPO_ROOT":/repo \
   "${DOCKER_IMAGE:-ubuntu:24.04}" \
-  bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq squashfs-tools rsync xorriso cpio zstd python3 >/dev/null 2>&1 && bash /repo/deploy/refresh-live-image.sh '"$ARCH"
+  bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq squashfs-tools zstd >/dev/null 2>&1 && bash /repo/deploy/refresh-live-image.sh '"$ARCH"

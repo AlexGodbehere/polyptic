@@ -14,8 +14,9 @@
  *      netbooted box compares it against its own /etc/polyptic/image-id every 5 minutes and
  *      reboots per policy (urgent → now, else the nightly window). A reboot IS the re-pull.
  *
- * The kernel stays pinned (D47): this pipeline rolls userspace fixes; a kernel bump is a full
- * rebuild from a newer base ISO (documented in NETBOOT.md).
+ * The kernel stays pinned during a refresh: this pipeline rolls userspace fixes; a kernel bump is a
+ * full rebuild (`build-live-image.sh`), which republishes vmlinuz + initrd too (documented in
+ * NETBOOT.md).
  */
 import { spawn } from "node:child_process";
 import { copyFile, link, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
@@ -80,23 +81,25 @@ export interface ArchBuild extends ArchManifest {
 
 /** The artifacts a build owns. The first four are what the netboot chain streams; the live ISO is
  *  the standalone bootable alternative (D49) and is absent unless `build-live-iso.sh` ran. */
-const BUILD_ARTIFACTS = ["polyptic.iso", "vmlinuz", "initrd", "SHA256SUMS"] as const;
+const BUILD_ARTIFACTS = ["rootfs.squashfs", "vmlinuz", "initrd", "SHA256SUMS"] as const;
 const LIVE_ISO = "polyptic-live.iso";
+/** The artifact whose presence *defines* a build directory, and whose mtime is its build time. */
+const BUILD_PAYLOAD = "rootfs.squashfs";
 
 /**
  * Which artifacts may be HARDLINKED between the arch root and a build directory, and which must be
  * copied. The distinction is not about size, it is about how the build scripts rewrite them:
  *
- *  - The two ISOs are always replaced by `mv`/`rm`+create, which allocates a NEW inode. Old builds
- *    keep the one they hold, so sharing is safe — and these are the multi-GB files, so sharing is
- *    the whole point of the layout.
+ *  - `rootfs.squashfs` and the live ISO are always replaced by `mv`/`rm`+create, which allocates a
+ *    NEW inode. Old builds keep the one they hold, so sharing is safe — and these are the big
+ *    files, so sharing is the whole point of the layout.
  *  - `SHA256SUMS` is written with shell `>` (`refresh-live-image.sh`), and `vmlinuz`/`initrd` with
  *    `cp`. Both TRUNCATE THE EXISTING INODE IN PLACE, which through a hardlink would silently
  *    rewrite a retained build's artifact to the new build's bytes. So these are copied. It costs
- *    ~100 MB per retained build against ~1.5 GB shared, and it cannot be corrupted by a script
- *    that writes in place.
+ *    ~100 MB per retained build against the shared root image, and it cannot be corrupted by a
+ *    script that writes in place.
  */
-const SHAREABLE = new Set<string>([ "polyptic.iso", LIVE_ISO ]);
+const SHAREABLE = new Set<string>([ BUILD_PAYLOAD, LIVE_ISO ]);
 /** Default builds retained per arch before the oldest are pruned (IMAGE_RETAIN_BUILDS). */
 export const DEFAULT_RETAIN_BUILDS = 3;
 
@@ -177,7 +180,7 @@ export class ImageUpdates {
     let sha256: string | null = null;
     try {
       const sums = await readFile(join(dir, "SHA256SUMS"), "utf8");
-      const line = sums.split("\n").find((l) => l.trim().endsWith("polyptic.iso"));
+      const line = sums.split("\n").find((l) => l.trim().endsWith(BUILD_PAYLOAD));
       sha256 = line?.trim().split(/\s+/)[0] ?? null;
     } catch {
       // checksums are best-effort metadata; the imageId is the identity
@@ -199,11 +202,11 @@ export class ImageUpdates {
   //
   // Depot layout per arch:
   //
-  //   <arch>/builds/<imageId>/{polyptic.iso,vmlinuz,initrd,SHA256SUMS[,polyptic-live.iso]}
-  //   <arch>/{polyptic.iso,vmlinuz,initrd,SHA256SUMS[,polyptic-live.iso]}   hardlinks → ACTIVE build
-  //   <arch>/image-id.txt                                                   the active build's id
+  //   <arch>/builds/<imageId>/{rootfs.squashfs,vmlinuz,initrd,SHA256SUMS[,polyptic-live.iso]}
+  //   <arch>/{rootfs.squashfs,vmlinuz,initrd,SHA256SUMS[,polyptic-live.iso]}  hardlinks → ACTIVE build
+  //   <arch>/image-id.txt                                                     the active build's id
   //
-  // The arch root is exactly what it always was, so the boot chain (grub.cfg's `iso-url=`, the
+  // The arch root is exactly what it always was, so the boot chain (grub.cfg's `root=live:`, the
   // /dist/image/<arch>/… routes) and every already-written boot medium keep working untouched.
   // Hardlinking means the active build costs no extra bytes. ACTIVATING a build relinks the root
   // and rewrites image-id.txt, and because every netbooted box compares manifest.json's imageId
@@ -247,17 +250,19 @@ export class ImageUpdates {
     const out: ArchBuild[] = [];
     for (const imageId of names) {
       const dir = join(root, imageId);
-      // The payload ISO's mtime is the build time; the directory's changes when we prune siblings.
+      // The payload's mtime is the build time; the directory's changes when we prune siblings. A
+      // directory without one is a half-written build — or a pre-POL-35 `polyptic.iso` build, which
+      // the current boot cmdline cannot use anyway, so it correctly drops out of the history.
       let builtAt: string;
       try {
-        builtAt = (await stat(join(dir, "polyptic.iso"))).mtime.toISOString();
+        builtAt = (await stat(join(dir, BUILD_PAYLOAD))).mtime.toISOString();
       } catch {
         continue; // a half-written or hand-made directory — not a build
       }
       let sha256: string | null = null;
       try {
         const sums = await readFile(join(dir, "SHA256SUMS"), "utf8");
-        sha256 = sums.split("\n").find((l) => l.trim().endsWith("polyptic.iso"))?.trim().split(/\s+/)[0] ?? null;
+        sha256 = sums.split("\n").find((l) => l.trim().endsWith(BUILD_PAYLOAD))?.trim().split(/\s+/)[0] ?? null;
       } catch {
         // checksums are best-effort metadata; the imageId is the identity
       }
@@ -286,7 +291,7 @@ export class ImageUpdates {
     const m = await this.manifest(arch);
     if (!m) return;
     const dir = this.buildDir(arch, m.imageId);
-    if (await stat(join(dir, "polyptic.iso")).then(() => true, () => false)) return; // already adopted
+    if (await stat(join(dir, BUILD_PAYLOAD)).then(() => true, () => false)) return; // already adopted
     await mkdir(dir, { recursive: true });
     const root = join(this.imageDistDir, arch);
     for (const name of [...BUILD_ARTIFACTS, LIVE_ISO]) {
@@ -305,7 +310,7 @@ export class ImageUpdates {
   async activate(arch: string, imageId: string): Promise<ArchBuild[]> {
     if (!(ARCHES as readonly string[]).includes(arch)) throw new Error(`unknown architecture: ${arch}`);
     const dir = this.buildDir(arch, imageId);
-    if (!(await stat(join(dir, "polyptic.iso")).then((st) => st.isFile(), () => false))) {
+    if (!(await stat(join(dir, BUILD_PAYLOAD)).then((st) => st.isFile(), () => false))) {
       throw new Error(`no retained build ${imageId} for ${arch}`);
     }
     const root = join(this.imageDistDir, arch);

@@ -34,14 +34,14 @@ got2="$(POLYPTIC_DMI_UUID_FILE="$TMP/uuid_zero" POLYPTIC_NET_DIR="$TMP/net" POLY
 eq "mac hash stable across runs" "$got" "$got2"
 
 # 3) parse-cmdline extracts the namespaced keys, ignores everything else (incl. polyptic.base/offload).
-printf 'BOOT_IMAGE=/casper/vmlinuz boot=casper netboot=http polyptic.base=http://10.0.0.10 polyptic.server_url=ws://10.0.0.10/agent quiet polyptic.token=abc123 polyptic.offload=1 splash\n' > "$TMP/cmdline"
+printf 'BOOT_IMAGE=/vmlinuz root=live:http://10.0.0.10/dist/image/amd64/rootfs.squashfs rd.overlay=1 polyptic.base=http://10.0.0.10 polyptic.server_url=ws://10.0.0.10/agent quiet polyptic.token=abc123 polyptic.offload=1 splash\n' > "$TMP/cmdline"
 out="$(POLYPTIC_CMDLINE_FILE="$TMP/cmdline" sh "$LIB/parse-cmdline.sh")"
 eq "server_url" "POLYPTIC_SERVER_URL=ws://10.0.0.10/agent" "$(printf '%s\n' "$out" | grep '^POLYPTIC_SERVER_URL=')"
 eq "token"      "POLYPTIC_BOOTSTRAP_TOKEN=abc123"          "$(printf '%s\n' "$out" | grep '^POLYPTIC_BOOTSTRAP_TOKEN=')"
 eq "no base/offload leakage" "" "$(printf '%s\n' "$out" | grep -E '^POLYPTIC_(BASE|OFFLOAD)=' || true)"
 
 # 4) absent keys emit nothing (agent keeps its defaults).
-printf 'boot=casper quiet splash\n' > "$TMP/cmdline2"
+printf 'root=live:CDLABEL=POLYPTIC quiet splash\n' > "$TMP/cmdline2"
 eq "no keys -> empty" "" "$(POLYPTIC_CMDLINE_FILE="$TMP/cmdline2" sh "$LIB/parse-cmdline.sh")"
 
 # 5) write-agent-env composes the full env file atomically.

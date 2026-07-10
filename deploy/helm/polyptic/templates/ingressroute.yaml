@@ -5,7 +5,7 @@ Traefik IngressRoutes (POL-43). Two routers, two jobs:
    channels — ONE same-origin host on purpose (the operator session is an
    http-only cookie; subdomain-per-service would break it). Traefik proxies
    WebSockets natively, no extra config.
-2. PLAIN HTTP (`bootHost`, web): the boot depot only. GRUB and casper cannot
+2. PLAIN HTTP (`bootHost`, web): the boot depot only. GRUB and dracut cannot
    speak TLS — this router is the stable, bakeable address for boot media
    (POLYPTIC_BASE=http://<bootHost>), which is the durable fix for baked
    server IPs going stale when the control plane moves.
@@ -40,7 +40,7 @@ spec:
   {{- end }}
 {{- if .Values.ingressRoute.bootHost }}
 ---
-# The boot depot, plain HTTP by contract (shim/GRUB/casper have no TLS stack).
+# The boot depot, plain HTTP by contract (shim/GRUB have no TLS stack).
 # Path-scoped so nothing operator-facing is ever served over http. /agent IS
 # included: boot media bake this host as their base, and the kernel cmdline
 # derives the agent's WebSocket (ws://<base>/agent) from it — machine traffic,

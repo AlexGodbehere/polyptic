@@ -10,12 +10,13 @@
 #       scheduled refresh therefore rolls across the fleet the same night, invisibly.
 #
 # NETBOOT BOXES ONLY: a box booted from the live ISO / USB stick re-boots the SAME stale medium, so
-# rebooting it is at best pointless and at worst a loop. The `iso-url=` kernel arg exists exactly
-# and only on netboot cmdlines (casper streams the image from it), so it is the guard.
+# rebooting it is at best pointless and at worst a loop. `root=live:http…` is exactly and only what a
+# netboot cmdline carries (dracut streams the squashfs from that URL); an ISO boot carries
+# `root=live:CDLABEL=…`, so matching on the scheme is the guard.
 set -u
 
 CMDLINE="$(cat /proc/cmdline 2>/dev/null || true)"
-case " $CMDLINE " in *" iso-url="*|*" iso-url"*) : ;; *) exit 0 ;; esac   # not netboot → not ours
+case " $CMDLINE " in *" root=live:http"*) : ;; *) exit 0 ;; esac   # not netboot → not ours
 
 RUNNING="$(cat /etc/polyptic/image-id 2>/dev/null || true)"
 [ -n "$RUNNING" ] || exit 0   # pre-POL-41 image: no identity, nothing to compare

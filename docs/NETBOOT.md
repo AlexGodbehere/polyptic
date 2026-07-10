@@ -17,14 +17,13 @@ And it does both **without touching Secure Boot**: the first boot stage is Ubunt
 
 Follow these in order. Steps 1-3 run **once** (live image on a Linux build host, boot medium on any macOS or Linux machine, then the control plane); step 5 is per-box (or one config change for the whole fleet). The later sections drill into each piece.
 
-> **You need:** a **Linux amd64 build host** for the live image (`unsquashfs`/`mksquashfs`/`chroot`/loop-mounts + `xorriso`, with `sbsigntool` recommended for the signed-kernel guard, *not* macOS); **any macOS or Linux machine** for the boot medium (`curl`, `ar`, `tar`, `zstd`, `mtools`; no root, no compiler); a **casper live ISO** to base the image on (e.g. `ubuntu-24.04.x-live-server-amd64.iso`); a **running Polyptic control plane** the boxes can reach over **plain HTTP**; and the target boxes in **UEFI mode**. Secure Boot can stay **ON**.
+> **You need:** a **Linux build host** for the live image (`mksquashfs`/`chroot` + `curl`, with `sbsigntool` recommended for the signed-kernel guard, *not* macOS — or just run `deploy/full-rebuild-image-docker.sh`, which does it in a privileged container from anywhere); **any macOS or Linux machine** for the boot medium (`curl`, `ar`, `tar`, `zstd`, `mtools`; no root, no compiler); a **running Polyptic control plane** the boxes can reach over **plain HTTP**; and the target boxes in **UEFI mode**. Secure Boot can stay **ON**. The netboot image needs **no base ISO** — it is built from `ubuntu-base`; only the optional downloadable live ISO borrows a stock ISO's signed ESP.
 
 **1. Build the three artifacts** (from the repo root):
 
 ```bash
 deploy/build-agent.sh amd64                                           # → deploy/dist/polyptic-agent-amd64
-sudo BASE_ISO=/path/ubuntu-24.04.x-live-server-amd64.iso \
-     deploy/build-live-image.sh amd64                                 # Linux only → deploy/dist/image/amd64/{vmlinuz,initrd,polyptic.iso}
+sudo deploy/build-live-image.sh amd64                                 # Linux only → deploy/dist/image/amd64/{vmlinuz,initrd,rootfs.squashfs}
 POLYPTIC_BASE=http://10.0.0.5:8080 deploy/build-boot-medium.sh        # macOS or Linux → deploy/dist/boot/{polyptic-boot.img, shim*.efi, grub*.efi}
 ```
 
@@ -43,7 +42,7 @@ The server's boot banner logs which netboot artifacts it found (live image, boot
 
 ```bash
 curl -s http://10.0.0.5:8080/boot/grub.cfg      # → a GRUB menu with your base + arch selection baked in
-curl -sI http://10.0.0.5:8080/dist/image/amd64/polyptic.iso | grep -i accept-ranges   # → Accept-Ranges: bytes
+curl -sI http://10.0.0.5:8080/dist/image/amd64/rootfs.squashfs | grep -i accept-ranges   # → Accept-Ranges: bytes
 ```
 
 **4. (Optional but recommended) gate enrolment.** Set an enrolment token (Console ▸ Settings ▸ Enrolment token, or `POLYPTIC_BOOTSTRAP_TOKEN` on the server). Gated mode makes a new box wait for your approval; open mode auto-approves anything that netboots. Either way, `/boot/grub.cfg` bakes the current token in automatically.
@@ -62,8 +61,7 @@ curl -sI http://10.0.0.5:8080/dist/image/amd64/polyptic.iso | grep -i accept-ran
 - GRUB stops with **`bad shim signature`** → the depot's `vmlinuz` is not Canonical-signed (modified or corrupted); rebuild the live image, its signature guard should have refused this at build time.
 - A bare **`grub>` prompt** instead of a menu → GRUB could not find its config. Dongle: check `grub/grub.cfg` exists on the stick. HTTP Boot: check `GET /boot/grub.cfg` **and** `GET /grub/grub.cfg` both return 200.
 - Boots GRUB but stalls fetching → GRUB speaks minimal plain HTTP/1.1: **no TLS, no redirects, no chunked responses**, direct 200s with `Content-Length` only. Also expect the GRUB-stage kernel+initrd fetch to run at a few MB/s (tens of seconds); the big ISO fetch happens later, in Linux, at wire speed.
-- Downloads the ISO then dies in the initramfs → **not enough RAM**. casper pulls the whole ISO into a RAM tmpfs; budget roughly **2x the ISO size plus the running system's working set**.
-- Stalls at the casper download → the initrd's busybox wget speaks plain http (custom ports fine, no redirects) and the box may have no DNS; use the server's **IP** in `POLYPTIC_BASE`.
+- Downloads the root image then dies in the initramfs → **not enough RAM**. dracut pulls the whole squashfs into a RAM tmpfs; budget roughly **the image size plus the running system's working set** (the initrd raises the tmpfs cap to 90% and warns below the floor).
 - Boots the image but never appears in Machines → check the box reaches the control plane, and `journalctl -u polyptic-agent-env` (the identity/cmdline oneshot) on the box.
 - A box re-appears as a *new* PENDING machine each boot → its firmware reports no stable DMI UUID and the id fell back to a MAC hash that changed (multi-NIC); see [stable identity](#the-life-of-a-box-power-on-to-pixels).
 
@@ -84,8 +82,8 @@ GET /boot/grub.cfg   (control plane = BOOT DEPOT, ungated)
 kernel + initrd over HTTP → GRUB's shim_lock verifier checks the kernel's Canonical
         │  signature ON THE LOADED BUFFER before executing (HTTP or disk, same check)
         ▼
-casper `iso-url=…/polyptic.iso` wgets the WHOLE ISO into a RAM tmpfs, loop-mounts the squashfs
-        │  tmpfs overlay, NOTHING hits disk
+dracut `root=live:…/rootfs.squashfs` curls the WHOLE squashfs into a RAM tmpfs, loop-mounts it
+        │  under an overlayfs, NOTHING hits disk
         ▼
 Live Polyptic image boots
         │  polyptic-agent-env.service (root, Before=greetd):
@@ -113,18 +111,18 @@ All in [`packages/server/src/provision.ts`](../packages/server/src/provision.ts)
 |---|---|---|
 | `GET /boot/grub.cfg` | **ungated** | The generated GRUB menu (boot now / offload). Bakes the control-plane base from the request `Host` (like `/install`) and, in gated mode, the current enrolment token into the kernel cmdline. The box has no operator session at boot, so this is ungated. |
 | `GET /grub/grub.cfg` (+ `/grub/x86_64-efi/grub.cfg`, `/grub/arm64-efi/grub.cfg`) | **ungated** | **Aliases of the same menu**, at the paths an HTTP-booted GRUB actually asks for: grubnet's baked-in prefix is `/grub`, resolved against the **server root** of the host it was fetched from. See [the appendix](#no-medium-at-all-uefi-http-boot). |
-| `GET /dist/image/:arch/{vmlinuz,initrd,polyptic.iso}` | **ungated** | The **active** live-image artifacts, streamed with real HTTP **Range** (206/416); the ISO is hundreds of MB and streamed into RAM. |
+| `GET /dist/image/:arch/{vmlinuz,initrd,rootfs.squashfs}` | **ungated** | The **active** live-image artifacts, streamed with real HTTP **Range** (206/416); the root image is hundreds of MB and streamed into RAM. |
 | `GET /dist/image/:arch/builds/:imageId/:file` | **ungated** | The same artifacts for any **retained** build ([Build history](#build-history-and-rollback)). Same Range streaming, same secret-free content; `:imageId` is whitelisted so it cannot walk out of the depot. |
 | `GET /dist/boot/:file` | **ungated** | The universal boot medium `polyptic-boot.img`, plus the four signed loaders `shim{x64,aa64}.efi` / `grub{x64,aa64}.efi` (fetched by the offload flow and UEFI HTTP Boot). All **tokenless**, so ungated like `/dist/agent`. |
 | `GET /api/v1/settings/netboot` | **gated** | Operator-facing, secret-free `NetbootInfo{baseUrl, mode, bootConfigUrl, bootMediumUrl}` that drives the Console ▸ Settings ▸ Onboard Screens card. |
 | `POST /api/v1/settings/image/activate` | **gated** | Make a retained build the active one — the fleet **rollback** ([Build history](#build-history-and-rollback)). |
 
-**The boot depot is plain HTTP, by contract.** Neither GRUB's HTTP client nor casper's busybox wget can do TLS, redirects, or chunked encoding; every boot asset must be a direct `200` with a `Content-Length` (the depot also tolerates shim's double-slash request shape, see [the appendix](#no-medium-at-all-uefi-http-boot)). This is deliberate, not an oversight, and it does not weaken the signature chain (the kernel is verified after download, whatever carried it). Treat the depot like any provisioning service: keep it on the LAN / management VLAN the boxes live on. The only secret in the whole flow is the enrolment token, and a leaked token **cannot self-admit** a box, a new machine lands PENDING until an operator approves it; regenerating the token re-keys the fleet (see [Ownership](#ownership-keys-and-rotation)). If operators reach the control plane over HTTPS via a proxy, the boxes still need a plain-HTTP path to these routes.
+**The boot depot is plain HTTP, by contract.** GRUB's HTTP client cannot do TLS, redirects, or chunked encoding; every asset GRUB fetches must be a direct `200` with a `Content-Length` (the depot also tolerates shim's double-slash request shape, see [the appendix](#no-medium-at-all-uefi-http-boot)). The *root image* is fetched later, by curl inside the initramfs, which is far less fussy — but the depot stays plain-HTTP end to end so one address works for the whole chain. This is deliberate, not an oversight, and it does not weaken the signature chain (the kernel is verified after download, whatever carried it). Treat the depot like any provisioning service: keep it on the LAN / management VLAN the boxes live on. The only secret in the whole flow is the enrolment token, and a leaked token **cannot self-admit** a box, a new machine lands PENDING until an operator approves it; regenerating the token re-keys the fleet (see [Ownership](#ownership-keys-and-rotation)). If operators reach the control plane over HTTPS via a proxy, the boxes still need a plain-HTTP path to these routes.
 
 **Serving the artifacts.** Point two env vars at the built directories (they default to `deploy/dist/image` and `deploy/dist/boot` relative to the repo):
 
 ```
-IMAGE_DIST_DIR=/srv/polyptic/image     # holds <arch>/{vmlinuz,initrd,polyptic.iso}
+IMAGE_DIST_DIR=/srv/polyptic/image     # holds <arch>/{vmlinuz,initrd,rootfs.squashfs}
 BOOT_DIST_DIR=/srv/polyptic/boot       # holds polyptic-boot.img + shim{x64,aa64}.efi + grub{x64,aa64}.efi
 ```
 
@@ -136,26 +134,26 @@ The images are large, mount a volume rather than baking them into the server ima
 
 ### The live image (Linux build host)
 
-> **This build cannot run on macOS.** It needs `unsquashfs`/`mksquashfs`/`chroot`/loop-mounts plus `xorriso` (the ISO wrapper); install `sbsigntool` too so the signed-kernel guard uses the real signature parser. The **pure identity layer** in `deploy/live/` *is* verifiable anywhere: `sh deploy/live/test/identity.test.sh` (also run by `bun test packages/e2e/netboot-identity.test.ts`).
+> **This build cannot run on macOS.** It needs `chroot` + `mksquashfs`; install `sbsigntool` too so the signed-kernel guard uses the real signature parser. `deploy/full-rebuild-image-docker.sh <arch>` runs it in a privileged Linux container, so a Mac can drive it. The **pure identity layer** in `deploy/live/` *is* verifiable anywhere: `sh deploy/live/test/identity.test.sh` (also run by `bun test packages/e2e/netboot-identity.test.ts`).
 
 ```bash
 # 1) the agent binary (seeds the image + the existing depot)
 deploy/build-agent.sh amd64
 
-# 2) the live image → deploy/dist/image/amd64/{vmlinuz,initrd,polyptic.iso} (+ SHA256SUMS)
-#    Reuses the SAME `polyptic-agent setup` substrate; needs a casper live ISO as the base.
-sudo BASE_ISO=/path/ubuntu-24.04.x-live-server-amd64.iso deploy/build-live-image.sh amd64
+# 2) the live image → deploy/dist/image/amd64/{vmlinuz,initrd,rootfs.squashfs} (+ SHA256SUMS)
+#    No base ISO: the rootfs is built up from ubuntu-base, then the SAME `polyptic-agent setup`
+#    substrate is installed into it.
+sudo deploy/build-live-image.sh amd64
 ```
 
-What the build guarantees, and why:
+The image is built **up from `ubuntu-base`**, not trimmed down from Ubuntu's live-server squashfs (POL-35/[D55](DECISIONS.md)). apt installs the kernel, dracut, a curated firmware set and the substrate; `dracut` then builds the initramfs against that same kernel's modules. What the build guarantees, and why:
 
-- **The kernel ships exactly as Canonical signed it.** `vmlinuz` is a byte-identical copy of the base ISO's kernel, which is a Canonical-signed EFI PE; the build **fails** if the signature is missing, because under Secure Boot GRUB would refuse an unsigned kernel at boot with `bad shim signature`.
-- **The kernel never drifts from its modules.** The exact kernel package *and* the metapackages are held (`apt-mark hold`) so no apt operation inside the image can move the ABI away from the initrd + `/lib/modules` it shipped with, the classic netboot footgun.
-- **The root image is wrapped in `polyptic.iso`.** casper's netboot mechanism is `iso-url=<url ending .iso>`: the initramfs wgets the **whole ISO into RAM** and loop-mounts the squashfs inside it. (The `netboot=http fetch=` form floating around old guides does not exist in casper 20.04 through 26.04.) The wrapper is minimal, just the squashfs plus casper's metadata.
-- **RAM sizing:** because the ISO lands in a tmpfs (capped at about half of RAM by default), a box needs roughly **2x the ISO size plus the running system's working set**. Keep the image lean.
-- The default kiosk browser for the netboot image is **cog** (WPE): Ubuntu's Chromium is snap-only and unreliable inside a casper overlay (`BROWSER=chromium` overrides).
-
-**26.04 / dracut outlook.** Ubuntu 26.04's own live ISOs still ship casper + initramfs-tools, so this flow holds as-is. When Ubuntu's live images move to dracut-live, the cmdline mechanism changes from casper's `iso-url=` to dracut's `root=live:<url>` (which fetches a bare squashfs, no ISO wrapper); that migration is a scoped follow-up, and the depot side is unchanged either way.
+- **The kernel ships exactly as Canonical signed it.** `vmlinuz` is the chroot's own `/boot/vmlinuz-<kver>`, the Canonical-signed EFI PE from the `linux-signed` source — the identical binary the live-server ISO carries, delivered by apt instead of by ISO. The build **fails** if the signature is missing, because under Secure Boot GRUB would refuse an unsigned kernel at boot with `bad shim signature`.
+- **The kernel cannot drift from its modules.** Kernel, `/lib/modules` and `initrd` all come out of **one apt transaction**, so the old `apt-mark hold` gymnastics — the classic netboot footgun — are structurally gone rather than defended against.
+- **The root image is a bare `rootfs.squashfs`.** dracut's netboot mechanism is `root=live:<url>`: `livenet` curls the squashfs into the initramfs tmpfs and `dmsquash-live` loop-mounts it under an overlayfs. No ISO wrapper, no `xorriso`, no casper metadata.
+- **Firmware is curated, not complete.** 26.04 splits `linux-firmware` into per-vendor packages; the image ships `linux-firmware-minimal` plus the two GPU vendors and Realtek NICs. Note that `linux-image-generic` **Depends** on the full `linux-firmware` (~600 MB) — which `--no-install-recommends` cannot decline — so the build installs the *concrete* `linux-image-<abi>-generic` instead. A box with unanticipated hardware gets a black screen or a dead NIC: rebuild with `FULL_FIRMWARE=1`, or extend `FIRMWARE_PACKAGES`.
+- **RAM sizing:** the squashfs lands in a tmpfs, so a box needs roughly **the image size plus the running system's working set**. The initrd's `polyptic-live` dracut module raises the tmpfs cap from the kernel's default 50% of RAM to 90%, and prints a plain-English message below the floor. Never pass `rd.live.ram=1` — it `dd`s a *second* full copy of the image into RAM.
+- The kiosk browser is **surf** (`BROWSER=` overrides). Ubuntu's Chromium is snap-only; `cog` was dropped from the archive after 25.04.
 
 ### The live ISO (macOS or Linux)
 
@@ -171,22 +169,25 @@ POLYPTIC_BASE=http://192.168.1.62:8080 POLYPTIC_TOKEN=lab-token-123 \
 #   → deploy/dist/image/arm64/polyptic-live.iso  (USB stick, CD, or a UEFI VM's virtual CD)
 ```
 
-Needs only `xorriso` (`brew install xorriso`), no root, runs on macOS. It reuses the netboot
-payload's squashfs (`deploy/dist/image/<arch>/polyptic.iso`, so build that first on the Linux
-host) and the base ISO's own kernel/initrd/ESP. The token rides the ISO in cleartext, so the
-FILE is a credential — share it like one (a leaked token still only lands new boxes as PENDING).
+Needs only `xorriso` (`brew install xorriso`), no root, runs on macOS. It lays down the netboot
+payload's own `vmlinuz`, `initrd` and `rootfs.squashfs` (build those first on the Linux host); the
+squashfs goes to `/LiveOS/squashfs.img`, where dracut's `dmsquash-live` looks, and the cmdline is
+`root=live:CDLABEL=POLYPTIC` — the **same initrd** the netboot flow uses, two media. `BASE_ISO` is
+still required, but now *only* for its signed EFI System Partition and GRUB's on-disk prefix; its
+kernel, initrd and squashfs are discarded, so its release no longer has to match the payload's.
+The token rides the ISO in cleartext, so the FILE is a credential — share it like one (a leaked
+token still only lands new boxes as PENDING).
 
 The default output path (`deploy/dist/image/<arch>/polyptic-live.iso`) is inside the image
 depot, so the server serves it at `GET /dist/image/<arch>/polyptic-live.iso` and **Console ▸
 Settings ▸ Onboard Screens** lists it under **Recent builds**, one downloadable row per retained build that has one. The baked
 cmdline carries `quiet splash plymouth.ignore-serial-consoles`, so the boot shows the Polyptic
-Plymouth splash instead of scrolling kernel text. Three load-bearing details behind that (D49): the
-theme rides INSIDE the initrd (an extra cpio segment appended by `build-live-image.sh`, harvested
-with Ubuntu's own initramfs-tools plymouth hook — plymouthd starts long before the squashfs
-exists); the hook resolves the theme via the `default.plymouth` update-alternatives entry (which
-`setup` registers); and `plymouth.ignore-serial-consoles` is required because arm64 VMs get an
-implicit devicetree serial console, which otherwise makes plymouth assume a headless server and
-never paint the display.
+Plymouth splash instead of scrolling kernel text. Two load-bearing details behind that: the theme
+rides INSIDE the initrd (plymouthd starts long before the squashfs exists), which dracut's own
+`plymouth` module handles once `setup` has written `/etc/dracut.conf.d/polyptic-splash.conf` naming
+the theme (D45) — this replaced the initramfs-tools hook harvest + cpio-append of D49; and
+`plymouth.ignore-serial-consoles` is required because arm64 VMs get an implicit devicetree serial
+console, which otherwise makes plymouth assume a headless server and never paint the display.
 
 **The remaster pitfall this script exists to avoid (POL-38):** on post-20.10 Ubuntu ISOs the EFI
 System Partition is an **appended partition** that the El Torito catalog points into, not a file
@@ -199,9 +200,9 @@ self-verifies that the El Torito image and the appended GPT ESP are the same, by
 region before it will hand you the ISO.
 
 UTM specifics (arm64, Apple Silicon): display card **`virtio-gpu-gl-pci` ("GPU Supported")**, or
-sway has no GL renderer and the screen stays black; leave the drive as a USB CD; RAM ≥ 4 GiB
-(casper copies the ISO into RAM); turn the QEMU **Hypervisor** (HVF) toggle on, TCG-emulated boots
-take many times longer.
+sway has no GL renderer and the screen stays black; leave the drive as a USB CD; RAM ≥ 2 GiB
+(the squashfs is mounted off the medium, not copied into RAM); turn the QEMU **Hypervisor** (HVF)
+toggle on, TCG-emulated boots take many times longer.
 
 ### The boot medium (macOS or Linux)
 
@@ -222,7 +223,7 @@ grub/grub.cfg           stage 1: DHCP all NICs, then chain the server's /boot/gr
 
 Notes that matter:
 
-- `POLYPTIC_BASE` must be plain `http://` (the script rejects `https://`; GRUB and casper have no TLS).
+- `POLYPTIC_BASE` must be plain `http://` (the script rejects `https://`; GRUB has no TLS).
 - `grub/grub.cfg` sits at the **volume root**, not next to the EFI binaries: grubnet's baked-in prefix is `/grub` on whatever device it loaded from, and it never reads a config beside the binaries.
 - The stage-1 config on the stick is deliberately dumb, it carries only the control-plane address. **The real menu lives server-side** in the generated `/boot/grub.cfg`, so menu changes never require reflashing dongles.
 - The pins exist because of SBAT revocation, and are bumped deliberately, never floated; see [Secure Boot](#secure-boot).
@@ -314,21 +315,22 @@ IMAGE_FULL_REBUILD_CMD="deploy/full-rebuild-image-docker.sh arm64"  # weekly, de
 ```
 
 1. **Nightly refresh** — `deploy/refresh-live-image.sh`: unsquash the CURRENT image,
-   `apt-get upgrade` it in a chroot (security + updates pockets), re-wrap, and stamp a **new image
+   `apt-get upgrade` it in a chroot (security + updates pockets), re-squash, and stamp a **new image
    id**. Two deliberate properties: **nothing to upgrade → nothing changes** (no image-id churn, no
-   pointless fleet reboots), and **the kernel stays held** (the D47 signed-kernel/initrd invariant).
+   pointless fleet reboots), and **the kernel stays held** — the refresh does not republish
+   `vmlinuz`/`initrd`, so it must not move the ABI out from under the `/lib/modules` it re-squashes.
 2. **Weekly full rebuild** — because of that hold, the nightly cycle can never roll a **kernel
-   CVE**. The weekly cycle rebuilds from the base ISO (`deploy/full-rebuild-image-docker.sh`
-   downloads + caches it under `deploy/dist/cache/`, then runs `build-live-image.sh` in a
-   privileged container), picking up the ISO's current Canonical-signed kernel — Secure Boot keeps
-   working because any Canonical-signed kernel verifies through shim. Everything user-space
-   refreshes nightly; the kernel refreshes weekly.
+   CVE**. The weekly cycle rebuilds the rootfs from `ubuntu-base` (`deploy/full-rebuild-image-docker.sh`
+   runs `build-live-image.sh` in a privileged container; the base tarball is cached under
+   `deploy/dist/cache/`), picking up the archive's current Canonical-signed kernel and rebuilding the
+   initrd against it — Secure Boot keeps working because any Canonical-signed kernel verifies through
+   shim. Everything user-space refreshes nightly; the kernel refreshes weekly.
 
 **Kubernetes.** The Helm chart (`deploy/helm/polyptic`) wires both hooks as
 `bun deploy/k8s-run-job.ts refresh|full`: the server creates a privileged rebuild **Job** from a
 chart-rendered template on a Linux node, waits, and relays the log tail into the Settings card. The
 depot lives on a PVC shared between the server and the Jobs; day-0 bootstrap is just clicking
-**Full rebuild now** (the Job pulls the base ISO straight onto the volume). See the chart README
+**Full rebuild now** (the Job pulls `ubuntu-base` straight onto the volume). See the chart README
 for the full story, including the dev workflow against a local OrbStack/kind cluster.
 
 **Box side — the 5-minute poll.** Every netbooted box carries its identity at
@@ -342,8 +344,9 @@ for the full story, including the dev workflow against a local OrbStack/kind clu
   refresh therefore rolls across the fleet the same night, invisibly.
 
 Boxes booted from the **live ISO / USB stick never auto-reboot** — they would re-boot the same
-stale medium (the poll guards on the netboot-only `iso-url=` kernel arg). Refresh those by
-regenerating and re-flashing the ISO (`deploy/build-live-iso.sh`).
+stale medium. The poll guards on `root=live:http…`, which only a netboot cmdline carries (an ISO boot
+reads `root=live:CDLABEL=POLYPTIC`). Refresh those by regenerating and re-flashing the ISO
+(`deploy/build-live-iso.sh`).
 
 ---
 
@@ -355,10 +358,14 @@ routes, and every USB stick already in a drawer keep working without knowing his
 
 ```
 <IMAGE_DIST_DIR>/<arch>/
-  builds/<imageId>/{polyptic.iso,vmlinuz,initrd,SHA256SUMS[,polyptic-live.iso]}   every retained build
-  {polyptic.iso,vmlinuz,initrd,SHA256SUMS[,polyptic-live.iso]}                    the ACTIVE build
-  image-id.txt                                                                    the active build's id
+  builds/<imageId>/{rootfs.squashfs,vmlinuz,initrd,SHA256SUMS[,polyptic-live.iso]}   every retained build
+  {rootfs.squashfs,vmlinuz,initrd,SHA256SUMS[,polyptic-live.iso]}                    the ACTIVE build
+  image-id.txt                                                                       the active build's id
 ```
+
+A build directory is recognised by its `rootfs.squashfs`. A depot left over from before this layout
+(one holding `polyptic.iso`) therefore drops out of the history rather than offering an image the
+current boot cmdline cannot use; the next full rebuild re-bootstraps it.
 
 **Rolling back is activating an older build.** In **Console ▸ Settings ▸ Onboard Screens ▸ Recent builds**,
 press **Activate** on any retained row (or `POST /api/v1/settings/image/activate {arch, imageId}`). The server
@@ -369,12 +376,12 @@ the fleet re-pulls the older image on the normal policy — within minutes if th
 
 **Retention** is `IMAGE_RETAIN_BUILDS` (Helm: `imageUpdates.retainBuilds`, default **3**). Pruning drops the
 oldest first and never removes the active build, so a fleet parked on an old image cannot have that image
-deleted out from under it. Each retained build costs roughly one ISO (~1.5–2 GB) on the depot volume; size
-`netboot.persistence.size` accordingly (the chart defaults to 30Gi for 3 builds × 2 arches + the cached base
-ISO). A depot built before this existed is folded into `builds/` automatically when the server starts.
+deleted out from under it. Each retained build costs roughly one root image (~500–650 MB) plus its kernel and
+initrd on the depot volume; size `netboot.persistence.size` accordingly. A depot built before this existed is
+folded into `builds/` automatically when the server starts.
 
 > **One inode rule worth knowing if you touch the build scripts.** The root and the active build directory
-> *share* `polyptic.iso` and `polyptic-live.iso` by hardlink — that is why retention is nearly free. They do
+> *share* `rootfs.squashfs` and `polyptic-live.iso` by hardlink — that is why retention is nearly free. They do
 > **not** share `vmlinuz`, `initrd`, or `SHA256SUMS`: `refresh-live-image.sh` writes those with `>` and `cp`,
 > which truncate the existing inode in place, and through a hardlink that would silently rewrite a *retained*
 > build's artifacts. If you add an artifact that is replaced by `mv`/`rm`+create, it can be shared; anything
@@ -398,13 +405,13 @@ In the VM's QEMU arguments:
 ```
 
 (Use a bootindex UTM hasn't auto-assigned to a drive; keep ONE NIC total — two user-mode NICs get
-identical 10.0.2.x subnets and GRUB's routes become ambiguous. RAM ≥ 8 GiB: casper streams the
-whole image into a RAM tmpfs.)
+identical 10.0.2.x subnets and GRUB's routes become ambiguous. RAM ≥ 4 GiB: dracut streams the
+whole root image into a RAM tmpfs.)
 
 - **PXE / "site DHCP option 67" flow:** put `shimaa64.efi`, `grubaa64.efi`, and `grub/grub.cfg`
   (the rendered stage-1 config from `deploy/dongle-grub.cfg.tmpl`) in the TFTP root above; with no
   bootable drives the firmware PXE-boots: shim + GRUB over TFTP, then GRUB fetches
-  `/boot/grub.cfg`, kernel, initrd, and the image from the control plane over HTTP. Verified:
+  `/boot/grub.cfg`, kernel, initrd, and the root image from the control plane over HTTP. Verified:
   power-on → wall content in ~60 s.
 - **Dongle flow:** attach `polyptic-boot.img` as a USB **disk** drive; the firmware boots it ahead
   of PXE, and the boot-order NIC is still initialised, so dongle-GRUB is online. Verified: ~30 s
@@ -415,30 +422,31 @@ whole image into a RAM tmpfs.)
 
 ---
 
-## RAM: netboot needs ~4 GB, the live ISO needs ~2 GB
+## RAM: netboot needs ~2 GB, the live ISO needs ~1 GB
 
 The two media differ in *where the operating system lives*, and that decides the memory floor:
 
 | Medium | Where the OS runs from | RAM needed |
 | --- | --- | --- |
-| Boot medium / netboot (`polyptic-boot.img`) | the whole `polyptic.iso` (~1.4 GiB) is streamed into a **RAM tmpfs** and stays there | **~4 GB** |
-| Live ISO (`polyptic-live.iso`) | the squashfs is read **straight off the USB stick** | **~1–2 GB** |
+| Boot medium / netboot (`polyptic-boot.img`) | the whole `rootfs.squashfs` (~500 MiB) is streamed into a **RAM tmpfs** and stays there, alongside the unpacked initrd | **~2 GB** |
+| Live ISO (`polyptic-live.iso`) | the squashfs is read **straight off the USB stick** | **~1 GB** |
 
-Why 4 GB and not 1.4: casper's `iso-url=` runs `wget URL -O $(basename URL)` into the **initramfs
-root**, a tmpfs the kernel caps at **50 % of RAM** by default. A 3.3 GB box therefore has a 1.65 GiB
-ceiling for a 1.4 GiB image — and then still has to run a desktop out of what remains.
+Both floors dropped by roughly a factor of two in POL-35/[D55](DECISIONS.md), when the root image
+stopped being a 1.4 GiB casper ISO and became a ~500 MiB bare squashfs. Measured on the 26.04 arm64
+build: `rootfs.squashfs` **491.8 MiB**, `initrd` **91.7 MiB**, `vmlinuz` **22.7 MiB**.
 
-Polyptic's initrd raises that cap to 90 % (`scripts/init-premount/polyptic-ram`, appended by
-`build-live-image.sh`), which is what makes a 3–4 GB box boot at all. Below ~2.5 GB it prints a
-plain-English message naming the live ISO as the fix, instead of failing later inside busybox with:
+The image still lands in the initramfs tmpfs, which the kernel caps at **50 % of RAM** by default —
+so the naive ceiling would be twice the image. The initrd's `polyptic-live` dracut module
+(`deploy/live/usr/lib/dracut/modules.d/50polyptic-live/`) raises that cap to 90 % before livenet
+fetches anything, and below ~1.5 GB of RAM it prints a plain-English message naming the live ISO as
+the fix, rather than failing minutes later with a bare `No space left on device`.
 
-```
-wget: short write: No space left on device
-Unable to find a live file system on the network
-```
+If you see that message, the box is out of RAM — nothing is wrong with the network or the image. Use
+the live ISO for that box, or fit more memory.
 
-If you see that, the box is out of RAM — nothing is wrong with the network or the image. Use the
-live ISO for that box, or fit more memory. (Shrinking the image is tracked separately.)
+> **Never pass `rd.live.ram=1`.** It makes dmsquash-live `dd` a *second* full copy of the image into
+> RAM on top of the one livenet already downloaded. The generated `/boot/grub.cfg` never emits it, and
+> a netboot e2e test asserts its absence.
 
 ---
 
@@ -460,7 +468,7 @@ What carries a baked address (goes stale when the server moves):
 - the **live ISO**'s kernel cmdline (`polyptic.base` / `polyptic.server_url` / token).
 
 What does **not** (server-derived per request, immune to moves): the netboot payload
-(`polyptic.iso`), `/boot/grub.cfg` menu URLs, the update-poll manifest — all derive from the HTTP
+(`rootfs.squashfs`), `/boot/grub.cfg` menu URLs, the update-poll manifest — all derive from the HTTP
 `Host` header of the request that fetched them.
 
 Fixes, fastest first:
@@ -474,9 +482,9 @@ Fixes, fastest first:
 3. **The real fix: bake a NAME, not an IP.** Give the control plane a stable DNS name (in
    Kubernetes: the chart's `ingressRoute.bootHost`, a plain-HTTP Traefik router for the boot
    paths) and build all media against `http://boot.your-domain`. Media then survive any move of
-   the control plane. Caveat: GRUB resolves DNS fine, but the casper initrd's busybox `wget`
-   resolves **IPs more reliably than names** on some releases — verify a name-based `iso-url=`
-   boots on your target release before fleet-wide rollout (the D47 note).
+   the control plane. (The old caveat about the casper initrd's busybox `wget` being unreliable with
+   DNS names is gone: dracut's initramfs fetches the image with **curl**, which resolves names,
+   follows redirects and retries.)
 
 Related black-screen gotcha (not address-related): a UTM VM whose display is `virtio-gpu-pci`
 (no GL) boots to the splash and then goes **black** — sway has no GL renderer. Use
@@ -497,10 +505,10 @@ firmware db (Microsoft UEFI CA 2011)
   → shim 15.8 (Microsoft-signed)
      → grubnet (Canonical-signed; verified against shim's embedded certificate)
         → vmlinuz (Canonical-signed; verified by GRUB's shim_lock on the loaded buffer)
-           → initrd, polyptic.iso / squashfs (NOT signature-verified, by design; see below)
+           → initrd, rootfs.squashfs (NOT signature-verified, by design; see below)
 ```
 
-Polyptic signs **nothing** and manages **no keys**: every verified stage is a byte-identical redistribution of binaries Canonical ships for its own netboot installer, and the kernel in the live image is the Canonical-signed one from the base ISO (the image build refuses to package anything else).
+Polyptic signs **nothing** and manages **no keys**: every verified stage is a byte-identical redistribution of binaries Canonical ships for its own netboot installer, and the kernel in the live image is the Canonical-signed one apt installs from `linux-signed` (the image build refuses to package anything else). Building the rootfs from `ubuntu-base` rather than from a live ISO changed **who carries the kernel to us**, not what it is: `linux-image-<abi>-generic` is the same signed PE the ISO ships, and the build's `sbverify` guard checks the signer either way.
 
 **What is verified, and what is not.**
 
@@ -511,9 +519,9 @@ Polyptic signs **nothing** and manages **no keys**: every verified stage is a by
 | kernel (`vmlinuz`) | **yes** | GRUB's `shim_lock` verifier, on the loaded buffer, any transport |
 | GRUB config (`/boot/grub.cfg`) | no | config files are exempt in this model |
 | `initrd` | no | explicitly exempt (`GRUB_VERIFY_FLAGS_SKIP_VERIFICATION`) |
-| `polyptic.iso` / squashfs | no | fetched by userspace (casper) after the verified kernel is running |
+| `rootfs.squashfs` | no | fetched by the initramfs (dracut's curl) after the verified kernel is running |
 
-The unverified rows are **not a Polyptic shortcut; they are the standard shim model**, the same boundary every stock Ubuntu machine boots with (Ubuntu's own security documentation states that initrd images aren't validated). Secure Boot's job is to guarantee the machine only executes signed early-boot code: firmware, loaders, kernel. The initrd and root image are trusted the way the rest of Polyptic is: they come from **your** control plane over **your** LAN, addressed by the boot config, and a box that boots them still cannot self-admit, it lands PENDING until an operator approves it. Extending signature coverage to the initrd and cmdline is possible via a **UKI** (a unified kernel image: kernel + initrd + cmdline sealed in one signed PE) and is the tracked future-work path, at the cost of signing every image build, exactly the key management this design avoids today.
+The unverified rows are **not a Polyptic shortcut; they are the standard shim model**, the same boundary every stock Ubuntu machine boots with (Ubuntu's own security documentation states that initrd images aren't validated). Building the initrd ourselves with dracut changes nothing here: an unsigned dracut initramfs is exactly as legitimate to shim as the unsigned casper initrd it replaced. Secure Boot's job is to guarantee the machine only executes signed early-boot code: firmware, loaders, kernel. The initrd and root image are trusted the way the rest of Polyptic is: they come from **your** control plane over **your** LAN, addressed by the boot config, and a box that boots them still cannot self-admit, it lands PENDING until an operator approves it. Extending signature coverage to the initrd and cmdline is possible via a **UKI** (a unified kernel image: kernel + initrd + cmdline sealed in one signed PE) and is the tracked future-work path, at the cost of signing every image build, exactly the key management this design avoids today.
 
 **SBAT: why the loader versions are pinned.** Beyond signatures, shim enforces **SBAT**, a generation-based revocation scheme: firmware carries a minimum-generation list (advanced over time by Ubuntu updates, and even by Windows on dual-boot hardware), and a loader below the minimum is refused *even though its signature is valid*. This is why `deploy/build-boot-medium.sh` pins **exact package versions with SHA-256 hashes** instead of fetching "latest": the GA noble GRUB build carries an SBAT generation that is **already revoked** on up-to-date firmware, and the shim packages also contain a `.signed.previous` binary (shim 15.4) that is revoked everywhere, both are one careless download away. The pinned pair (shim 15.8, GRUB 2.12 from noble-updates) survives every SbatLevel published as of 2026-07. When Ubuntu ships new signed loaders (a security notice against `shim-signed` / `grub2-signed`), **bump the pins deliberately**: update the deb URLs + hashes in the script, rebuild the medium, reflash / re-offload. Never ship the `.previous` binaries, and never relax the pin to "whatever is newest".
 
