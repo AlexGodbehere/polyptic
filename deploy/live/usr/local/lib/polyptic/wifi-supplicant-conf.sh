@@ -11,7 +11,7 @@
 #     is WPA2-only (SAE derives from the passphrase, which a raw key no longer has);
 #   - every other string value is quoted with `\` and `"` escaped.
 # Both the initrd hook and the rootfs polyptic-wifi.service call this, so one association dialect
-# serves the whole boot (D63).
+# serves the whole boot (D67).
 #
 #   $1 / POLYPTIC_WIFI_CONF      the wifi.conf to render
 #   POLYPTIC_WIFI_CERT_DIR       where the medium's polyptic/ tree was staged (default /run/polyptic);

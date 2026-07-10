@@ -4,7 +4,8 @@
 # so it self-boots the identical HTTP flow on every power-on with no dongle attached. The pair is
 # Ubuntu's Microsoft-signed shim + the Canonical-signed network GRUB, the same chain as the dongle, so
 # Secure Boot stays ON. Triggered by `polyptic.offload=1` on the kernel cmdline, which the server's
-# /boot/grub.cfg tags onto its "Polyptic (Offload Bootloader)" entry. Runs from the booted live image
+# /boot/grub.cfg tags onto its "Set up this screen to start without the USB stick" entry (POL-47/D65;
+# it was "Polyptic (Offload Bootloader)" before the menu became wall-facing). Runs from the live image
 # via polyptic-offload.service (ConditionKernelCommandLine=polyptic.offload=1).
 #
 # HARD RULE: never repartition, format, or wipe. This ONLY (a) drops shim+GRUB into our own subdir on
@@ -291,31 +292,61 @@ if ! curl -fsSL "$base/dist/boot/shim$efiarch.efi" -o "$tmp_shim" \
   fail no-loaders "could not download the signed loaders from $base/dist/boot/ (nothing was erased)"
 fi
 
-# The stage-1 config, same content as the medium's (deploy/dongle-grub.cfg.tmpl) plus our marker line.
+# The stage-1 config, VERBATIM the medium's (deploy/dongle-grub.cfg.tmpl) plus our marker line — the
+# offloaded box boots the identical chain, it just carries the loaders itself. A box has no copy of
+# the repo, so the text is duplicated here; an e2e test diffs the two so they cannot drift.
 # $net is GRUB RUNTIME syntax: the heredoc delimiter is quoted so the shell expands NOTHING, then sed
 # fills in the one build-time value. The local-fallback lines only ever fire when a local payload was
 # copied below (a pointer-only ESP has no /grub/local.cfg, so `[ -e ]` is false and the flow is the
 # pre-POL-63 one exactly).
 sed "s|@@POLYPTIC_BASE_HOSTPORT@@|$hostport|g" > "$tmp_cfg" <<'EOF'
 # polyptic-offload
-# Polyptic boot medium stage 1 (POL-33/D47; local fallback POL-63). TOKENLESS network path: the
-# enrolment token is baked by the server into /boot/grub.cfg at chain time. Secure Boot stays ON.
+# Polyptic boot medium, stage 1 (POL-33/D47; local Wi-Fi fallback POL-63). TOKENLESS network path:
+# the enrolment token is baked by the server into /boot/grub.cfg at chain time. Secure Boot stays ON.
+#
+# The gfx block below is the stage-1 half of the boot splash (POL-47) and must stay identical to what
+# `bootGfxPreamble()` emits in packages/server/src/boot-theme.ts — an e2e test compares them. There is
+# no network yet here, so it gets the Polyptic dark but not the themed menu: that arrives with
+# /boot/grub.cfg, and the two screens share a background so the hand-off does not flash.
+# Paint the Polyptic splash rather than a text console (POL-47). The signed grubnet carries the
+# font + the gfx modules in its memdisk, so this costs no fetch. Guarded: a GRUB that cannot do
+# any of it keeps the plain console and boots identically.
+if loadfont (memdisk)/fonts/unicode.pf2 ; then
+  insmod all_video
+  insmod gfxterm
+  insmod gfxterm_background
+  insmod png
+  set gfxmode=auto
+  set gfxpayload=keep
+  terminal_output gfxterm
+  background_color "#0b0b0d"
+  clear
+fi
 set net=(http,@@POLYPTIC_BASE_HOSTPORT@@)
-echo "Polyptic: bringing the network up (DHCP on all NICs) ..."
+echo "Starting Polyptic ..."
 net_dhcp
-echo "Polyptic: chaining $net/boot/grub.cfg ..."
 configfile $net/boot/grub.cfg
-# Only reached when DHCP or the chain failed:
+# Only reached when DHCP or the chain failed. A medium carrying the POL-63 local payload boots it
+# instead of complaining: local kernel + initrd-wifi, which joins Wi-Fi from polyptic/wifi.conf and
+# streams the OS image over the radio — the Wi-Fi boot path (GRUB itself can never join a WPA
+# network, so a wireless-only screen must reach Linux on local files first).
 if [ -e /grub/local.cfg ]; then
-  echo "Polyptic: no wired path to the control plane - booting from the local payload ..."
+  echo "No wired connection - starting Polyptic from this drive ..."
   configfile /grub/local.cfg
 fi
-# Only reached when there is ALSO no local payload: keep offering retries.
+# Only reached when there is ALSO no local payload — THIS is where the technical detail belongs: nobody
+# reads a boot screen until it stops working. It cannot be conditional: `configfile` reports no
+# testable status, and an `if ! configfile …` never takes its branch (checked under OVMF).
+# The `sleep` is load-bearing: GRUB paints the fallback menu below over the console the instant this
+# script ends, so without a beat to read it the message may as well not have been printed.
+echo ""
+echo "Could not reach the Polyptic control plane at $net over the network."
+sleep -i 8
 set timeout=10
 set default=retry
-menuentry "Retry (DHCP + chain again)" --id retry { net_dhcp ; configfile $net/boot/grub.cfg }
-menuentry "Boot from local payload (Wi-Fi boxes)" --id local { configfile /grub/local.cfg }
-menuentry "Reboot" { reboot }
+menuentry "Try again" --id retry { net_dhcp ; configfile $net/boot/grub.cfg }
+menuentry "Start from this drive (Wi-Fi screens)" --id local { configfile /grub/local.cfg }
+menuentry "Restart this screen" { reboot }
 menuentry "Firmware setup" { fwsetup }
 EOF
 

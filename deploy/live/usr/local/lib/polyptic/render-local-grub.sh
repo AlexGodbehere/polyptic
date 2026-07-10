@@ -31,6 +31,8 @@ common="rd.overlay=1 ip=dhcp rd.neednet=1 polyptic.base=http://$HOSTPORT polypti
 pinned="root=live:http://$HOSTPORT/dist/image/$ARCH/builds/$IMAGE_ID/rootfs.squashfs $common"
 latest="root=live:http://$HOSTPORT/dist/image/$ARCH/rootfs.squashfs $common"
 
+# Entry names + tone mirror the server menu (provision.ts buildBootGrubCfg, POL-47/D65): wall-facing
+# strings stay plain English; the technical detail belongs to the entries nobody picks by accident.
 cat <<EOF
 # polyptic-local arch=$ARCH slot=$SLOT image=$IMAGE_ID
 # Local boot menu (POL-63): kernel + initrd read from THIS medium, the OS image streamed from the
@@ -38,23 +40,23 @@ cat <<EOF
 # update-poll on image updates — do not hand-edit; edits are overwritten at the next update.
 set timeout=5
 set default=live
-menuentry "Polyptic (Live)" --id live {
-  echo "Polyptic: booting the local $ARCH kernel; the OS image streams from the control plane ..."
+menuentry "Polyptic" --id live {
+  echo "Starting Polyptic ..."
   linux  $BOOT/vmlinuz $pinned
   initrd $BOOT/initrd
 }
-menuentry "Polyptic (Live, newest image - recovery after long offline)" --id live-latest {
-  echo "Polyptic: local kernel + the server's NEWEST image (kernel modules may mismatch until the medium refreshes) ..."
+menuentry "Polyptic (newest image - use after a long time offline)" --id live-latest {
+  echo "Starting Polyptic with the newest image (kernel modules may mismatch until this drive refreshes) ..."
   linux  $BOOT/vmlinuz $latest
   initrd $BOOT/initrd
 }
-menuentry "Polyptic (Offload Bootloader)" --id offload {
-  echo "Polyptic: offload mode, the live image will install the loader, then keep booting ..."
+menuentry "Set up this screen to start without the USB stick" --id offload {
+  echo "Setting up this screen ..."
   linux  $BOOT/vmlinuz $pinned polyptic.offload=1
   initrd $BOOT/initrd
 }
-menuentry "Polyptic (Debug Console)" --id debug {
-  echo "Polyptic: live boot + root shell on tty9 (Ctrl+Alt+F9) ..."
+menuentry "Debug console" --id debug {
+  echo "Starting Polyptic with a root shell on tty9 (Ctrl+Alt+F9) ..."
   linux  $BOOT/vmlinuz $pinned systemd.debug-shell=1
   initrd $BOOT/initrd
 }
