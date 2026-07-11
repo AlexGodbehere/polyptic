@@ -53,9 +53,24 @@ if [ ! -e /tmp/polyptic-wifi-done ]; then
                     # A present-but-invalid config: say WHY on the screen the operator is facing.
                     # Not fatal here — a wired link (if any) still boots the box.
                     if type plymouth > /dev/null 2>&1 && plymouth --ping 2> /dev/null; then
-                        plymouth display-message --text="Wi-Fi config rejected — check polyptic/wifi.conf on the boot medium" 2> /dev/null || :
+                        plymouth display-message --text="Wi-Fi config rejected — see polyptic/wifi-debug.txt on the boot medium" 2> /dev/null || :
                     fi
                     echo "polyptic: wifi.conf rejected: $(cat /run/polyptic/wifi.err 2>/dev/null)" > /dev/console 2> /dev/null || :
+                    # A keyboard-less display node can't read that console line, so persist the full
+                    # story to the medium: remount it read-write and drop polyptic/wifi-debug.txt with
+                    # the reject reason, the sh -x validation trace, and the whole net/interface state
+                    # (POL-77). Best-effort — every step is guarded so a read-only or vanished medium
+                    # never turns a Wi-Fi hiccup into a boot failure.
+                    if [ -n "$polyptic_dev" ]; then
+                        mkdir -p /tmp/polyptic-medium-rw 2>/dev/null || :
+                        if mount -o rw "$polyptic_dev" /tmp/polyptic-medium-rw 2>/dev/null; then
+                            mkdir -p /tmp/polyptic-medium-rw/polyptic 2>/dev/null || :
+                            sh /usr/local/lib/polyptic/wifi-diagnostics.sh /run/polyptic/wifi.conf \
+                                > /tmp/polyptic-medium-rw/polyptic/wifi-debug.txt 2>&1 || :
+                            sync 2>/dev/null || :
+                            umount /tmp/polyptic-medium-rw 2>/dev/null || :
+                        fi
+                    fi
                 fi
                 : > /tmp/polyptic-wifi-done
             else

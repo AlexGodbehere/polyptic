@@ -444,4 +444,37 @@ has "poll window: waits"             "waiting for the nightly window" "$out"
 has "poll window: medium untouched"  "slot=a image=old-1" "$(head -n1 "$d/vol-POLYPTIC-BT/grub/local-arm64.cfg")"
 eq "poll window: no reboot"          "" "$(cat "$d/systemctl.log" 2>/dev/null || true)"
 
+# ─── wifi-diagnostics.sh: the keyboard-less failure report (POL-77) ──────────────────────────────────
+# When association can't start the hook writes this report to the medium so a screen with no keyboard
+# can be debugged by pulling the stick. What is pinned: it surfaces the staged reject reason, traces
+# the EXACT failing validation step, redacts secrets from the rendered supplicant conf, and prints
+# every section header even when the inspection tools (ip/iw/rfkill) are absent — the report's whole
+# job is to run in a degraded initramfs.
+
+diag() { POLYPTIC_RUN_DIR="$DRUN" POLYPTIC_LIB_DIR="$LIB" sh "$LIB/wifi-diagnostics.sh" "$ROOT/wifi.conf"; }
+
+# 39) a rejected short-PSK config: the report carries the reason AND the pinpointing trace.
+DRUN="$ROOT/diag-run"; mkdir -p "$DRUN"
+conf 'WIFI_SSID=MyNet' 'WIFI_PSK=short'
+printf 'wifi-conf: WIFI_PSK must be an 8-63 character passphrase or exactly 64 hex digits\n' > "$DRUN/wifi.err"
+out="$(diag)"
+has "diag surfaces the reject reason" "8-63 character passphrase" "$out"
+has "diag has a validation trace"     "validation trace" "$out"
+has "diag trace shows the exit code"  "wifi-conf.sh exit: 1" "$out"
+has "diag lists tool resolution"      "tool resolution" "$out"
+has "diag enumerates interfaces"      "all network interfaces" "$out"
+has "diag has an ip section"          "ip link" "$out"
+
+# 40) secrets in the rendered supplicant conf are redacted in the report.
+printf 'network={\n  ssid=4d794e6574\n  psk="topsecretpass"\n}\n' > "$DRUN/wpa_supplicant.conf"
+out="$(diag)"
+has "diag redacts the psk"   "psk=<redacted>" "$out"
+hasnt "diag leaks no secret" "topsecretpass" "$out"
+
+# 41) a healthy config still produces a report (exit-0 trace), not just failures.
+DRUN="$ROOT/diag-ok"; mkdir -p "$DRUN"
+conf 'WIFI_SSID=MyNet' 'WIFI_PSK=hunter2hunter2'
+out="$(diag)"
+has "diag runs on a valid config too" "wifi-conf.sh exit: 0" "$out"
+
 [ "$fails" = 0 ] && { echo "ALL PASS"; exit 0; } || { echo "$fails FAILED"; exit 1; }

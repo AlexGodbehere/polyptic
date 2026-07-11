@@ -91,7 +91,7 @@ fi
 # --omit-drivers can't exclude a subtree, its entries are ^anchored$ module names). Under
 # FULL_FIRMWARE=1 the wireless blobs are already in `linux-firmware` from step 3 — the lean initrd
 # absorbs them exactly as it did pre-POL-63; that escape hatch has always traded size for coverage.
-WIFI_PACKAGES="wpasupplicant wireless-regdb iw"
+WIFI_PACKAGES="wpasupplicant wireless-regdb iw rfkill"
 if [ "${FULL_FIRMWARE:-0}" = "1" ]; then
   WIFI_FIRMWARE_PACKAGES="${WIFI_FIRMWARE_PACKAGES-}"
 else
