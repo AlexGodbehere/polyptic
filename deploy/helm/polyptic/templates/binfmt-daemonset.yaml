@@ -1,0 +1,49 @@
+{{- /*
+binfmt / qemu-user-static installer (POL-75). When imageUpdates.emulation is on, a cross-arch build
+Job runs a FOREIGN-arch chroot on a native node — which needs the kernel's binfmt_misc to carry a
+qemu interpreter for that arch, registered with the F (fix-binary) flag so it stays available inside
+the chroot. binfmt_misc is a NODE-KERNEL facility, so this can't live in the build Job; a DaemonSet
+registers it on every node (including nodes that join later). The registration persists in the
+kernel after the init exits, so the main container is a tiny pause that just keeps the pod Running.
+
+Turn it off (emulation.installBinfmt: false) if your nodes already carry F-flag qemu handlers from
+the host image or another operator. Runs PRIVILEGED — the namespace must permit privileged pods.
+*/ -}}
+{{- if and .Values.imageUpdates.enabled .Values.imageUpdates.emulation.enabled .Values.imageUpdates.emulation.installBinfmt }}
+{{- $arches := .Values.imageUpdates.arches }}
+{{- if not $arches }}{{- $arches = list .Values.imageUpdates.arch }}{{- end }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "polyptic.fullname" . }}-binfmt
+  labels:
+    {{- include "polyptic.labels" . | nindent 4 }}
+    app.kubernetes.io/component: binfmt
+spec:
+  selector:
+    matchLabels:
+      {{- include "polyptic.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: binfmt
+  template:
+    metadata:
+      labels:
+        {{- include "polyptic.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: binfmt
+    spec:
+      # Register the qemu interpreters for every arch we build (native ones are no-ops), F-flag.
+      initContainers:
+        - name: install
+          image: {{ .Values.imageUpdates.emulation.binfmtImage }}
+          args: ["--install", {{ join "," $arches | quote }}]
+          securityContext:
+            privileged: true
+      # Registration lives in the node kernel now; a pause keeps the DaemonSet pod Running so a node
+      # restart re-runs the init and re-registers.
+      containers:
+        - name: pause
+          image: {{ .Values.imageUpdates.emulation.pauseImage }}
+      {{- with .Values.imageUpdates.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

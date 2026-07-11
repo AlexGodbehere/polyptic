@@ -36,9 +36,14 @@ data:
   # The two rebuild hooks: in-cluster they create a privileged Job from the
   # chart-rendered templates (see rebuild-jobs.yaml) and wait — the server pod
   # itself never chroots or mounts anything.
+  # No arch arg → k8s-run-job.ts fans out over every arch the chart rendered (POL-75).
   IMAGE_REBUILD_CMD: "bun deploy/k8s-run-job.ts refresh"
   IMAGE_FULL_REBUILD_CMD: "bun deploy/k8s-run-job.ts full"
   POLYPTIC_JOB_TEMPLATE_DIR: "/etc/polyptic/jobs"
+  # The hook killer (server side) and the per-arch Job wait (k8s-run-job.ts). Both scale up for
+  # emulated cross-arch builds, which run one slow Job per arch, sequentially (POL-75).
+  POLYPTIC_HOOK_TIMEOUT_MS: {{ mul (int .Values.imageUpdates.waitTimeoutSeconds) (len (default (list .Values.imageUpdates.arch) .Values.imageUpdates.arches)) 1000 | quote }}
+  POLYPTIC_JOB_WAIT_TIMEOUT_MS: {{ mul (int .Values.imageUpdates.waitTimeoutSeconds) 1000 | quote }}
   # Builds retained per arch in the depot (POL-45). Any of them can be made the
   # ACTIVE image from the console, which is how a fleet rolls back. Each costs
   # ~2GB on the depot PVC — size netboot.persistence.size to match.
