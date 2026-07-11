@@ -172,15 +172,20 @@ Depot subdirectories the server serves from (IMAGE_DIST_DIR / BOOT_DIST_DIR).
 {{/*
 The base-ISO URL for the weekly full rebuild: explicit value, or the official
 Ubuntu live-server URL derived from ubuntuRelease + arch (arm64 lives on
-cdimage.ubuntu.com, amd64 on releases.ubuntu.com).
+cdimage.ubuntu.com, amd64 on releases.ubuntu.com). Arg: dict {root, arch} —
+`arch` is passed PER BUILD so a mixed-fleet cluster picks the right ISO for
+each arch (POL-75), not the global imageUpdates.arch.
 */}}
 {{- define "polyptic.baseIsoUrl" -}}
-{{- if .Values.imageUpdates.baseIsoUrl -}}
-{{- .Values.imageUpdates.baseIsoUrl -}}
-{{- else if eq .Values.imageUpdates.arch "arm64" -}}
-{{- printf "https://cdimage.ubuntu.com/releases/%s/release/ubuntu-%s-live-server-arm64.iso" .Values.imageUpdates.ubuntuRelease .Values.imageUpdates.ubuntuRelease -}}
+{{- $root := .root -}}
+{{- $arch := .arch -}}
+{{- $rel := $root.Values.imageUpdates.ubuntuRelease -}}
+{{- if $root.Values.imageUpdates.baseIsoUrl -}}
+{{- $root.Values.imageUpdates.baseIsoUrl -}}
+{{- else if eq $arch "arm64" -}}
+{{- printf "https://cdimage.ubuntu.com/releases/%s/release/ubuntu-%s-live-server-arm64.iso" $rel $rel -}}
 {{- else -}}
-{{- printf "https://releases.ubuntu.com/%s/ubuntu-%s-live-server-amd64.iso" .Values.imageUpdates.ubuntuRelease .Values.imageUpdates.ubuntuRelease -}}
+{{- printf "https://releases.ubuntu.com/%s/ubuntu-%s-live-server-amd64.iso" $rel $rel -}}
 {{- end -}}
 {{- end }}
 

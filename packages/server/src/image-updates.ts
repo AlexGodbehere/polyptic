@@ -59,8 +59,11 @@ export type RebuildKind = "refresh" | "full";
 /** How much hook output we keep for the Settings card (the tail is where apt's verdict lives). */
 const LOG_TAIL_BYTES = 8 * 1024;
 /** A rebuild that runs longer than this is presumed wedged and killed. Full rebuilds download the
- *  base ISO on a cold cache, so the ceiling is generous (~15 min build + the download). */
-const HOOK_TIMEOUT_MS = 45 * 60 * 1000;
+ *  base ISO on a cold cache, so the ceiling is generous (~15 min build + the download). Overridable
+ *  because a cross-arch cluster (POL-75) runs a build PER ARCH sequentially, and an EMULATED
+ *  foreign-arch build is far slower than a native one — so a mixed fleet needs a much higher ceiling
+ *  (the chart raises POLYPTIC_HOOK_TIMEOUT_MS when imageUpdates.emulation is on). */
+const HOOK_TIMEOUT_MS = Number(process.env.POLYPTIC_HOOK_TIMEOUT_MS) || 45 * 60 * 1000;
 /** Scheduler resolution. The fire guard is per-minute, so 30s ticks cannot double-fire. */
 const TICK_MS = 30 * 1000;
 

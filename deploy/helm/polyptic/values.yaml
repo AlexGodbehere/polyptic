@@ -284,9 +284,39 @@ imageUpdates:
   # Render the RBAC + Job templates and wire IMAGE_REBUILD_CMD /
   # IMAGE_FULL_REBUILD_CMD in the server's env.
   enabled: true
-  # Architecture the in-cluster Jobs build for. Must match your boxes; the Jobs
-  # get a kubernetes.io/arch nodeSelector so they land on a matching node.
+  # Architecture(s) the in-cluster Jobs build for — one build Job per arch, and
+  # the depot serves each at /dist/image/<arch>/ so a MIXED fleet (amd64 boxes +
+  # arm64 boxes) is served from one cluster (POL-75). The boot chain already
+  # picks each box's arch. `arches` is the canonical list; `arch` is the legacy
+  # single value, used only when `arches` is empty.
+  arches: []
   arch: arm64
+  # Build a foreign architecture on this cluster's nodes via emulation (POL-75).
+  # By default a build Job pins kubernetes.io/arch to its target, so it lands on
+  # a NATIVE node — correct for a multi-arch cluster, but on a single-arch
+  # cluster the foreign-arch Job can't schedule. Turn emulation on and: (a) an
+  # optional privileged DaemonSet registers qemu (binfmt_misc, F-flag) on every
+  # node, and (b) the build Jobs DROP the arch nodeSelector, so a foreign-arch
+  # chroot runs emulated on whatever node holds the depot PVC. HONEST COST: the
+  # foreign-arch build is SLOW (emulation), though confined to that one Job —
+  # the native-arch build, serving, and everything else run at native speed.
+  # Raise the deadlines + wait timeout below to fit an emulated build.
+  emulation:
+    enabled: false
+    # Registers the qemu interpreters. Skip (installBinfmt: false) if your nodes
+    # already have binfmt_misc handlers (F-flag) from the host or another tool.
+    installBinfmt: true
+    binfmtImage: tonistiigi/binfmt:latest
+    # Tiny image that keeps the DaemonSet pod Running after the init registers.
+    pauseImage: registry.k8s.io/pause:3.9
+  # Job activeDeadlineSeconds. Defaults suit NATIVE builds (~6 min); an EMULATED
+  # foreign-arch build needs far longer — raise these AND job.waitTimeoutSeconds
+  # when emulation.enabled (e.g. 7200 / 14400).
+  refreshDeadlineSeconds: 1800
+  fullDeadlineSeconds: 2400
+  # How long deploy/k8s-run-job.ts waits per arch before reporting a timeout
+  # (bounded below the server's hook killer). Raise it for emulated builds.
+  waitTimeoutSeconds: 2400
   # How many builds the depot keeps PER ARCH (POL-45). The newest is served; any
   # retained build can be made active from Console ▸ Settings ▸ Onboard Screens,
   # which rolls the fleet back to it. Each retained build costs ~600MB of root
