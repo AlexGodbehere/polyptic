@@ -602,9 +602,10 @@ The two media differ in *where the operating system lives*, and that decides the
 Both floors dropped by roughly a factor of two in POL-35/[D55](DECISIONS.md), when the root image
 stopped being a 1.4 GiB casper ISO and became a bare squashfs; POL-63 then raised the netboot floor
 ~half a GB by shipping every major vendor's Wi-Fi firmware in the root image. Measured on the 26.04
-arm64 build (POL-63): `rootfs.squashfs` **689 MiB**, lean `initrd` **113 MiB** (wired GRUB fetch,
-wlan-firmware-free by construction), `initrd-wifi` **177 MiB** (local media only), `vmlinuz`
-**24 MiB**; the universal medium with one arch's payload is a **~424 MiB** image file.
+arm64 build (POL-63 + the POL-53 KMS drivers below): `rootfs.squashfs` **689 MiB**, lean `initrd`
+**137 MiB** (wired GRUB fetch, wlan-firmware-free by construction), `initrd-wifi` **210 MiB** (local
+media only), `vmlinuz` **23 MiB**; the universal medium with one arch's payload is a **~490 MiB**
+image file (amd64 measures close by: 138/194 MiB on the first fpd-ago build).
 
 POL-53/[D64](DECISIONS.md) then grew the initrd again — it now carries the real KMS drivers, without
 which the boot splash is stuck at the firmware's framebuffer resolution. Expect roughly **+13 MiB on
