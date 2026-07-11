@@ -16,10 +16,14 @@
 # (--any, bounded) already counts an associated wlan as "online". A wired link still wins when
 # present — the hook is opportunistic and never blocks the initqueue.
 #
-# `check()` returns 0 unconditionally: the module is never auto-detected, only `--add`ed.
+# `check()` returns 255: include ONLY when `--add`ed. Returning 0 means "include by default" to
+# dracut, which put this module into the LEAN initrd's build too — where wpa_supplicant deliberately
+# does not exist yet (build-live-image.sh installs the Wi-Fi stack BETWEEN the two dracut runs) — so
+# every full rebuild logged a dracut-install ERROR and risked a half-installed module (fpd-ago,
+# 2026-07-11, POL-71).
 
 check() {
-    return 0
+    return 255
 }
 
 depends() {
