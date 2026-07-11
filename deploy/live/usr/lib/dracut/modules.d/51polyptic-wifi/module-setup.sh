@@ -40,11 +40,16 @@ installkernel() {
 }
 
 install() {
-    inst_multiple wpa_supplicant od sed grep tr wc mkdir cp chmod basename readlink mount umount blkid
+    inst_multiple wpa_supplicant od sed grep tr wc cat cut sync mkdir cp chmod basename readlink mount umount blkid
+    # Optional diagnostics tools: when Wi-Fi bring-up fails, wifi-diagnostics.sh dumps the full
+    # network/interface state to the medium (POL-77). `-o` means a box whose image lacks any of these
+    # still builds — the report just notes the tool as absent rather than aborting the initrd build.
+    inst_multiple -o ip iw rfkill dmesg lsmod
     # The shared credential helpers, at their canonical path — the hook, the rootfs service and the
     # tests all speak the same files (deploy/live/usr/local/lib/polyptic/).
     inst_simple /usr/local/lib/polyptic/wifi-conf.sh
     inst_simple /usr/local/lib/polyptic/wifi-supplicant-conf.sh
+    inst_simple /usr/local/lib/polyptic/wifi-diagnostics.sh
     inst_simple /usr/local/lib/polyptic/find-boot-medium.sh
     # DHCP for wl* — the exact file the rootfs uses; the initrd's networkd reads /etc too.
     inst_simple /etc/systemd/network/80-polyptic-wlan.network
