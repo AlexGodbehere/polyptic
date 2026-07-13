@@ -14,7 +14,9 @@
     "build": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@peculiar/x509": "^1.12.3",
     "@polyptic/protocol": "workspace:*",
+    "reflect-metadata": "^0.2.2",
     "ws": "^8.18.0",
     "zod": "^3.23.0"
   },

@@ -34,6 +34,7 @@ import type {
   PersistedDisplaySettings,
   PersistedImageRollout,
   PersistedMachine,
+  PersistedMtlsCa,
   PersistedMural,
   PersistedPlacement,
   PersistedScene,
@@ -331,6 +332,17 @@ export class PostgresStore implements Store {
         id    int PRIMARY KEY DEFAULT 1,
         mode  text NOT NULL DEFAULT 'open',
         token text
+      )
+    `;
+    // mTLS agent CA (POL-25): a single row holding the deployment's own agent-CA cert + private key,
+    // generated once on the first boot with AGENT_MTLS_PORT set and reused forever (every client cert
+    // in the fleet chains to this key).
+    await sql`
+      CREATE TABLE IF NOT EXISTS mtls_ca (
+        id         int PRIMARY KEY DEFAULT 1,
+        cert_pem   text NOT NULL,
+        key_pem    text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
       )
     `;
     // Image updates (POL-41): a single row with the scheduled-rebuild settings, the urgent
@@ -997,6 +1009,27 @@ export class PostgresStore implements Store {
     await sql`
       INSERT INTO bootstrap (id, mode, token) VALUES (1, ${bootstrap.mode}, ${bootstrap.token})
       ON CONFLICT (id) DO UPDATE SET mode = EXCLUDED.mode, token = EXCLUDED.token
+    `;
+  }
+
+  // ── mTLS agent CA (POL-25) ───────────────────────────────────────────────────
+
+  async getMtlsCa(): Promise<PersistedMtlsCa | undefined> {
+    const sql = this.sql;
+    const rows = await sql<{ cert_pem: string; key_pem: string; created_at: Date }[]>`
+      SELECT cert_pem, key_pem, created_at FROM mtls_ca WHERE id = 1 LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) return undefined;
+    return { certPem: row.cert_pem, keyPem: row.key_pem, createdAt: row.created_at.toISOString() };
+  }
+
+  async setMtlsCa(ca: PersistedMtlsCa): Promise<void> {
+    const sql = this.sql;
+    await sql`
+      INSERT INTO mtls_ca (id, cert_pem, key_pem, created_at)
+      VALUES (1, ${ca.certPem}, ${ca.keyPem}, ${ca.createdAt})
+      ON CONFLICT (id) DO UPDATE SET cert_pem = EXCLUDED.cert_pem, key_pem = EXCLUDED.key_pem
     `;
   }
 

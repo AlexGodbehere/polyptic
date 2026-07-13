@@ -18,5 +18,13 @@ spec:
       {{- if and (eq .Values.service.type "NodePort") (ne (toString .Values.service.nodePort) "") }}
       nodePort: {{ .Values.service.nodePort }}
       {{- end }}
+    {{- if .Values.agentMtls.enabled }}
+    # POL-25: the mTLS agent channel — raw TCP end to end (never behind an HTTP Ingress,
+    # which would terminate TLS itself and strip the agent's client certificate).
+    - name: agent-mtls
+      port: {{ .Values.agentMtls.port }}
+      targetPort: agent-mtls
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "polyptic.selectorLabels" . | nindent 4 }}

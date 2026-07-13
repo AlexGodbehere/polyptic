@@ -189,6 +189,14 @@ export const AgentHello = z.object({
   bootstrapToken: z.string().optional(),
   /** Subsequent connections: the durable per-machine credential issued by `server/enrolled`. */
   credential: z.string().optional(),
+  /**
+   * POL-25 — a PEM PKCS#10 certificate-signing request. The agent generates its keypair ON THE BOX
+   * (the private key never crosses the wire) and sends the CSR whenever it wants an mTLS client cert
+   * issued or renewed. A server with mTLS enabled signs it (CN forced to `machineId`) on any hello
+   * that authenticates — the 2b credential/token seam, no new enrolment step — and returns the cert
+   * in `server/enrolled.mtls`. Servers without mTLS ignore it.
+   */
+  csrPem: z.string().optional(),
 });
 
 export const AgentStatus = z.object({
@@ -400,14 +408,41 @@ export const ServerToAgentInspect = z.object({
   on: z.boolean(),
 });
 
+/**
+ * POL-25 — the mTLS client-certificate bundle issued at enrolment. The agent persists it (0600) and
+ * presents `certPem` on every subsequent `wss://` dial to the server's dedicated mTLS listener, where
+ * a wrong/absent/expired cert fails the TLS HANDSHAKE — rejected before any app-layer code runs.
+ * `caPem` is the deployment's own agent CA, which the agent pins as the ONLY trusted issuer for that
+ * listener (no public PKI involved). The private key stays on the box: it was generated there and
+ * only its CSR crossed the wire (see `AgentHello.csrPem`).
+ */
+export const MtlsBundle = z.object({
+  /** The deployment's agent CA (PEM) — the agent pins this as the mTLS listener's only trust root. */
+  caPem: z.string(),
+  /** This machine's signed client certificate (PEM), CN = machineId, issued by `caPem`. */
+  certPem: z.string(),
+  /** The mTLS listener's port. The agent dials the SAME HOST it already knows, on this port. */
+  port: z.number().int().positive(),
+  /** Full wss:// URL override (`AGENT_MTLS_PUBLIC_URL`) for deployments where the mTLS endpoint is
+   *  not simply same-host-different-port (e.g. a separate LoadBalancer in Kubernetes). */
+  url: z.string().optional(),
+});
+export type MtlsBundle = z.infer<typeof MtlsBundle>;
+
 /** Issued after a valid first-contact enrollment: the durable credential the agent persists and
  * presents on every reconnect (instead of the bootstrap token). `status` tells the agent whether
- * it still needs operator approval. */
+ * it still needs operator approval.
+ *
+ * POL-25 — `credential` became OPTIONAL: in OPEN mode with mTLS enabled the frame carries only the
+ * `mtls` cert bundle (open mode never had app credentials). A gated enrolment always includes it. */
 export const ServerToAgentEnrolled = z.object({
   t: z.literal("server/enrolled"),
   machineId: z.string(),
-  credential: z.string(),
+  credential: z.string().optional(),
   status: EnrollmentStatus,
+  /** POL-25 — present when the server signed this hello's `csrPem`: the client-cert bundle the agent
+   *  persists and reconnects with over the mTLS listener. */
+  mtls: MtlsBundle.optional(),
 });
 
 /** The machine is recognised but still awaiting operator approval — keep the connection open; no

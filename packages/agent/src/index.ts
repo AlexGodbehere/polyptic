@@ -36,7 +36,17 @@
  *     ZERO outputs, NOT a guessed default. A wrong-named placeholder screen breaks placement and
  *     lingers next to the real panels once the kiosk agent later advertises them.
  *
- * Phase 2b — enrollment + durable credential (app-level identity; mTLS is a later layer):
+ * POL-25 — mTLS client identity (the transport layer on top of the 2b credential):
+ *   - Whenever a hello leaves on the PLAIN channel (or the held cert nears expiry) it carries a
+ *     fresh CSR; a server with mTLS enabled answers `server/enrolled.mtls` with a signed client
+ *     cert + the deployment CA + the listener port. The bundle is persisted (see ./mtls.ts) and
+ *     every subsequent reconnect dials that `wss://` listener presenting the cert — where a
+ *     wrong/absent cert fails the TLS handshake outright.
+ *   - After 3 consecutive failed mTLS dials the agent takes ONE plain-channel attempt (re-enrols
+ *     via token/credential, picks up a fresh bundle — heals a rotated CA); that fallback session
+ *     is sticky so a runtime that cannot present client certs never churns.
+ *
+ * Phase 2b — enrollment + durable credential (app-level identity; mTLS rides POL-25 above):
  *   - `POLYPTIC_BOOTSTRAP_TOKEN` (if set) is sent on `agent/hello` for first-contact enrollment.
  *   - A durable per-machine `credential` is persisted locally (see ./credential.ts) and presented
  *     on every reconnect. The server stores only `sha256(credential)`.
@@ -63,6 +73,15 @@ import { selectBackend } from "./backends/select";
 import type { DisplayBackend } from "./backends/types";
 import { credentialPath, loadCredential, saveCredential } from "./credential";
 import { DevtoolsManager } from "./devtools";
+import {
+  certNeedsRenewal,
+  deriveMtlsUrl,
+  generateKeyAndCsr,
+  loadMtlsBundle,
+  mtlsBundlePath,
+  saveMtlsBundle,
+} from "./mtls";
+import type { MtlsBundleFile } from "./mtls";
 import { rebootHost } from "./host";
 import { ShellManager } from "./shell";
 import { resolveAdvertisedOutputs, resolveConnector } from "./outputs";
@@ -85,6 +104,9 @@ const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 10_000;
 /** After a `server/rejected`, retry slowly so a rejected/unapproved machine never hammers. */
 const REJECT_BACKOFF_MS = 60_000;
+/** POL-25 — after this many consecutive failed mTLS dials, try the plain channel ONCE to re-enrol
+ *  (heals a rotated CA / a server whose mTLS moved) before going back to the mTLS target. */
+const MTLS_FALLBACK_AFTER = 3;
 
 function log(msg: string): void {
   console.log(`[${new Date().toISOString()}] [agent] ${msg}`);
@@ -153,6 +175,21 @@ class Agent {
   /** Durable app-level identity. Loaded from disk at boot; (re)issued via `server/enrolled`. */
   private credential: string | null;
 
+  /** POL-25 — the persisted mTLS bundle (client key+cert, pinned CA, wss target), when issued. */
+  private mtls: MtlsBundleFile | null;
+  /** The private key whose CSR rode the LAST hello — paired with the cert `server/enrolled` returns. */
+  private pendingKeyPem: string | null = null;
+  /** True while the CURRENT socket is the mTLS channel (drives fallback + reconnect-on-enrol). */
+  private connectedViaMtls = false;
+  /** True while the CURRENT socket is the one-shot plain fallback after repeated mTLS failures.
+   *  A fallback session is STICKY: receiving a fresh bundle must not close it, or a runtime whose
+   *  WS client cannot present certs would churn (fail mTLS → fall back → re-issue → close → loop). */
+  private currentIsFallback = false;
+  /** Did the current socket ever reach `open`? A close without it counts as a failed dial. */
+  private socketOpened = false;
+  /** Consecutive failed mTLS dials; at MTLS_FALLBACK_AFTER the next dial is a one-shot plain retry. */
+  private mtlsFailStreak = 0;
+
   /** Remote-shell PTYs (POL-59), created on first `server/shell-open`. A dev/non-Linux backend
    *  reports it can't provide a real terminal, and every open on such a box is refused. */
   private shell: ShellManager | null = null;
@@ -177,8 +214,10 @@ class Agent {
     credential: string | null,
     /** Which kiosk browser this box drives (POL-67); undefined on dev-open (no kiosk browser). */
     private readonly browser: KioskBrowser | undefined,
+    mtls: MtlsBundleFile | null = null,
   ) {
     this.credential = credential;
+    this.mtls = mtls;
   }
 
   start(): void {
@@ -198,17 +237,53 @@ class Agent {
   // ── connection lifecycle ───────────────────────────────────────────────────
 
   private connect(): void {
-    log(`connecting to ${this.url} …`);
-    const ws = new WebSocket(this.url);
+    // POL-25 — prefer the mTLS channel whenever we hold a cert bundle. After MTLS_FALLBACK_AFTER
+    // consecutive failed dials, take ONE plain-channel attempt — it re-enrols via the token/credential
+    // seam and picks up a fresh bundle, healing a rotated CA or a moved mTLS endpoint — then return
+    // to the mTLS target.
+    const fallbackNow = this.mtls !== null && this.mtlsFailStreak >= MTLS_FALLBACK_AFTER;
+    if (fallbackNow) {
+      log(
+        `mTLS dial failed ${this.mtlsFailStreak} times — trying the plain channel once to re-enrol`,
+      );
+      this.mtlsFailStreak = 0;
+    }
+    const useMtls = this.mtls !== null && !fallbackNow;
+    const target = useMtls && this.mtls ? this.mtls.url : this.url;
+    log(`connecting to ${target}${useMtls ? " (mTLS, presenting client cert)" : ""} …`);
+    let ws: WebSocket;
+    if (useMtls && this.mtls) {
+      // Node's ws reads key/cert/ca at the top level; Bun's built-in client reads them from a
+      // non-standard `tls` option (measured — top-level is ignored there). Set both, pin OUR CA as
+      // the only trust root.
+      const tls = { key: this.mtls.keyPem, cert: this.mtls.certPem, ca: this.mtls.caPem };
+      ws = new WebSocket(target, { ...tls, tls } as WebSocket.ClientOptions);
+    } else {
+      ws = new WebSocket(target);
+    }
     this.ws = ws;
+    this.connectedViaMtls = useMtls;
+    this.currentIsFallback = fallbackNow;
+    this.socketOpened = false;
+    // A failed dial must count exactly once, whether the runtime reports it via error, close or both.
+    let dialFailureCounted = false;
+    const countDialFailure = () => {
+      if (this.connectedViaMtls && !this.socketOpened && !dialFailureCounted) {
+        dialFailureCounted = true;
+        this.mtlsFailStreak += 1;
+        log(`mTLS dial failed (${this.mtlsFailStreak}/${MTLS_FALLBACK_AFTER} before a plain-channel retry)`);
+      }
+    };
 
     ws.on("open", () => {
       this.attempt = 0;
+      this.socketOpened = true;
+      if (this.connectedViaMtls) this.mtlsFailStreak = 0;
       // A fresh connection: clear the stale "rejected" flag. If the server rejects us again it
       // re-sets the flag before close, so the long backoff persists across rejection cycles.
       this.rejected = false;
-      log("agent channel open — enrolling");
-      this.sendHello();
+      log(`agent channel open${this.connectedViaMtls ? " (mTLS)" : ""} — enrolling`);
+      void this.sendHello();
       this.startHeartbeat();
     });
 
@@ -223,10 +298,15 @@ class Agent {
 
     ws.on("error", (err: Error) => {
       log(`ws error: ${err.message}`);
+      // A handshake-stage error may not be followed by a close on every runtime; count it and make
+      // sure a reconnect is queued (scheduleReconnect() no-ops when one already is).
+      countDialFailure();
+      if (!this.socketOpened && !this.closing) this.scheduleReconnect();
     });
 
     ws.on("close", (code: number) => {
       log(`agent channel closed (code ${code})`);
+      countDialFailure();
       this.stopHeartbeat();
       // A remote shell / DevTools session is authorised by the live connection; kill them all when
       // it drops so a session can never outlive the socket that carried it (POL-59, POL-67).
@@ -532,20 +612,55 @@ class Agent {
   }
 
   /**
-   * `server/enrolled` — the server issued (or re-issued) this machine's durable credential.
-   * Persist the RAW credential locally so future reconnects authenticate without the bootstrap
-   * token. The connection stays open; admission follows via `server/apply` (if approved) or we
-   * sit in `server/pending` until an operator approves.
+   * `server/enrolled` — the server issued (or re-issued) this machine's durable credential and/or
+   * its mTLS client-cert bundle (POL-25). Persist the RAW credential locally so future reconnects
+   * authenticate without the bootstrap token. A cert bundle is paired with the private key whose
+   * CSR rode our last hello (the key never crossed the wire), persisted, and — when we are on the
+   * plain channel — acted on immediately: close and redial the mTLS listener.
    */
   private onEnrolled(msg: EnrolledMsg): void {
-    this.credential = msg.credential;
-    try {
-      saveCredential(this.machineId, msg.credential);
-      log(`enrolled (status=${msg.status}) — credential persisted to ${credentialPath(this.machineId)}`);
-    } catch (err) {
-      logError(
-        `enrolled (status=${msg.status}) but FAILED to persist credential to ${credentialPath(this.machineId)}: ${(err as Error).message} — will re-enroll on next reconnect`,
-      );
+    if (msg.credential) {
+      this.credential = msg.credential;
+      try {
+        saveCredential(this.machineId, msg.credential);
+        log(`enrolled (status=${msg.status}) — credential persisted to ${credentialPath(this.machineId)}`);
+      } catch (err) {
+        logError(
+          `enrolled (status=${msg.status}) but FAILED to persist credential to ${credentialPath(this.machineId)}: ${(err as Error).message} — will re-enroll on next reconnect`,
+        );
+      }
+    }
+    if (msg.mtls) {
+      if (!this.pendingKeyPem) {
+        logError("server issued an mTLS client cert but no CSR key is pending — ignoring the bundle");
+        return;
+      }
+      const bundle: MtlsBundleFile = {
+        keyPem: this.pendingKeyPem,
+        certPem: msg.mtls.certPem,
+        caPem: msg.mtls.caPem,
+        url: deriveMtlsUrl(this.url, { port: msg.mtls.port, url: msg.mtls.url }),
+      };
+      this.mtls = bundle;
+      this.mtlsFailStreak = 0;
+      try {
+        saveMtlsBundle(this.machineId, bundle);
+        log(
+          `mTLS client cert issued — bundle persisted to ${mtlsBundlePath(this.machineId)}; agent channel moves to ${bundle.url}`,
+        );
+      } catch (err) {
+        logError(
+          `mTLS client cert issued but FAILED to persist the bundle to ${mtlsBundlePath(this.machineId)}: ${(err as Error).message} — using it for this run only`,
+        );
+      }
+      if (!this.connectedViaMtls && !this.currentIsFallback) {
+        // Switch now rather than on the next drop — in require mode the server is about to close
+        // this plain socket anyway; in roll-out mode this is what actually moves the fleet over.
+        // EXCEPT on the post-failure fallback session: that one stays up until it drops naturally,
+        // or a runtime that cannot present client certs would churn in a fail→fallback→close loop.
+        log("switching to the mTLS channel — closing the plain connection");
+        this.ws?.close();
+      }
     }
   }
 
@@ -589,7 +704,23 @@ class Agent {
 
   // ── outbound ─────────────────────────────────────────────────────────────────
 
-  private sendHello(): void {
+  private async sendHello(): Promise<void> {
+    // POL-25 — ask for a client cert whenever this connection is NOT the mTLS channel (no bundle
+    // yet, or a fallback re-enrol) or the cert we hold is inside its renewal window. The keypair is
+    // generated here and kept; only the CSR goes on the wire. A crypto failure never blocks the
+    // hello — the agent then simply stays on its current identity.
+    let csrPem: string | undefined;
+    const wantCert =
+      !this.connectedViaMtls || (this.mtls !== null && certNeedsRenewal(this.mtls.certPem));
+    if (wantCert) {
+      try {
+        const generated = await generateKeyAndCsr(this.machineId);
+        this.pendingKeyPem = generated.keyPem;
+        csrPem = generated.csrPem;
+      } catch (err) {
+        logError(`could not generate an mTLS keypair/CSR: ${(err as Error).message}`);
+      }
+    }
     // Both `bootstrapToken` and `credential` are optional. The server ignores them in OPEN mode
     // (Phase 2a behaviour) and uses them to enrol in GATED mode. `undefined` values are dropped by
     // JSON.stringify, so an agent with neither sends a plain Phase-2a hello.
@@ -604,6 +735,7 @@ class Agent {
       hostname: osHostname(),
       bootstrapToken: this.bootstrapToken,
       credential: this.credential ?? undefined,
+      csrPem,
     };
     this.send(hello);
   }
@@ -686,6 +818,7 @@ async function main(): Promise<void> {
   // sway backend makes at launch; x11-i3 only ever drives surf, and dev-open owns no browser.
   const browser: KioskBrowser | undefined =
     backend.id === "wayland-sway" ? await selectKioskBrowser() : backend.id === "x11-i3" ? "surf" : undefined;
+  const mtlsBundle = loadMtlsBundle(machineId);
 
   log(
     `polyptic-agent v${agentVersion} · machineId=${machineId} · outputs=${outputs
@@ -695,7 +828,7 @@ async function main(): Promise<void> {
   log(
     `enrollment: ${credential ? "stored credential found" : "no stored credential"}${
       bootstrapToken ? " · bootstrap token present" : ""
-    } (open mode ignores both)`,
+    }${mtlsBundle ? ` · mTLS cert bundle found (dials ${mtlsBundle.url})` : ""} (open mode ignores credentials)`,
   );
 
   const agent = new Agent(
@@ -707,6 +840,7 @@ async function main(): Promise<void> {
     bootstrapToken,
     credential,
     browser,
+    mtlsBundle,
   );
   agent.start();
 

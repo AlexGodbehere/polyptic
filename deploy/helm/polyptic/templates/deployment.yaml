@@ -54,6 +54,12 @@ spec:
             - name: http
               containerPort: {{ .Values.containerPort }}
               protocol: TCP
+            {{- if .Values.agentMtls.enabled }}
+            # POL-25: the dedicated TLS agent listener (client-cert mTLS).
+            - name: agent-mtls
+              containerPort: {{ .Values.agentMtls.port }}
+              protocol: TCP
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "polyptic.configMapName" . }}
