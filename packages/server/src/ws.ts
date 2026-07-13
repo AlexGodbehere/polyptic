@@ -586,6 +586,14 @@ function handlePlayer(
       );
       // Screen just came online — refresh the admin view.
       broadcaster.broadcast();
+    } else if (msg.t === "player/diag") {
+      // POL-86: the player's own account of what happened on the glass — probe failures, aborted
+      // loads, heals — with the box's timestamps. This line in the pod log is how a broken boot is
+      // diagnosed without SSH or DevTools. The player rate-caps itself; we just record it.
+      log.info(
+        { event: "player.diag", screenId: msg.screenId, playerAt: msg.at },
+        `player diag: ${msg.msg}`,
+      );
     } else {
       // player/ack — record the revision this screen has observed.
       presence.setScreenObservedRevision(msg.screenId, msg.revision);

@@ -526,7 +526,22 @@ export const PlayerAck = z.object({
   revision: z.number().int().nonnegative(),
 });
 
-export const PlayerMessage = z.discriminatedUnion("t", [PlayerHello, PlayerAck]);
+/** POL-86: a timestamped debug line from the player — the box's own account of what happened on the
+ *  glass (probe failures, aborted loads, heal actions). The server writes these to its log, so a
+ *  broken boot is diagnosable from `kubectl logs` alone: no SSH, no DevTools, and no racing to read
+ *  a console that a refresh wipes. The player rate-caps itself and replays the tail of a previous
+ *  page-life on boot (from localStorage), because the evidence of a failed load used to be DESTROYED
+ *  by the very refresh that fixed it. */
+export const PlayerDiag = z.object({
+  t: z.literal("player/diag"),
+  screenId: z.string(),
+  /** Player-side ISO-8601 timestamp — preserves true ordering even for replayed lines. */
+  at: z.string().max(40),
+  msg: z.string().max(500),
+});
+export type PlayerDiag = z.infer<typeof PlayerDiag>;
+
+export const PlayerMessage = z.discriminatedUnion("t", [PlayerHello, PlayerAck, PlayerDiag]);
 export type PlayerMessage = z.infer<typeof PlayerMessage>;
 
 /** Pushed whenever this screen's slice changes. The player applies it via DOM diff — no reload. */

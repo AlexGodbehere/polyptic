@@ -69,6 +69,27 @@ body {
   background: #0b0f14;
 }
 
+/* POL-86 — a surface whose content URL has not yet PROVEN reachable: a calm placeholder instead of
+   letting Chrome commit a sad face / broken-image icon into the region. Discrete visibility blink
+   only — the wall-chrome motion rules (D66) forbid opacity/transform animation and continuous
+   repaints. Reuses the badge-blink keyframes. */
+.surface-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  background: #0b0f14;
+}
+
+.surface-loading-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #2f3a46;
+  animation: badge-blink 1.6s steps(1, end) infinite;
+}
+
 /* Ident pulse — flash the screen's friendly name on its colour so panels can be mapped.
    WALL-CHROME MOTION RULES (D66, re-measured for POL-67): never animate opacity/transform/filter
    (WebKit's no-GL compositor silently drops promoted layers — the overlay would VANISH on exactly

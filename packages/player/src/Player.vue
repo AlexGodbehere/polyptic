@@ -12,6 +12,16 @@
  *     patches that one attribute on the EXISTING element — the iframe is never remounted, so the
  *     page navigates in place with no white flash / reload.
  *
+ * POL-86 — proven-before-painted: a surface's element is only given a `src` once the SurfaceProber
+ * has PROVEN that URL reachable (a `no-cors` fetch that rejects on network failure). Until then the
+ * region shows a calm placeholder — an unattended wall must never show Chrome's sad face or a
+ * broken-image icon, and on a cold boot the content URL routinely becomes reachable a beat AFTER
+ * the player itself is up (Wi-Fi association, DNS settling — the exact boot that shipped broken).
+ * The prober re-proves on browser network hints, on media error events, and shortly after each
+ * paint; `painted` maps surface id → the proven URL the element may show. Every step is written
+ * through `diag()` (console + localStorage + the server's own log), so the next failed boot
+ * EXPLAINS ITSELF instead of needing a human with DevTools.
+ *
  * Phase 3b — video-wall spans: a surface may carry `span` {contentW,contentH,offsetX,offsetY}.
  * Such a surface shows only this screen's slice of a larger spanning content: we size the content
  * to contentW×contentH px and translate it by -(offsetX,offsetY) px inside the region (which is
@@ -28,12 +38,13 @@
  * scale is applied before the span's translate), so a video wall zooms as one continuous page. It is
  * a pure restyle of the SAME keyed element: the iframe rescales without navigating or reloading (D5).
  */
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import type { Geometry, ServerToPlayerMessage, Surface } from "@polyptic/protocol";
 import { PlayerSocket } from "./ws";
 import type { ConnState } from "./ws";
-import { FrameWatchdog } from "./frame-watchdog";
+import { SurfaceProber } from "./surface-prober";
+import { bindDiagSender, diag, flushDiag, initDiag } from "./diag";
 import { resolveMediaSrc, serverAuthority } from "./media-url";
 import IdleSplash from "./IdleSplash.vue";
 
@@ -65,6 +76,12 @@ function readPendingMachineId(): string {
 
 const pendingMachineId = readPendingMachineId();
 const screenId = readScreenId();
+
+// Diagnostics first (POL-86 priority A): from here on, every load-bearing step writes a line —
+// console + localStorage ring + (once the WS opens) the server's pod log. `initDiag` also replays
+// the tail of a PREVIOUS page-life, so a boot someone refreshed away still tells its story.
+initDiag();
+diag(`player booted — screen=${screenId || "(none)"} v${APP_VERSION} online=${navigator.onLine}`);
 
 // The screen's friendly name (as named in the console). The server stamps it onto every render, so
 // this relabels live when an operator renames the screen — no reload (POL-29). Until the first render
@@ -98,6 +115,13 @@ function handleMessage(msg: ServerToPlayerMessage): void {
     revision.value = msg.revision;
     // The name rides on every render, so a console rename relabels the idle splash / badge instantly.
     screenName.value = msg.friendlyName;
+    diag(
+      `render rev ${msg.revision}: ${
+        msg.slice.surfaces.length === 0
+          ? "no surfaces (idle splash)"
+          : msg.slice.surfaces.map((s) => `${s.id}=${s.type}`).join(" ")
+      }`,
+    );
     // Close the reconcile loop so the control plane knows this screen is at this revision.
     socket?.send({ t: "player/ack", screenId, revision: msg.revision });
   } else if (msg.t === "server/settings") {
@@ -109,66 +133,92 @@ function handleMessage(msg: ServerToPlayerMessage): void {
   }
 }
 
-// ── Frame watchdog (POL-86) — the wall heals a failed content load by itself ──────────────────
+// ── Proven-before-painted (POL-86) ─────────────────────────────────────────────
 //
-// A cross-origin iframe's failure is invisible to us (SOP), and Chrome fires `load` even for its own
-// ERR_NETWORK_CHANGED error page — so we cannot simply ask "did it load?". Instead we reload frames
-// on evidence that in-flight requests were killed. See ./frame-watchdog.ts for the full reasoning.
+// `painted` holds, per surface id, the URL its element is allowed to show — set only after the
+// prober's reachability probe passes. Until then the region renders the placeholder. Clearing an
+// entry unmounts the element (used when media reports a failed load: a broken-image icon must not
+// stay on the wall). See ./surface-prober.ts for the full reasoning and life cycle.
 
-/** surface id → its live <iframe>, so the watchdog can re-fetch it in place. */
-const frameEls = new Map<string, HTMLIFrameElement>();
+const painted = reactive<Record<string, string>>({});
 
-const watchdog = new FrameWatchdog({
-  // `el.src = el.src` re-fetches WITHOUT rewriting the URL — so the token the server stamped into a
-  // content URL at send time (POL-24) survives, and the keyed element that makes flips instant (D5)
-  // is never remounted.
-  reload: (id) => {
-    const el = frameEls.get(id);
-    if (el) el.src = el.src;
+/** surface id → its live element, so a heal can re-fetch it IN PLACE (the keyed node survives, D5). */
+const surfaceEls = new Map<string, HTMLIFrameElement | HTMLImageElement | HTMLVideoElement>();
+
+function bindEl(id: string, el: unknown): void {
+  if (
+    el instanceof HTMLIFrameElement ||
+    el instanceof HTMLImageElement ||
+    el instanceof HTMLVideoElement
+  ) {
+    surfaceEls.set(id, el);
+  } else {
+    surfaceEls.delete(id);
+  }
+}
+
+const prober = new SurfaceProber({
+  paint: (id, url) => {
+    painted[id] = url;
   },
-  log: (msg) => console.info(`[player/watchdog] ${msg}`),
+  clear: (id) => {
+    delete painted[id];
+  },
+  // Re-fetch WITHOUT rewriting the URL — a token the server stamped into the content URL at send
+  // time (POL-24) survives, and the keyed element that makes flips instant (D5) is never remounted.
+  reload: (id) => {
+    const el = surfaceEls.get(id);
+    if (!el) return;
+    if (el instanceof HTMLVideoElement) el.load();
+    else el.src = el.src;
+  },
+  log: (msg) => diag(msg),
 });
 
-function bindFrame(id: string, el: unknown): void {
-  if (el instanceof HTMLIFrameElement) frameEls.set(id, el);
-  else frameEls.delete(id);
-}
-
-/** The iframe finished navigating. Not proof of health (an error page loads too) — see the module. */
-function onFrameLoad(id: string): void {
-  watchdog.onLoad(id);
-}
-
-/** Any framed surface (web/dashboard) currently on this screen — media has no iframe to watch. */
-const framedIds = computed(() => surfaces.value.filter(isFrame).map((s) => s.id));
-
-watch(
-  framedIds,
-  (ids) => {
-    // Wait for Vue to mount/patch the iframes before the watchdog starts timing them.
-    void nextTick(() => watchdog.sync(ids));
-  },
-  { immediate: true },
+/** What each on-screen surface will actually fetch — the exact URLs the prober must prove. */
+const probeTargets = computed(() =>
+  surfaces.value.map((s) => ({ id: s.id, url: isFrame(s) ? s.url : mediaSrc(s) })),
 );
 
-/** The browser saw the network come back. Anything loaded before this may hold an aborted page. */
-function onOnline(): void {
-  watchdog.heal("browser reported online");
+watch(probeTargets, (targets) => prober.sync(targets), { immediate: true });
+
+/** The element finished a real load. For media that is genuine health (no SOP wall); for an iframe
+ *  it is merely "a page committed" — Chrome fires `load` for its own error page too. Logged either
+ *  way: the load/abort timeline is exactly the evidence a broken boot used to destroy. */
+function onContentLoad(id: string, kind: string): void {
+  prober.elementLoaded(id);
+  diag(`${id}: ${kind} fired load`);
 }
 
-/**
- * A resource on OUR OWN page failed to load. This is the signal that would have caught the POL-86
- * bug directly: the boot that broke the wall also failed the player's favicon with
- * ERR_NETWORK_CHANGED. If our own subresources are being aborted, the content frame's almost
- * certainly were too — and unlike the frame, these errors we CAN see. Capture phase: resource error
- * events do not bubble.
- */
+/** Media told us outright that its fetch failed (e.g. aborted by ERR_NETWORK_CHANGED). This is the
+ *  deterministic signal the first watchdog never listened for — the broken-image boot, seen. */
+function onContentError(id: string, kind: string): void {
+  diag(`${id}: ${kind} FAILED to load (element error event)`);
+  prober.elementError(id);
+}
+
+// Browser network hints — demoted from reload-triggers to probe-triggers. Any of them means
+// in-flight loads may have been killed; the prober re-proves every surface and heals what it must.
+function onOnline(): void {
+  diag("browser reported online");
+  prober.recheck("browser reported online");
+}
+function onOffline(): void {
+  diag("browser reported OFFLINE"); // no recheck — probes would fail; `online` will follow
+}
 function onResourceError(event: Event): void {
-  if (event.target instanceof HTMLElement) watchdog.heal("a page resource failed to load");
+  if (!(event.target instanceof HTMLElement)) return;
+  // A CONTENT element's failure is handled by `onContentError` with its own backoff — it must NOT
+  // also count as an "own page" hint, or every broken asset triggers a global recheck that bypasses
+  // that backoff (a 1.5s hammer-loop, caught live by the diag trail on first verification).
+  if (event.target.closest(".surface")) return;
+  diag(`own-page resource failed: <${event.target.tagName.toLowerCase()}>`);
+  prober.recheck("a page resource failed to load");
 }
 
 onMounted(() => {
   window.addEventListener("online", onOnline);
+  window.addEventListener("offline", onOffline);
   window.addEventListener("error", onResourceError, true);
 
   if (!screenId) {
@@ -179,20 +229,26 @@ onMounted(() => {
   socket = new PlayerSocket(SERVER_WS_URL, screenId, {
     onMessage: handleMessage,
     onState: (state) => {
-      // A RECONNECT (not the first connect) means the socket dropped — which is itself evidence the
-      // network moved under us, and therefore that a frame loaded before the drop may be broken.
-      if (state === "open" && everOpen) watchdog.heal("player socket reconnected");
-      if (state === "open") everOpen = true;
+      diag(`player socket ${state}`);
+      if (state === "open") {
+        // A RECONNECT (not the first connect) means the socket dropped — itself evidence the network
+        // moved under us, and therefore that content loaded before the drop may be broken.
+        if (everOpen) prober.recheck("player socket reconnected");
+        everOpen = true;
+        flushDiag();
+      }
       connState.value = state;
     },
   });
+  bindDiagSender((line) => socket?.send({ t: "player/diag", screenId, ...line }) ?? false);
   socket.start();
 });
 
 onUnmounted(() => {
   window.removeEventListener("online", onOnline);
+  window.removeEventListener("offline", onOffline);
   window.removeEventListener("error", onResourceError, true);
-  watchdog.stop();
+  prober.stop();
   socket?.stop();
 });
 
@@ -268,9 +324,6 @@ type FramedSurface = Extract<Surface, { type: "web" | "dashboard" }>;
 function isFrame(surface: Surface): surface is FramedSurface {
   return surface.type === "web" || surface.type === "dashboard";
 }
-function frameUrl(surface: Surface): string {
-  return isFrame(surface) ? surface.url : "";
-}
 function mediaSrc(surface: Surface): string {
   const raw = surface.type === "image" || surface.type === "video" ? surface.src : "";
   // Re-home a loopback-baked media URL onto the origin this box reaches the server at (POL-5): a
@@ -297,6 +350,7 @@ function connLabel(state: ConnState): string {
       return "offline";
   }
 }
+
 </script>
 
 <template>
@@ -334,7 +388,11 @@ function connLabel(state: ConnState): string {
 
     <!--
       Keyed by surface.id so the SAME DOM element survives content changes (the "instant" trick):
-      a url change patches the existing iframe's src in place; no remount, no reload.
+      a url change patches the existing element's src in place; no remount, no reload.
+
+      POL-86: the element renders only once its URL is PROVEN reachable (`painted[surface.id]`);
+      until then the region shows the calm placeholder. src is bound to the PROVEN url, not the
+      raw surface url — a not-yet-proven change keeps the old content up while the new url proves.
     -->
     <div
       v-for="surface in surfaces"
@@ -342,33 +400,45 @@ function connLabel(state: ConnState): string {
       class="surface"
       :style="regionStyle(surface.region, canvas)"
     >
-      <iframe
-        v-if="isFrame(surface)"
-        :ref="(el) => bindFrame(surface.id, el)"
-        class="surface-frame"
-        :class="{ 'is-interactive': isInteractive(surface) }"
-        :src="frameUrl(surface)"
-        :style="frameStyle(surface)"
-        allow="autoplay; encrypted-media; fullscreen; clipboard-read; clipboard-write"
-        @load="onFrameLoad(surface.id)"
-      />
-      <img
-        v-else-if="surface.type === 'image'"
-        class="surface-media"
-        :src="mediaSrc(surface)"
-        :style="mediaStyle(surface)"
-        alt=""
-      />
-      <video
-        v-else-if="surface.type === 'video'"
-        class="surface-media"
-        :src="mediaSrc(surface)"
-        :style="mediaStyle(surface)"
-        autoplay
-        playsinline
-        :loop="videoLoop(surface)"
-        :muted="videoMuted(surface)"
-      />
+      <template v-if="painted[surface.id]">
+        <iframe
+          v-if="isFrame(surface)"
+          :ref="(el) => bindEl(surface.id, el)"
+          class="surface-frame"
+          :class="{ 'is-interactive': isInteractive(surface) }"
+          :src="painted[surface.id]"
+          :style="frameStyle(surface)"
+          allow="autoplay; encrypted-media; fullscreen; clipboard-read; clipboard-write"
+          @load="onContentLoad(surface.id, 'frame')"
+        />
+        <img
+          v-else-if="surface.type === 'image'"
+          :ref="(el) => bindEl(surface.id, el)"
+          class="surface-media"
+          :src="painted[surface.id]"
+          :style="mediaStyle(surface)"
+          alt=""
+          @load="onContentLoad(surface.id, 'image')"
+          @error="onContentError(surface.id, 'image')"
+        />
+        <video
+          v-else-if="surface.type === 'video'"
+          :ref="(el) => bindEl(surface.id, el)"
+          class="surface-media"
+          :src="painted[surface.id]"
+          :style="mediaStyle(surface)"
+          autoplay
+          playsinline
+          :loop="videoLoop(surface)"
+          :muted="videoMuted(surface)"
+          @loadeddata="onContentLoad(surface.id, 'video')"
+          @error="onContentError(surface.id, 'video')"
+        />
+      </template>
+      <!-- URL not yet proven reachable: a calm placeholder, never a sad face / broken-image icon. -->
+      <div v-else class="surface-loading" aria-hidden="true">
+        <span class="surface-loading-dot" />
+      </div>
     </div>
 
     <div v-if="ident" class="ident" :style="{ backgroundColor: ident.color }">
