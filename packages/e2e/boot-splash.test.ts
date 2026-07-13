@@ -163,3 +163,25 @@ describe("the offline (Wi-Fi) local menu carries its own splash (POL-74)", () =>
     expect(buildBootThemeTxt()).not.toContain("http");
   });
 });
+
+describe("render-boot-theme.ts — the deterministic offline bake (POL-80)", () => {
+  // build-boot-medium.sh bakes the offline splash by RUNNING this script, not by curling the server at
+  // build time (POL-74's fragile path). This proves the bake is byte-identical to what the server
+  // serves — so the wired and offline splashes can never drift — and needs no network.
+  test("prints EXACTLY the theme body the server serves at /boot/theme.txt", () => {
+    const r = spawnSync("bun", [resolve(repoRoot, "deploy/render-boot-theme.ts")], { encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe(buildBootThemeTxt()); // byte-for-byte, including the trailing newline
+  });
+
+  test("needs no network — the generator opens no socket and spawns nothing", () => {
+    // Strip comments so the word "curl" in the docstring (which explains the OLD path) doesn't count;
+    // what must be absent is an actual network primitive or a subprocess that could reach one.
+    const code = read("deploy", "render-boot-theme.ts")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*$/gm, "");
+    expect(code).not.toContain("fetch(");
+    expect(code).not.toContain("Bun.spawn");
+    expect(code).not.toContain("://"); // no http/ws URL anywhere in the executable source
+  });
+});

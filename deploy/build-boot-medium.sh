@@ -73,6 +73,7 @@ elif command -v sha256sum >/dev/null 2>&1; then sha256() { sha256sum "$1" | awk 
 else echo "build-boot-medium: neither 'shasum' nor 'sha256sum' found" >&2; exit 1; fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$HERE/.." && pwd)"   # HERE is deploy/; the repo assets (boot theme + logo) live one level up
 DIST="$HERE/dist/boot"
 TMPL="$HERE/dongle-grub.cfg.tmpl"
 [ -f "$TMPL" ] || { echo "build-boot-medium: missing $TMPL" >&2; exit 1; }
@@ -213,19 +214,34 @@ LOCALCFG
   done
 
   # Bake the POL-47 boot theme so the OFFLINE menu paints the branded splash with no network to fetch
-  # it from (POL-74). theme.txt is network-agnostic — it references logo.png relatively, with no base
-  # URL baked in (boot-theme.ts), so a local copy renders identically to the served one. Best-effort:
-  # if the server isn't serving it, the medium still boots, and render-local-grub's file-exists guard
-  # falls back to a plain menu on the correct dark background.
+  # it from (POL-74). DETERMINISTIC, from the repo/server-image assets — NOT a build-time curl (POL-80):
+  # POL-74 fetched theme.txt+logo.png from POLYPTIC_BASE at build time, so a medium built before the
+  # server was reachable silently shipped a plain (theme-less) medium (seen on the homelab). Instead we
+  # GENERATE theme.txt with bun from the SAME buildBootThemeTxt() the server serves at /boot/theme.txt
+  # (deploy/render-boot-theme.ts) — byte-identical to the wired path's, since the theme references
+  # logo.png relatively with no base URL baked in (boot-theme.ts) — and copy the committed boot-logo.png
+  # the server also serves. Needs no network and no @polyptic/protocol build (boot-theme.ts imports
+  # nothing), so it runs the same in-cluster (rebuild Job = server image + /repo + bun) and on macOS.
+  # Guarded like the rest: a genuinely missing asset (no bun, no logo, render fails) degrades to a
+  # plain-but-booting menu with a LOUD line — never a silent plain medium, never a hard build failure;
+  # render-local-grub's file-exists guard then falls back to a plain menu on the correct dark background.
   HAVE_THEME=0
+  THEME_TS="$HERE/render-boot-theme.ts"
+  LOGO_SRC="$REPO_ROOT/packages/server/assets/boot-logo.png"
   mkdir -p "$WORK/theme"
-  if curl -fsS --max-time 15 -o "$WORK/theme/theme.txt" "$POLYPTIC_BASE/boot/theme.txt" 2>/dev/null \
-     && curl -fsS --max-time 15 -o "$WORK/theme/logo.png" "$POLYPTIC_BASE/boot/logo.png" 2>/dev/null; then
+  if ! command -v bun >/dev/null 2>&1; then
+    rm -rf "$WORK/theme"
+    echo "==> Boot theme: 'bun' not found, cannot generate theme.txt — offline menu will be plain (still boots)" >&2
+  elif [ ! -f "$LOGO_SRC" ]; then
+    rm -rf "$WORK/theme"
+    echo "==> Boot theme: missing $LOGO_SRC (run 'bun deploy/render-boot-logo.ts') — offline menu will be plain (still boots)" >&2
+  elif bun "$THEME_TS" > "$WORK/theme/theme.txt" 2>/dev/null && [ -s "$WORK/theme/theme.txt" ]; then
+    cp "$LOGO_SRC" "$WORK/theme/logo.png"
     HAVE_THEME=1
-    echo "==> Boot theme: baked from $POLYPTIC_BASE/boot/ (offline menu shows the branded splash)"
+    echo "==> Boot theme: baked deterministically from repo assets (offline menu shows the branded splash)"
   else
     rm -rf "$WORK/theme"
-    echo "==> Boot theme: $POLYPTIC_BASE not serving /boot/theme.txt — offline menu will be plain (still boots)"
+    echo "==> Boot theme: failed to render theme.txt from $THEME_TS — offline menu will be plain (still boots)" >&2
   fi
 fi
 
