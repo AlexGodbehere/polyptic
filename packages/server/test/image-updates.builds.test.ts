@@ -13,7 +13,7 @@
  *      would rewrite a retained build's checksums through the link.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -206,15 +206,28 @@ describe("image build retention (POL-45)", () => {
 describe("active build is always mirrored into builds/ (POL-79)", () => {
   /** Overwrite the arch root with a brand-new active build, as an EXTERNAL rebuild (a Job run
    *  directly, bypassing the server's execute→retain) would leave it: new artifacts + image-id.txt
-   *  at the root, and NO builds/<new-id>/ mirror. */
-  function externalRebuildAtRoot(root: string, imageId: string): void {
+   *  at the root, and NO builds/<new-id>/ mirror.
+   *
+   *  Faithful to `build-live-image.sh` (`rm -f "$OUT_DIR/rootfs.squashfs"` then `mksquashfs`, line
+   *  321): a real rebuild ALLOCATES A NEW INODE for the payload, so an already-adopted OLDER build
+   *  keeps its own inode + mtime. Writing in place (writeFileSync without the rm) would instead
+   *  TRUNCATE the inode the old mirror is hardlinked to, corrupting its content and collapsing its
+   *  mtime onto the new build's — a nondeterministic tie that made this suite pass on macOS but flip
+   *  on Linux's readdir order. The explicit newest-mtime stamp then makes the freshly-published build
+   *  sort ahead of any retained older one, deterministically. */
+  function externalRebuildAtRoot(root: string, imageId: string, epochSeconds = 1_800_000_000): void {
     const arch = join(root, "arm64");
+    for (const name of ["image-id.txt", "rootfs.squashfs", "vmlinuz", "initrd", "initrd-wifi", "SHA256SUMS"]) {
+      rmSync(join(arch, name), { force: true }); // fresh inode, exactly like the build script's `rm -f`
+    }
     writeFileSync(join(arch, "image-id.txt"), `${imageId}\n`);
     writeFileSync(join(arch, "rootfs.squashfs"), `rootfs-${imageId}`);
     writeFileSync(join(arch, "vmlinuz"), `vmlinuz-${imageId}`);
     writeFileSync(join(arch, "initrd"), `initrd-${imageId}`);
     writeFileSync(join(arch, "initrd-wifi"), `initrd-wifi-${imageId}`);
     writeFileSync(join(arch, "SHA256SUMS"), `sha-${imageId}  rootfs.squashfs\n`);
+    const t = new Date(epochSeconds * 1000);
+    utimesSync(join(arch, "rootfs.squashfs"), t, t); // adopt() hardlinks this, so the mirror inherits it
   }
 
   test("ensureActiveBuild() heals a depot whose active build reached the arch root with no mirror", async () => {
