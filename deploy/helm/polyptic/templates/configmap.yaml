@@ -9,13 +9,31 @@ data:
   PORT: {{ .Values.containerPort | quote }}
   HOST: "0.0.0.0"
   STORE: {{ .Values.config.store | quote }}
-  CORS_ORIGIN: {{ .Values.config.corsOrigin | quote }}
+  {{- $publicBase := include "polyptic.publicBaseUrl" . }}
+  {{- if $publicBase }}
+  # The ONE public origin (POL-70/D89): explicit config.publicBaseUrl, or derived from the enabled
+  # ingress. The server keys cookie security off its scheme (https → Secure) and uses it as the
+  # last-resort base for request-derived URLs.
+  PUBLIC_BASE_URL: {{ $publicBase | quote }}
+  {{- end }}
+  CORS_ORIGIN: {{ include "polyptic.corsOrigin" . | quote }}
+  {{- if eq .Values.tls.mode "self-signed" }}
+  # ── Native self-signed TLS (POL-70/D89): the server mints + persists its own CA/cert and serves
+  # HTTPS itself. SANs cover the derived public host, the in-cluster Service DNS names, and any
+  # extra tls.sans; the server adds localhost + its own hostname. Probes flip to HTTPS (deployment).
+  TLS_MODE: "self-signed"
+  TLS_SANS: {{ include "polyptic.tlsSans" . | quote }}
+  {{- end }}
   # The player lives under /player/ in the single image — the helper appends it (see _helpers.tpl).
   PLAYER_BASE_URL: {{ include "polyptic.playerBaseUrl" . | quote }}
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   NODE_ENV: {{ .Values.config.nodeEnv | quote }}
   AUTH_ENABLED: {{ .Values.config.authEnabled | quote }}
+  {{- if ne (toString .Values.config.secureCookies) "" }}
+  # Explicit override — "" (auto, the default) lets the server derive Secure from
+  # PUBLIC_BASE_URL's scheme, falling back to NODE_ENV (POL-70/D89).
   SECURE_COOKIES: {{ .Values.config.secureCookies | quote }}
+  {{- end }}
   {{- if ne (toString .Values.config.captureIntervalMs) "" }}
   CAPTURE_INTERVAL_MS: {{ .Values.config.captureIntervalMs | quote }}
   {{- end }}
@@ -39,7 +57,7 @@ data:
   # the PVC/volumeMount in deployment.yaml) and served back, ungated, from the
   # top-level GET /media/:id so players on other hosts can fetch them.
   MEDIA_DIR: {{ .Values.media.dir | quote }}
-  MEDIA_PUBLIC_BASE: {{ .Values.media.publicBase | quote }}
+  MEDIA_PUBLIC_BASE: {{ include "polyptic.mediaPublicBase" . | quote }}
   MEDIA_MAX_BYTES: {{ .Values.media.maxBytes | quote }}
   # ── Netboot depot (POL-33…41) ───────────────────────────────────────────────
   # The live image + signed loaders, served ungated from the depot volume

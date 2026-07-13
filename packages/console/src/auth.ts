@@ -15,6 +15,7 @@ import {
   ChangePasswordBody,
   DisplaySettings,
   EnrollmentInfo,
+  HttpsInfo,
   LoginBody,
   ImageUpdateInfo,
   NetbootInfo,
@@ -26,7 +27,7 @@ import type {
   LoginBody as LoginBodyT,
 } from "@polyptic/protocol";
 
-import { send } from "./api";
+import { ApiError, apiUrl, send } from "./api";
 
 const BASE_AUTH = "/auth";
 const BASE_SETTINGS = "/settings";
@@ -105,6 +106,26 @@ export async function regenerateEnrollment(): Promise<EnrollmentInfo> {
 export async function getNetboot(): Promise<NetbootInfo> {
   const raw = await send<unknown>("GET", `${BASE_SETTINGS}/netboot`);
   return NetbootInfo.parse(raw);
+}
+
+/**
+ * GET /api/v1/settings/https → how THIS listener serves TLS (POL-70/D89): off (plain HTTP / behind
+ * an ingress), provided (operator cert files) or self-signed (the deployment's own persisted CA,
+ * downloadable below). Drives the Settings ▸ HTTPS card.
+ */
+export async function getHttpsInfo(): Promise<HttpsInfo> {
+  const raw = await send<unknown>("GET", `${BASE_SETTINGS}/https`);
+  return HttpsInfo.parse(raw);
+}
+
+/**
+ * GET /api/v1/settings/https/ca.crt → the self-signed CA certificate as a Blob (PEM). Bypasses
+ * `send` (file, not JSON) but rides the same session cookie; the caller anchors it into a download.
+ */
+export async function downloadHttpsCa(): Promise<Blob> {
+  const res = await fetch(apiUrl(`${BASE_SETTINGS}/https/ca.crt`), { credentials: "include" });
+  if (!res.ok) throw new ApiError(res.status, `GET ${BASE_SETTINGS}/https/ca.crt -> ${res.status}`);
+  return res.blob();
 }
 
 /** GET /api/v1/settings/image → schedule + urgency + last rebuild + published images (POL-41). */

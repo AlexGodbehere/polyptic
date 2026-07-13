@@ -35,7 +35,7 @@ The console and player are **Vite SPAs**; their production build (`vite build`) 
 docker run -d --name polyptic-server -p 8080:8080 \
   -e DATABASE_URL=postgres://polyptic:polyptic@your-db:5432/polyptic \
   -e COOKIE_SECRET="$(openssl rand -hex 32)" \
-  -e SECURE_COOKIES=true \
+  -e PUBLIC_BASE_URL=https://polyptic.example.com \
   -e CORS_ORIGIN=https://polyptic.example.com \
   -e POLYPTIC_ADMIN_EMAIL=alex@example.com \
   -e POLYPTIC_ADMIN_PASSWORD='change-me-now' \
@@ -45,7 +45,7 @@ docker run -d --name polyptic-server -p 8080:8080 \
   ghcr.io/<owner>/polyptic-server:0.1.0
 ```
 
-You bring your own Postgres (any reachable Postgres 16; `DATABASE_URL` points at it). Put a TLS-terminating reverse proxy in front so the cookie can be `SECURE_COOKIES=true`.
+You bring your own Postgres (any reachable Postgres 16; `DATABASE_URL` points at it). Put a TLS-terminating reverse proxy in front — the https `PUBLIC_BASE_URL` then flips the session cookie `Secure` automatically (POL-70/D89). No proxy? Set `TLS_CERT_FILE`/`TLS_KEY_FILE` (mounted PEMs) and the server terminates TLS itself.
 
 **2. docker-compose — server + Postgres together**
 
@@ -84,7 +84,11 @@ Set on `docker run -e …`, the compose `environment:` / `.env`, or Helm `config
 | `STORE` | Registry backend: `postgres` or `memory` | `memory` is a test-only double; never run real with it. |
 | `PORT` | HTTP + WS listen port | Default `8080`. The image `EXPOSE`s 8080. |
 | `COOKIE_SECRET` | Signs the http-only session cookies | **Required** in prod; long random value (`openssl rand -hex 32`). |
-| `SECURE_COOKIES` | Mark session cookies `Secure` (HTTPS-only) | **Set `true` in production over HTTPS.** `NODE_ENV=production` implies it unless overridden. |
+| `PUBLIC_BASE_URL` | The ONE public origin (`scheme://host[:port]`) | **Set it in prod.** `https://` turns Secure cookies on automatically; a declared `http://` turns them off (browsers silently drop Secure cookies over http — login would never persist) with a loud boot banner (POL-70/D89). |
+| `SECURE_COOKIES` | Explicit override for the cookie `Secure` flag | Rarely needed: wins over `PUBLIC_BASE_URL`'s scheme and `NODE_ENV=production`; prefer setting `PUBLIC_BASE_URL`. |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | Native TLS: serve the whole listener over https | PEM paths, **both together** or the server refuses to boot. Prefer a terminating ingress/proxy; note native TLS also makes the netboot depot https, which GRUB cannot fetch (D47). |
+| `TLS_MODE` | `self-signed` → native TLS with a server-minted, store-persisted CA + cert | For hosts with no cert infrastructure. Download + trust the CA once via Console ▸ Settings ▸ HTTPS. Conflicts with the cert-file pair. |
+| `TLS_SANS` | Extra SANs for the self-signed certificate | Comma list; localhost/hostname/`PUBLIC_BASE_URL` host are automatic. |
 | `CORS_ORIGIN` | Comma-separated allowed browser origins | Only needed when a browser hits the API from a *different* origin than the bundled console (e.g. a separately hosted console). Same-origin bundled UI needs nothing here. |
 | `POLYPTIC_ADMIN_EMAIL` / `POLYPTIC_ADMIN_PASSWORD` | Seed the first operator on first boot | Created only if no users exist yet. Set both, or manage operators out-of-band. |
 | `POLYPTIC_BOOTSTRAP_TOKEN` | Shared agent-enrollment secret | Unset → **open mode** (auto-approve, dev only). Set → **gated**: agents show PENDING until approved. Same value on each agent. |

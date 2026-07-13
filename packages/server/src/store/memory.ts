@@ -16,6 +16,7 @@ import type {
   PersistedImageRollout,
   PersistedMachine,
   PersistedMtlsCa,
+  PersistedServerTls,
   PersistedMural,
   PersistedPlacement,
   PersistedScene,
@@ -343,6 +344,18 @@ export class MemoryStore implements Store {
 
   async setPlayerTokenSecret(secret: string): Promise<void> {
     this.playerTokenSecret = secret;
+  }
+
+  // ── Self-signed server TLS (POL-70/D89) ──────────────────────────────────────
+
+  private serverTls: PersistedServerTls | undefined;
+
+  async getServerTls(): Promise<PersistedServerTls | undefined> {
+    return this.serverTls ? clone(this.serverTls) : undefined;
+  }
+
+  async setServerTls(tls: PersistedServerTls): Promise<void> {
+    this.serverTls = clone(tls);
   }
 
   // ── Display settings (POL-6) ─────────────────────────────────────────────────

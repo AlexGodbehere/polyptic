@@ -116,13 +116,21 @@ spec:
               mountPath: /etc/polyptic/jobs
               readOnly: true
             {{- end }}
+          {{- /* Native self-signed TLS (POL-70/D89): the pod serves HTTPS on the same port, so
+               httpGet probes must say scheme HTTPS (kubelet skips certificate verification, so the
+               self-signed cert is fine). Untouched otherwise — default renders stay byte-identical. */}}
+          {{- $selfSigned := eq .Values.tls.mode "self-signed" }}
           {{- with .Values.livenessProbe }}
+          {{- $probe := deepCopy . }}
+          {{- if and $selfSigned $probe.httpGet }}{{- $_ := set $probe.httpGet "scheme" "HTTPS" }}{{- end }}
           livenessProbe:
-            {{- toYaml . | nindent 12 }}
+            {{- toYaml $probe | nindent 12 }}
           {{- end }}
           {{- with .Values.readinessProbe }}
+          {{- $probe := deepCopy . }}
+          {{- if and $selfSigned $probe.httpGet }}{{- $_ := set $probe.httpGet "scheme" "HTTPS" }}{{- end }}
           readinessProbe:
-            {{- toYaml . | nindent 12 }}
+            {{- toYaml $probe | nindent 12 }}
           {{- end }}
           {{- with .Values.resources }}
           resources:

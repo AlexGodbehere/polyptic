@@ -150,13 +150,18 @@ export function computeBaseUrl(request: FastifyRequest, fallback: string): strin
   const fwdHost = headerFirst(request.headers["x-forwarded-host"]);
   const fwdProto = headerFirst(request.headers["x-forwarded-proto"]).toLowerCase();
   const host = headerFirst(request.headers.host);
+  // With no proxy header, the socket's own protocol decides — "https" when the server itself
+  // terminates TLS (TLS_CERT_FILE/TLS_KEY_FILE, POL-70/D89), "http" on the plain listener. This is
+  // what keeps console-facing URLs (live-ISO downloads etc.) https under native TLS; the boot
+  // chain is unaffected because buildBootGrubCfg forces http:// regardless (GRUB has no TLS).
+  const socketProto = request.protocol === "https" ? "https" : "http";
 
   if (fwdHost) {
-    const proto = fwdProto || "http";
+    const proto = fwdProto || socketProto;
     return `${proto}://${fwdHost}`.replace(/\/+$/, "");
   }
   if (host) {
-    const proto = fwdProto || "http";
+    const proto = fwdProto || socketProto;
     // GRUB's http client (and other minimal fetchers) sends `Host:` WITHOUT the port. Trusting it
     // verbatim baked port-80 URLs into /boot/grub.cfg, so the very netboot menu we served over
     // :8080 pointed the kernel fetch at :80 — "connection refused" at the box (found live in the

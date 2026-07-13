@@ -63,7 +63,9 @@ import { ShellRelay } from "./shell-relay";
 import type { DevtoolsRelay } from "./devtools-relay";
 
 interface WsDeps {
-  server: Server;
+  /** The main listener the three channels' upgrades hang off — plain HTTP, or the native-TLS
+   *  HTTPS server (POL-70/D89); both expose the same `upgrade` seam. */
+  server: Server | HttpsServer;
   control: ControlPlane;
   enrollment: Enrollment;
   /** Local-auth service — gates the /admin upgrade on a valid session cookie (Phase 3f). */

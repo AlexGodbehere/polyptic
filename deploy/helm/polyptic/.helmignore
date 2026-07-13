@@ -8,5 +8,4 @@
 *.orig
 .idea/
 .vscode/
-*.tgz
 ci/

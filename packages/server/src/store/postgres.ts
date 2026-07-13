@@ -38,6 +38,7 @@ import type {
   PersistedImageRollout,
   PersistedMachine,
   PersistedMtlsCa,
+  PersistedServerTls,
   PersistedMural,
   PersistedPlacement,
   PersistedScene,
@@ -383,6 +384,21 @@ export class PostgresStore implements Store {
       CREATE TABLE IF NOT EXISTS player_token_secret (
         id     int PRIMARY KEY DEFAULT 1,
         secret text NOT NULL
+      )
+    `;
+
+    // Self-signed server TLS (POL-70/D89): a single row holding the deployment's own server CA +
+    // the current server leaf, minted on the first TLS_MODE=self-signed boot and REUSED across
+    // restarts (operators trust the CA once; a re-mint would re-warn every browser).
+    await sql`
+      CREATE TABLE IF NOT EXISTS server_tls (
+        id           int PRIMARY KEY DEFAULT 1,
+        ca_cert_pem  text NOT NULL,
+        ca_key_pem   text NOT NULL,
+        cert_pem     text NOT NULL,
+        key_pem      text NOT NULL,
+        sans         jsonb NOT NULL DEFAULT '[]'::jsonb,
+        created_at   timestamptz NOT NULL DEFAULT now()
       )
     `;
     // Image updates (POL-41): a single row with the scheduled-rebuild settings, the urgent
@@ -1067,6 +1083,41 @@ export class PostgresStore implements Store {
     await sql`
       INSERT INTO player_token_secret (id, secret) VALUES (1, ${secret})
       ON CONFLICT (id) DO UPDATE SET secret = EXCLUDED.secret
+    `;
+  }
+
+  // ── Self-signed server TLS (POL-70/D89) ──────────────────────────────────────
+
+  async getServerTls(): Promise<PersistedServerTls | undefined> {
+    const sql = this.sql;
+    const rows = await sql<
+      { ca_cert_pem: string; ca_key_pem: string; cert_pem: string; key_pem: string; sans: unknown; created_at: Date }[]
+    >`
+      SELECT ca_cert_pem, ca_key_pem, cert_pem, key_pem, sans, created_at FROM server_tls WHERE id = 1 LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) return undefined;
+    return {
+      caCertPem: row.ca_cert_pem,
+      caKeyPem: row.ca_key_pem,
+      certPem: row.cert_pem,
+      keyPem: row.key_pem,
+      sans: Array.isArray(row.sans) ? row.sans.map(String) : [],
+      createdAt: row.created_at.toISOString(),
+    };
+  }
+
+  async setServerTls(tls: PersistedServerTls): Promise<void> {
+    const sql = this.sql;
+    await sql`
+      INSERT INTO server_tls (id, ca_cert_pem, ca_key_pem, cert_pem, key_pem, sans, created_at)
+      VALUES (1, ${tls.caCertPem}, ${tls.caKeyPem}, ${tls.certPem}, ${tls.keyPem}, ${JSON.stringify(tls.sans)}::jsonb, ${tls.createdAt})
+      ON CONFLICT (id) DO UPDATE SET
+        ca_cert_pem = EXCLUDED.ca_cert_pem,
+        ca_key_pem  = EXCLUDED.ca_key_pem,
+        cert_pem    = EXCLUDED.cert_pem,
+        key_pem     = EXCLUDED.key_pem,
+        sans        = EXCLUDED.sans
     `;
   }
 

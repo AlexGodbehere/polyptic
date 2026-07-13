@@ -54,6 +54,13 @@ export function devtoolsUrl(screenId: string): string {
   return `${BASE}/screens/${encodeURIComponent(screenId)}/devtools`;
 }
 
+/** Absolute URL of an API path (e.g. "/settings/https/ca.crt") against the API origin — for the
+ *  rare non-JSON fetch (file downloads) that bypasses `send` but must still hit the right host in
+ *  dev (console on Vite :5175, API on :8080). */
+export function apiUrl(path: string): string {
+  return `${BASE}${path}`;
+}
+
 /** A non-2xx REST response, with the parsed error payload (if any) for diagnostics. */
 export class ApiError extends Error {
   constructor(
