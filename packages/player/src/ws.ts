@@ -59,11 +59,14 @@ export class PlayerSocket {
     }
   }
 
-  /** Send a contract-shaped frame to the server (no-op unless the socket is open). */
-  send(frame: unknown): void {
+  /** Send a contract-shaped frame to the server. Returns false when the socket is down, so callers
+   *  that queue (the diag channel) know the frame did NOT go out. */
+  send(frame: unknown): boolean {
     if (this.ws !== null && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(frame));
+      return true;
     }
+    return false;
   }
 
   private connect(): void {
