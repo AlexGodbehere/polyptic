@@ -23,6 +23,7 @@ export type {
   PersistedPlacement,
   PersistedScene,
   PersistedScreen,
+  PersistedServerTls,
   PersistedSession,
   PersistedState,
   PersistedUser,

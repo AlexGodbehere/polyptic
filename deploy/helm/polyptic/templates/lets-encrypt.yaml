@@ -1,0 +1,66 @@
+{{- /*
+Let's Encrypt (POL-70/D89) — the ACS-proven pattern, adapted: a namespaced cert-manager
+Issuer (ACME, http01 solver) plus a Certificate that writes the ingress host's TLS
+secret. With letsEncrypt.enabled the vendored cert-manager subchart installs alongside
+(Chart.yaml condition), so `ingress.enabled + a host + an email` is a complete HTTPS
+deployment — no manual secret, auto-renewal included.
+
+The http01 solver needs the host to resolve publicly and :80 to reach this cluster's
+ingress. `staging: true` uses the staging ACME endpoint (untrusted certs, generous rate
+limits) for testing the challenge path without burning production rate limits.
+*/ -}}
+{{- if .Values.letsEncrypt.enabled }}
+{{- if eq .Values.tls.mode "self-signed" }}
+{{- fail "letsEncrypt.enabled and tls.mode=self-signed are mutually exclusive — Let's Encrypt terminates TLS at the ingress with a real certificate; self-signed terminates in the pod. Pick one." }}
+{{- end }}
+{{- $publicBase := include "polyptic.publicBaseUrl" . }}
+{{- if not $publicBase }}
+{{- fail "letsEncrypt.enabled needs a public host to certify — enable the ingress (ingress.host / ingressRoute.host) or set config.publicBaseUrl." }}
+{{- end }}
+{{- /* Origin → bare DNS name: strip the scheme and any explicit port. */}}
+{{- $host := $publicBase | trimPrefix "https://" | trimPrefix "http://" }}
+{{- $host = regexReplaceAll ":\\d+$" $host "" }}
+{{- $secretName := "" }}
+{{- if .Values.ingress.enabled }}
+{{- $secretName = .Values.ingress.tls.secretName }}
+{{- else if .Values.ingressRoute.enabled }}
+{{- $secretName = required "letsEncrypt with the Traefik IngressRoute needs ingressRoute.tls.secretName set (the Certificate writes that secret; leave tls.certResolver empty — that is Traefik's own ACME, not cert-manager's)." .Values.ingressRoute.tls.secretName }}
+{{- else }}
+{{- $secretName = "polyptic-tls" }}
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: letsencrypt
+  labels:
+    {{- include "polyptic.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: {{ ternary "https://acme-staging-v02.api.letsencrypt.org/directory" "https://acme-v02.api.letsencrypt.org/directory" .Values.letsEncrypt.staging }}
+    email: {{ required "letsEncrypt.email is required (the ACME account address — expiry notices land there)." .Values.letsEncrypt.email }}
+    privateKeySecretRef:
+      name: letsencrypt
+    solvers:
+      - http01:
+          ingress:
+            class: {{ .Values.letsEncrypt.solverIngressClass }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $secretName }}
+  labels:
+    {{- include "polyptic.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $secretName }}
+  privateKey:
+    rotationPolicy: Always
+  dnsNames:
+    - {{ $host }}
+    {{- range .Values.letsEncrypt.additionalDnsNames }}
+    - {{ . }}
+    {{- end }}
+  issuerRef:
+    name: letsencrypt
+    kind: Issuer
+{{- end }}

@@ -29,6 +29,8 @@ import { MediaStore, registerMediaServeRoute } from "./media";
 import { DEFAULT_RETAIN_BUILDS, ImageUpdates } from "./image-updates";
 import { registerOpsRoutes } from "./ops";
 import { computeBaseUrl, provisionBootSummary, provisionConfigFromEnv, registerProvisionRoutes } from "./provision";
+import { initSelfSignedTls, registerHttpsRoutes, requiredSans, resolveTlsEnv } from "./server-tls";
+import type { ServerTlsRuntime, TlsEnvConfig } from "./server-tls";
 import { PageDataService } from "./page-data";
 import { registerRestRoutes } from "./rest";
 import { DevtoolsRelay } from "./devtools-relay";
@@ -104,26 +106,39 @@ const MEDIA_PUBLIC_BASE = (
   "http://localhost:8080"
 ).replace(/\/+$/, "");
 
-// ── Native TLS (POL-70/D88): TLS_CERT_FILE + TLS_KEY_FILE serve the WHOLE listener over HTTPS. ──
-// The primary production path is a TLS-terminating ingress in front of plain :8080 (Kubernetes);
-// native TLS is the cheap alternative for a bare/docker host with a real certificate. Both env vars
-// are required together — asking for TLS and getting plain HTTP would be the worst failure mode, so
-// a half-configured pair refuses to start. NOTE: this makes EVERY route https, including the netboot
-// depot, which GRUB (no TLS stack, D47) can then no longer fetch — a netbooting fleet needs the
-// depot on plain HTTP (the ingress split, or a plain second deployment); the boot banner says so.
-const TLS_CERT_FILE = process.env.TLS_CERT_FILE?.trim() || undefined;
-const TLS_KEY_FILE = process.env.TLS_KEY_FILE?.trim() || undefined;
-if ((TLS_CERT_FILE === undefined) !== (TLS_KEY_FILE === undefined)) {
-  console.error(
-    "FATAL: TLS_CERT_FILE and TLS_KEY_FILE must be set TOGETHER (both PEM paths) — refusing to " +
-      "start half-configured rather than silently serve plain HTTP.",
-  );
+// ── Durable store: select by STORE env, run migrations. Created BEFORE the Fastify instance since
+// POL-70: the self-signed TLS material persists in it, and Fastify needs the cert at construction. ──
+const { store, kind: storeKind } = createStore();
+await store.migrate();
+
+// ── Native TLS (POL-70/D89): three modes, resolved by server-tls.ts. ──
+//   provided     TLS_CERT_FILE + TLS_KEY_FILE (both, or refuse) — the operator's own certificate.
+//   self-signed  TLS_MODE=self-signed — the server mints + PERSISTS its own CA + leaf (no cert
+//                infrastructure needed; operators trust the CA once via Console ▸ Settings ▸ HTTPS).
+//   off          neither — plain HTTP; a TLS-terminating ingress is the primary production path.
+// Native TLS makes EVERY route https, including the netboot depot, which GRUB (no TLS stack, D47)
+// can then no longer fetch — a netbooting fleet needs the depot on plain HTTP; the boot banner says so.
+let tlsEnv: TlsEnvConfig;
+try {
+  tlsEnv = resolveTlsEnv();
+} catch (err) {
+  console.error(`FATAL: ${(err as Error).message}`);
   process.exit(1);
 }
-const nativeTls =
-  TLS_CERT_FILE && TLS_KEY_FILE
-    ? { cert: await Bun.file(TLS_CERT_FILE).text(), key: await Bun.file(TLS_KEY_FILE).text() }
-    : undefined;
+let serverTls: ServerTlsRuntime = { mode: "off", sans: [] };
+let selfSignedChange: "none" | "minted-ca" | "reminted-leaf" = "none";
+if (tlsEnv.mode === "provided") {
+  serverTls = {
+    mode: "provided",
+    material: { cert: await Bun.file(tlsEnv.certFile).text(), key: await Bun.file(tlsEnv.keyFile).text() },
+    sans: [],
+  };
+} else if (tlsEnv.mode === "self-signed") {
+  const init = await initSelfSignedTls(store, requiredSans());
+  selfSignedChange = init.changed;
+  serverTls = init;
+}
+const nativeTls = serverTls.material;
 
 const fastifyOptions = {
   logger: { level: process.env.LOG_LEVEL ?? "info" },
@@ -136,10 +151,6 @@ const fastifyOptions = {
   ...(nativeTls ? { https: nativeTls } : {}),
 };
 const fastify = Fastify(fastifyOptions as unknown as FastifyHttpOptions<HttpServer>);
-
-// ── Durable store: select by STORE env, run migrations, load persisted state ──
-const { store, kind: storeKind } = createStore();
-await store.migrate();
 
 // ── Live Activity feed (D25): one bounded in-memory ring, shared by the control plane (content /
 // combine / split / rename / scene emits) and the ws presence layer (machine + screen connect/drop). ──
@@ -384,6 +395,9 @@ registerRestRoutes(
 );
 // The DevTools HTTP proxy (POL-67): the entry redirect + the frontend-file proxy, GATED under /api/v1.
 registerDevtoolsRoutes(fastify, devtoolsRelay);
+// The HTTPS settings surface (POL-70/D89), GATED under /api/v1: the TLS posture + (in self-signed
+// mode) the CA download the console's trust instructions hang off.
+registerHttpsRoutes(fastify, serverTls);
 // TOP-LEVEL media serve route (GET /media/:id) — NOT /api/v1, so UNgated: players + the public wall
 // load uploads without a session, exactly like any external content URL (ids are unguessable).
 registerMediaServeRoute(fastify, media);
@@ -531,14 +545,32 @@ fastify.log.info(
 // Start the periodic live-preview capture sweep (no-op when CAPTURE_INTERVAL_MS=0).
 capture.start();
 
-// Native-TLS banner (POL-70/D88) — before the auth banners so the transport story reads first.
+// Native-TLS banner (POL-70/D89) — before the auth banners so the transport story reads first.
 if (nativeTls) {
   fastify.log.info(
-    { event: "tls.native" },
-    "serving NATIVE TLS (TLS_CERT_FILE/TLS_KEY_FILE): every route on this listener is https — " +
-      "including the netboot depot, which GRUB (no TLS stack) can NOT fetch. A netbooting fleet " +
-      "needs the boot paths on plain http (ingress split by host, or a plain-HTTP depot deployment).",
+    { event: "tls.native", mode: serverTls.mode },
+    `serving NATIVE TLS (${serverTls.mode === "self-signed" ? "TLS_MODE=self-signed" : "TLS_CERT_FILE/TLS_KEY_FILE"}): ` +
+      "every route on this listener is https — including the netboot depot, which GRUB (no TLS stack) " +
+      "can NOT fetch. A netbooting fleet needs the boot paths on plain http (ingress split by host, or " +
+      "a plain-HTTP depot deployment).",
   );
+  if (serverTls.mode === "self-signed" && serverTls.ca) {
+    fastify.log.info(
+      {
+        event: "tls.selfsigned",
+        change: selfSignedChange,
+        sans: serverTls.sans,
+        caFingerprintSha256: serverTls.ca.fingerprintSha256,
+      },
+      (selfSignedChange === "minted-ca"
+        ? "self-signed TLS: minted the deployment CA + server certificate (persisted — reused on every future boot). "
+        : selfSignedChange === "reminted-leaf"
+          ? "self-signed TLS: re-minted the server certificate from the persisted CA (new SANs / nearing expiry — trusted browsers stay green). "
+          : "self-signed TLS: reusing the persisted CA + server certificate. ") +
+        "Browsers warn until the CA is trusted once per device: download it from Console ▸ Settings ▸ HTTPS " +
+        `(fingerprint ${serverTls.ca.fingerprintSha256.slice(0, 23)}…).`,
+    );
+  }
 }
 
 // Auth boot banner: secure by default; make the dev shortcuts loud.
@@ -556,7 +588,7 @@ if (!authConfig.enabled) {
         "COOKIE_SECRET to a long random value in any non-throwaway deployment.",
     );
   }
-  // ── POL-70/D88: HTTPS is the default posture; plain HTTP degrades LOUDLY, never refuses. ──
+  // ── POL-70/D89: HTTPS is the default posture; plain HTTP degrades LOUDLY, never refuses. ──
   // Zero-click boot (non-negotiable #4) must keep working on a trusted plain-HTTP homelab, but the
   // POL-59/POL-67 audits both carry the caveat "the tunnel is as trustworthy as the network" —
   // HTTPS is the prerequisite for hostile networks, so serving auth over plain HTTP gets a banner.
@@ -571,7 +603,7 @@ if (!authConfig.enabled) {
         "tunnels are only as trustworthy as the network (POL-59/POL-67 audits). Fine for localhost or " +
         "a trusted lab LAN; ANY OTHER DEPLOYMENT MUST BE SERVED OVER HTTPS (ingress TLS or " +
         "TLS_CERT_FILE/TLS_KEY_FILE) — Secure cookies then follow automatically from an https " +
-        "PUBLIC_BASE_URL (POL-70/D88).",
+        "PUBLIC_BASE_URL (POL-70/D89).",
     );
   } else if (authConfig.publicScheme === "https") {
     fastify.log.info(

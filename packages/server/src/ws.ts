@@ -64,7 +64,7 @@ import type { DevtoolsRelay } from "./devtools-relay";
 
 interface WsDeps {
   /** The main listener the three channels' upgrades hang off — plain HTTP, or the native-TLS
-   *  HTTPS server (POL-70/D88); both expose the same `upgrade` seam. */
+   *  HTTPS server (POL-70/D89); both expose the same `upgrade` seam. */
   server: Server | HttpsServer;
   control: ControlPlane;
   enrollment: Enrollment;

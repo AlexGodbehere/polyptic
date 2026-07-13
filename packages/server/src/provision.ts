@@ -151,7 +151,7 @@ export function computeBaseUrl(request: FastifyRequest, fallback: string): strin
   const fwdProto = headerFirst(request.headers["x-forwarded-proto"]).toLowerCase();
   const host = headerFirst(request.headers.host);
   // With no proxy header, the socket's own protocol decides — "https" when the server itself
-  // terminates TLS (TLS_CERT_FILE/TLS_KEY_FILE, POL-70/D88), "http" on the plain listener. This is
+  // terminates TLS (TLS_CERT_FILE/TLS_KEY_FILE, POL-70/D89), "http" on the plain listener. This is
   // what keeps console-facing URLs (live-ISO downloads etc.) https under native TLS; the boot
   // chain is unaffected because buildBootGrubCfg forces http:// regardless (GRUB has no TLS).
   const socketProto = request.protocol === "https" ? "https" : "http";

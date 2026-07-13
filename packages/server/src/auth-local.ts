@@ -136,7 +136,7 @@ export function authConfigFromEnv(env: NodeJS.ProcessEnv = process.env): AuthCon
   //   2. Else the DECLARED public scheme decides: PUBLIC_BASE_URL=https://… → Secure on,
   //      http://… → Secure off (the same POL-43 silent-login-failure otherwise) — so a TLS
   //      deployment is secure with zero extra knobs and a plain-HTTP homelab keeps working,
-  //      each with the matching boot banner (POL-70/D88).
+  //      each with the matching boot banner (POL-70/D89).
   //   3. Else NODE_ENV=production defaults Secure on (the pre-POL-70 behaviour, unchanged).
   const rawSecure = env.SECURE_COOKIES?.trim().toLowerCase();
   const publicScheme = publicSchemeFromEnv(env);

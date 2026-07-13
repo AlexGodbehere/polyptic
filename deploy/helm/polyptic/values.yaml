@@ -94,13 +94,69 @@ ingress:
   path: /
   pathType: Prefix
   tls:
-    # TLS is the DEFAULT (POL-70/D88): enabling the ingress emits a tls block for
+    # TLS is the DEFAULT (POL-70/D89): enabling the ingress emits a tls block for
     # `host` using `secretName` (pre-provisioned, or filled by cert-manager via
     # the annotation above). Opting OUT (enabled: false) serves the operator
     # console — passwords and sessions — over plain HTTP; the server keeps
     # working but drops the cookie Secure flag and warns loudly at boot.
     enabled: true
     secretName: polyptic-tls
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Native server TLS (POL-70/D89) — the server itself terminates TLS on :8080.
+# The PRIMARY path on Kubernetes is still a TLS-terminating ingress (above, or
+# letsEncrypt below) in front of a plain listener; use this only when neither
+# cert-manager nor a provisioned certificate exists — the homelab case.
+# ─────────────────────────────────────────────────────────────────────────────
+tls:
+  # "" (default)   → plain HTTP in the pod; TLS (if any) terminates at the ingress.
+  # "self-signed"  → the server mints + persists its own CA + certificate in the
+  #                  store (server-side TLS_MODE=self-signed) and serves HTTPS
+  #                  itself. Operators download the CA from Console ▸ Settings ▸
+  #                  HTTPS and trust it once per device. The chart flips the
+  #                  health probes to HTTPS (kubelet skips verification).
+  #                  EXPOSURE: reach the pod directly (service.type NodePort /
+  #                  LoadBalancer) — an HTTP ingress in front of an HTTPS pod
+  #                  needs re-encryption config this chart deliberately doesn't
+  #                  ship, and letsEncrypt/ingress TLS is the better answer there.
+  #                  Set config.publicBaseUrl to the https:// address the console
+  #                  is reached at. NOT combinable with letsEncrypt.enabled.
+  mode: ""
+  # Extra SANs for the self-signed certificate (every extra name/IP operators
+  # dial). The chart already includes the derived public host and the in-cluster
+  # Service DNS names; the server adds localhost + its own hostname.
+  sans: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Let's Encrypt (POL-70/D89) — free, auto-renewed REAL certificates for the
+# ingress host, the zero-warning alternative to self-signed. Enabling this
+# installs the vendored cert-manager subchart (condition-gated; skip it if the
+# cluster already runs cert-manager and copy templates/lets-encrypt.yaml
+# instead) and renders an ACME Issuer + a Certificate for the public host into
+# the ingress's TLS secret — ingress TLS then Just Works with no manual secret.
+# Requires: a public DNS name for the host and reachability on :80 for the
+# http01 solver challenge.
+# ─────────────────────────────────────────────────────────────────────────────
+letsEncrypt:
+  enabled: false
+  # REQUIRED when enabled: the ACME account email (expiry notices land here).
+  email: ""
+  # Use the Let's Encrypt STAGING endpoint (untrusted certs, generous rate
+  # limits) while testing the solver path; flip to false for the real cert.
+  staging: false
+  # Extra DNS names on the certificate beyond the derived public host.
+  additionalDnsNames: []
+  # Ingress class the http01 solver publishes its challenge on. K3s ships
+  # Traefik, hence the default; nginx clusters set "nginx".
+  solverIngressClass: traefik
+
+# Values passed through to the vendored cert-manager subchart (only installed
+# when letsEncrypt.enabled). CRDs must ship with it or the Issuer/Certificate
+# above have no API to land on.
+cert-manager:
+  fullnameOverride: cert-manager
+  crds:
+    enabled: true
 
 resources:
   limits:
@@ -172,7 +228,7 @@ config:
   store: postgres
 
   # ONE public origin (scheme://host[:port], no path) for the whole operator/wall
-  # surface (POL-70/D88). When empty the chart DERIVES it from the enabled
+  # surface (POL-70/D89). When empty the chart DERIVES it from the enabled
   # ingress: https://<ingressRoute.host>, or http(s)://<ingress.host> per
   # ingress.tls.enabled. It becomes PUBLIC_BASE_URL and the default for the three
   # origin-shaped values below — set those only when they genuinely differ.
@@ -229,7 +285,7 @@ media:
   # Absolute base URL prepended to /media/<id> when an upload becomes a
   # ContentSource.url. MUST be reachable by the players/public wall — in prod this
   # is normally your public HTTPS origin. Empty derives from config.publicBaseUrl /
-  # the ingress host (POL-70/D88).
+  # the ingress host (POL-70/D89).
   publicBase: ""
 
   # Maximum accepted upload size, in bytes (streamed; rejected past this). ~200MB.

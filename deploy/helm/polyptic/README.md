@@ -49,7 +49,7 @@ Two K3s-specific notes:
   carry a `kubernetes.io/arch` selector *and* a pod-affinity to the server's
   node (the depot PVC is RWO). On a single-node K3s VM that means: the VM's
   arch is the arch you can build images for.
-- **One hostname is enough (POL-70/D88).** `ingressRoute.host` derives
+- **One hostname is enough (POL-70/D89).** `ingressRoute.host` derives
   `PUBLIC_BASE_URL`, `CORS_ORIGIN`, `PLAYER_BASE_URL` and `MEDIA_PUBLIC_BASE`
   as `https://<host>` automatically — set `config.publicBaseUrl` (or the
   individual values) only when they genuinely differ.
@@ -79,7 +79,7 @@ helm install polyptic deploy/helm/polyptic \
 ## Production note (D29 / Phase 3f, POL-70 / D88) — HTTPS is the default
 
 The operator auth gate (Phase 3f) signs an **http-only session cookie**, and serving it
-over TLS is the chart's default posture (POL-70/D88):
+over TLS is the chart's default posture (POL-70/D89):
 
 - **Enabling an ingress means TLS.** `ingress.tls.enabled` defaults **true** (the
   Ingress references `ingress.tls.secretName` — pre-provisioned, or filled by
@@ -106,6 +106,53 @@ reproducible/GitOps installs.
 deployment — that leaves every `/api/v1` route and the `/admin` WS unprotected (it
 exists only so the e2e suite can run with `AUTH_ENABLED=false`).
 
+## Let's Encrypt (POL-70/D89) — real certificates from one email
+
+For a public hostname, skip manual secrets entirely:
+
+```sh
+helm dependency build deploy/helm/polyptic   # once per checkout (the subchart is vendored; this verifies it)
+helm install polyptic deploy/helm/polyptic \
+  --set ingress.enabled=true \
+  --set ingress.host=polyptic.example.com \
+  --set letsEncrypt.enabled=true \
+  --set letsEncrypt.email=ops@example.com
+```
+
+`letsEncrypt.enabled` condition-installs the **vendored cert-manager subchart** and renders
+an ACME `Issuer` plus a `Certificate` that writes the exact TLS secret the Ingress already
+references (`ingress.tls.secretName`) — HTTPS then Just Works and auto-renews. Requirements:
+the host resolves publicly and :80 reaches this cluster's ingress (http01 solver;
+`letsEncrypt.solverIngressClass` defaults to `traefik` for K3s, set `nginx` where relevant).
+Use `letsEncrypt.staging=true` to test the challenge path against the staging endpoint
+(untrusted certs, generous rate limits) before flipping to production. Extra hostnames go on
+`letsEncrypt.additionalDnsNames`. On a Traefik IngressRoute deployment set
+`ingressRoute.tls.secretName` (NOT `certResolver` — that is Traefik's own ACME) and the
+Certificate targets it. If the cluster already runs cert-manager, keep `letsEncrypt.enabled`
+off and copy `templates/lets-encrypt.yaml`'s two resources instead of double-installing.
+
+## Self-signed TLS (POL-70/D89) — HTTPS with no certificate infrastructure
+
+For a homelab with no public DNS and no cert-manager:
+
+```sh
+helm install polyptic deploy/helm/polyptic \
+  --set tls.mode=self-signed \
+  --set service.type=NodePort \
+  --set config.publicBaseUrl=https://walls.home:30080
+```
+
+The server mints its own CA + certificate (SANs: the derived public host, the in-cluster
+Service DNS names, `tls.sans`, plus localhost + the pod hostname), **persists them in the
+store, and reuses them across restarts** — operators download the CA once from
+**Console ▸ Settings ▸ HTTPS** (fingerprint shown for verification, per-OS trust
+instructions in the card) and every device stays green from then on. The chart flips the
+health probes to HTTPS (kubelet skips certificate verification). **Exposure:** reach the pod
+directly (`service.type=NodePort`/`LoadBalancer`) — an ingress in front of an HTTPS pod
+needs re-encryption config this chart deliberately doesn't ship; if you have an ingress,
+`letsEncrypt` or a provided secret is the better answer. Not combinable with
+`letsEncrypt.enabled` (one terminates in the pod, the other at the ingress).
+
 ## Health, metrics, and the auth gate
 
 `/healthz` and `/metrics` are **top-level (NOT `/api/v1`)** so they are UNgated for
@@ -131,7 +178,7 @@ The server reads three env vars (rendered into the ConfigMap):
 - `MEDIA_PUBLIC_BASE` — absolute base URL prepended to `/media/<id>` when an upload
   becomes a `ContentSource.url`. **Must be reachable by the players/public wall** —
   derived from the public origin (`config.publicBaseUrl` / the ingress host,
-  POL-70/D88); set `media.publicBase` only when it genuinely differs.
+  POL-70/D89); set `media.publicBase` only when it genuinely differs.
 - `MEDIA_MAX_BYTES` — max accepted upload size, in bytes (default ~200MB).
 
 `media.persistence.enabled=true` (default) backs `MEDIA_DIR` with a
@@ -183,7 +230,7 @@ helm upgrade --install polyptic deploy/helm/polyptic \
 ```
 
 (`ingressRoute.host` also derives `PUBLIC_BASE_URL`, `CORS_ORIGIN`,
-`PLAYER_BASE_URL` and `MEDIA_PUBLIC_BASE` as `https://<host>` — POL-70/D88.)
+`PLAYER_BASE_URL` and `MEDIA_PUBLIC_BASE` as `https://<host>` — POL-70/D89.)
 
 ## Netboot depot + automated image updates (POL-33…43)
 
@@ -284,14 +331,16 @@ rebuild Jobs work here even though the host is macOS.
 | `image.repository` / `image.tag` | `ghcr.io/polyptic/polyptic-server` / `""` (→ appVersion) | Server image. |
 | `replicaCount` | `1` | Single-writer control plane; keep at 1. |
 | `service.type` / `service.port` | `ClusterIP` / `8080` | Container always listens on `containerPort` (8080). |
-| `ingress.enabled` / `.host` / `.tls.enabled` / `.tls.secretName` | `false` / `polyptic.example.com` / **`true`** / `polyptic-tls` | Enabling the ingress means TLS unless you opt out (POL-70/D88); cert-manager via `ingress.annotations`. |
+| `ingress.enabled` / `.host` / `.tls.enabled` / `.tls.secretName` | `false` / `polyptic.example.com` / **`true`** / `polyptic-tls` | Enabling the ingress means TLS unless you opt out (POL-70/D89); cert-manager via `ingress.annotations`. |
 | `config.store` | `postgres` | `postgres` or `memory`. |
-| `config.publicBaseUrl` | `""` (derived from the enabled ingress host) | The ONE public origin → `PUBLIC_BASE_URL` + the defaults below (POL-70/D88). |
+| `config.publicBaseUrl` | `""` (derived from the enabled ingress host) | The ONE public origin → `PUBLIC_BASE_URL` + the defaults below (POL-70/D89). |
 | `config.corsOrigin` | `""` (derived) | Comma-separated browser origins (cookies are cross-origin). |
 | `config.playerBaseUrl` | `""` (derived) | Origin the wall boxes open; the chart appends `/player`. |
 | `config.authEnabled` | `true` | The Phase 3f gate. Keep true. |
 | `config.secureCookies` | `""` (auto) | Secure follows `PUBLIC_BASE_URL`'s scheme, else `NODE_ENV` — see production note. |
 | `config.captureIntervalMs` | `""` | Live-preview capture cadence (server default when empty). |
+| `tls.mode` / `tls.sans` | `""` / `[]` | `self-signed` → server-native TLS with a persisted, downloadable CA (see the self-signed section). |
+| `letsEncrypt.enabled` / `.email` / `.staging` / `.additionalDnsNames` / `.solverIngressClass` | `false` / `""` / `false` / `[]` / `traefik` | Real ACME certificates via the vendored cert-manager subchart (see the Let's Encrypt section). |
 | `secrets.cookieSecret` | `""` (generated) | Session signing key. |
 | `secrets.bootstrapToken` | `""` (OPEN) | Set for gated agent enrollment. |
 | `secrets.adminEmail` / `secrets.adminPassword` | `""` | Seed operator on first boot. |

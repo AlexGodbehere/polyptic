@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ImageBuild } from "@polyptic/protocol";
+import type { HttpsInfo, ImageBuild } from "@polyptic/protocol";
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 
@@ -20,6 +20,7 @@ onMounted(() => {
   void store.fetchNetboot();
   void store.fetchDisplaySettings();
   void store.fetchImageUpdates();
+  void loadHttps();
   document.addEventListener("keydown", onKeydown);
 });
 onBeforeUnmount(() => document.removeEventListener("keydown", onKeydown));
@@ -82,6 +83,43 @@ async function regenerate(): Promise<void> {
   await store.regenerateEnrollment();
   regenerating.value = false;
   showToast("New enrolment token generated");
+}
+
+// ── HTTPS (POL-70/D89) ─────────────────────────────────────────────────────────
+// Only meaningful when THIS listener terminates TLS (native provided/self-signed). Behind a
+// TLS-terminating ingress the server sees plain HTTP ("off") and the card stays hidden — the
+// certificate story lives with the ingress / cert-manager there, not here.
+const https = ref<HttpsInfo | null>(null);
+const trustOpen = ref(false);
+const caDownloading = ref(false);
+
+/** Non-throwing, like fetchNetboot — a failed load just leaves the card hidden. */
+async function loadHttps(): Promise<void> {
+  try {
+    https.value = await auth.getHttpsInfo();
+  } catch (err) {
+    console.error("[console] loadHttps failed", err);
+  }
+}
+
+async function downloadCa(): Promise<void> {
+  if (!https.value?.ca || caDownloading.value) return;
+  caDownloading.value = true;
+  try {
+    const blob = await auth.downloadHttpsCa();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "polyptic-ca.crt";
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast("CA certificate downloaded");
+  } catch (err) {
+    console.error("[console] CA download failed", err);
+    showToast("Download failed");
+  } finally {
+    caDownloading.value = false;
+  }
 }
 
 // ── Onboard Screens: the ⋯ build menu ──────────────────────────────────────────
@@ -644,6 +682,65 @@ async function onSignOut(): Promise<void> {
         </template>
       </section>
 
+      <!-- HTTPS (POL-70/D89) ----------------------------------------------------- -->
+      <!-- Rendered only when THIS listener terminates TLS; behind a TLS-terminating ingress the
+           server sees plain HTTP and the certificate story belongs to the ingress/cert-manager. -->
+      <section v-if="https && https.mode !== 'off'" class="card">
+        <h2 class="card-title">HTTPS</h2>
+
+        <template v-if="https.mode === 'provided'">
+          <p class="card-sub gap">
+            <span class="badge-ok">Native TLS</span>
+            Serving HTTPS with the certificate you provided (TLS_CERT_FILE / TLS_KEY_FILE). Nothing to trust here —
+            browsers already know your issuer.
+          </p>
+        </template>
+
+        <template v-else>
+          <p class="card-sub gap">
+            Serving HTTPS with this deployment's own self-signed certificate. Browsers warn until the Polyptic CA is
+            trusted <em>once per device</em> — download it, verify the fingerprint, and follow the steps for your OS.
+            The certificate persists across restarts, so devices stay green after trusting it.
+          </p>
+
+          <div class="field-row">
+            <code class="mono-field" :title="https.ca?.fingerprintSha256">SHA-256 {{ https.ca?.fingerprintSha256 }}</code>
+            <button type="button" class="btn-ghost-sm" :disabled="caDownloading" @click="downloadCa">
+              {{ caDownloading ? "Downloading…" : "Download CA certificate" }}
+            </button>
+          </div>
+          <p class="hint gap-sm">Certificate covers: {{ https.sans.join(", ") }}</p>
+
+          <button type="button" class="btn-ghost-sm gap" @click="trustOpen = !trustOpen">
+            {{ trustOpen ? "Hide trust instructions" : "How to trust it on your devices" }}
+          </button>
+          <ul v-if="trustOpen" class="trust-list">
+            <li>
+              <strong>macOS</strong> — double-click <code>polyptic-ca.crt</code>, add it to the <em>System</em> keychain
+              in Keychain Access, open it and set Trust ▸ "Always Trust". Terminal:
+              <code>sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain polyptic-ca.crt</code>
+            </li>
+            <li>
+              <strong>Windows</strong> — double-click ▸ Install Certificate ▸ Local Machine ▸ place in
+              <em>Trusted Root Certification Authorities</em> (or import there via <code>certmgr.msc</code>).
+            </li>
+            <li>
+              <strong>Linux</strong> —
+              <code>sudo cp polyptic-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates</code>.
+              Firefox keeps its own store: Settings ▸ Privacy &amp; Security ▸ Certificates ▸ View Certificates ▸ Import.
+            </li>
+            <li>
+              <strong>iOS</strong> — open the file (AirDrop/Mail), install the profile under Settings ▸ General ▸ VPN &amp;
+              Device Management, then enable full trust in Settings ▸ General ▸ About ▸ Certificate Trust Settings.
+            </li>
+            <li>
+              <strong>Android</strong> — Settings ▸ Security &amp; privacy ▸ More ▸ Encryption &amp; credentials ▸
+              Install a certificate ▸ CA certificate.
+            </li>
+          </ul>
+        </template>
+      </section>
+
       <!-- Update schedule ------------------------------------------------------ -->
       <section id="sec-image" class="card pad-lg">
         <h2 class="card-title">Update schedule</h2>
@@ -990,6 +1087,30 @@ async function onSignOut(): Promise<void> {
   color: var(--muted2);
   line-height: 1.55;
   margin: 0;
+}
+
+/* HTTPS card (POL-70/D89): the per-OS trust steps. Hint-toned so the card stays calm. */
+.trust-list {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted2);
+  line-height: 1.6;
+  max-width: 640px;
+}
+.trust-list strong {
+  color: var(--fg2);
+}
+.trust-list code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: var(--muted-bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  overflow-wrap: anywhere;
 }
 .pill {
   border: none;

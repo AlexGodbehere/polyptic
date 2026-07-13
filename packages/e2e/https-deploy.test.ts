@@ -1,5 +1,5 @@
 /**
- * HTTPS as the default deployment posture — POL-70/D88.
+ * HTTPS as the default deployment posture — POL-70/D89.
  *
  * The chart's promise: name a host on either ingress and the deployment comes out HTTPS end to end
  * — a tls block on the Ingress, PUBLIC_BASE_URL/CORS_ORIGIN/PLAYER_BASE_URL/MEDIA_PUBLIC_BASE all
@@ -108,6 +108,84 @@ describe.skipIf(!helmAvailable)("helm template — the four TLS postures", () =>
     expect(doc).toContain('CORS_ORIGIN: "https://polyptic.example.com"');
     expect(doc).toContain('PLAYER_BASE_URL: "https://polyptic.example.com/player"');
     expect(doc).toContain('NODE_ENV: "production"');
+  });
+
+  test("letsEncrypt + a host + an email → Issuer + Certificate into the ingress's TLS secret, subchart included", () => {
+    const doc = render(
+      "ingress.enabled=true",
+      "ingress.host=walls.example.org",
+      "letsEncrypt.enabled=true",
+      "letsEncrypt.email=ops@example.org",
+    );
+    expect(doc).toContain("kind: Issuer");
+    expect(doc).toContain("server: https://acme-v02.api.letsencrypt.org/directory");
+    expect(doc).toContain("email: ops@example.org");
+    // The Certificate writes the exact secret the Ingress already references — no manual secret.
+    expect(doc).toMatch(/kind: Certificate\nmetadata:\n  name: polyptic-tls/);
+    expect(doc).toMatch(/dnsNames:\s*\n\s*- walls\.example\.org/);
+    expect(doc).toContain("class: traefik"); // the http01 solver's ingress class (K3s default)
+    // The vendored cert-manager subchart rendered alongside (condition-gated dependency).
+    expect(doc).toContain("app.kubernetes.io/name: cert-manager");
+  });
+
+  test("letsEncrypt staging flag flips the ACME endpoint", () => {
+    const doc = render(
+      "ingress.enabled=true",
+      "ingress.host=walls.example.org",
+      "letsEncrypt.enabled=true",
+      "letsEncrypt.email=ops@example.org",
+      "letsEncrypt.staging=true",
+    );
+    expect(doc).toContain("server: https://acme-staging-v02.api.letsencrypt.org/directory");
+  });
+
+  test("letsEncrypt guards: no email and no host both refuse with a legible message", () => {
+    const noEmail = spawnSync(
+      "helm",
+      [
+        "template",
+        "t",
+        CHART_DIR,
+        "--set",
+        "ingress.enabled=true",
+        "--set",
+        "ingress.host=x.org",
+        "--set",
+        "letsEncrypt.enabled=true",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(noEmail.status).not.toBe(0);
+    expect(noEmail.stderr).toContain("letsEncrypt.email is required");
+
+    const noHost = spawnSync(
+      "helm",
+      ["template", "t", CHART_DIR, "--set", "letsEncrypt.enabled=true", "--set", "letsEncrypt.email=a@b.c"],
+      { encoding: "utf8" },
+    );
+    expect(noHost.status).not.toBe(0);
+    expect(noHost.stderr).toContain("needs a public host");
+  });
+
+  test("tls.mode=self-signed → TLS_MODE + derived TLS_SANS in the configmap, probes flip to HTTPS", () => {
+    const doc = render("tls.mode=self-signed", "config.publicBaseUrl=https://walls.home:8443");
+    expect(doc).toContain('TLS_MODE: "self-signed"');
+    // SANs: the public host (port stripped) + the in-cluster Service DNS names.
+    expect(doc).toContain('TLS_SANS: "walls.home,test-polyptic,test-polyptic.default,test-polyptic.default.svc"');
+    // kubelet must probe https now (it skips cert verification, so self-signed is fine).
+    expect(doc.match(/scheme: HTTPS/g)?.length).toBe(2); // liveness + readiness
+    // And an https publicBaseUrl still drives the derived origins + Secure cookies server-side.
+    expect(doc).toContain('PUBLIC_BASE_URL: "https://walls.home:8443"');
+  });
+
+  test("self-signed and letsEncrypt together refuse (one terminates in the pod, one at the ingress)", () => {
+    const out = spawnSync(
+      "helm",
+      ["template", "t", CHART_DIR, "--set", "tls.mode=self-signed", "--set", "letsEncrypt.enabled=true"],
+      { encoding: "utf8" },
+    );
+    expect(out.status).not.toBe(0);
+    expect(out.stderr).toContain("mutually exclusive");
   });
 
   test("explicit values still beat every derivation (the escape hatches hold)", () => {

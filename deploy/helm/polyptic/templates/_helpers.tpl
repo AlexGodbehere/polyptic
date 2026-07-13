@@ -190,7 +190,7 @@ each arch (POL-75), not the global imageUpdates.arch.
 {{- end }}
 
 {{/*
-The ONE public origin of the deployment (POL-70/D88) — scheme://host[:port], no
+The ONE public origin of the deployment (POL-70/D89) — scheme://host[:port], no
 trailing slash. Precedence: explicit config.publicBaseUrl → the enabled ingress
 (IngressRoute host is https by design — its entrypoint is websecure; the generic
 Ingress follows ingress.tls.enabled, which defaults ON) → "" (underivable: no
@@ -211,6 +211,29 @@ host name to end up HTTPS everywhere.
 {{- printf "http://%s" .Values.ingress.host -}}
 {{- end -}}
 {{- end -}}
+{{- end }}
+
+{{/*
+TLS_SANS for tls.mode=self-signed (POL-70/D89): the derived public host (if any),
+the in-cluster Service DNS names, plus tls.sans. Comma-joined for the env var; the
+server unions in localhost/loopbacks/os.hostname() itself.
+*/}}
+{{- define "polyptic.tlsSans" -}}
+{{- $sans := list -}}
+{{- $pub := include "polyptic.publicBaseUrl" . -}}
+{{- if $pub -}}
+{{- $host := $pub | trimPrefix "https://" | trimPrefix "http://" -}}
+{{- $host = regexReplaceAll ":\\d+$" $host "" -}}
+{{- $sans = append $sans $host -}}
+{{- end -}}
+{{- $svc := include "polyptic.fullname" . -}}
+{{- $sans = append $sans $svc -}}
+{{- $sans = append $sans (printf "%s.%s" $svc .Release.Namespace) -}}
+{{- $sans = append $sans (printf "%s.%s.svc" $svc .Release.Namespace) -}}
+{{- range .Values.tls.sans -}}
+{{- $sans = append $sans . -}}
+{{- end -}}
+{{- $sans | uniq | join "," -}}
 {{- end }}
 
 {{/*
@@ -236,7 +259,7 @@ The single image serves the CONSOLE at / and the PLAYER at /player/ (server/src/
 player base is the public origin + /player. Getting this wrong points every wall screen at the
 operator's LOGIN PAGE — which is exactly what happened on the first real deployment. Operators
 therefore set `config.playerBaseUrl` to the plain origin (same as corsOrigin) and the chart appends
-the path — or, since POL-70/D88, set nothing and it derives from the public origin. Idempotent: an
+the path — or, since POL-70/D89, set nothing and it derives from the public origin. Idempotent: an
 origin that already ends in /player is left alone.
 */}}
 {{- define "polyptic.playerBaseUrl" -}}

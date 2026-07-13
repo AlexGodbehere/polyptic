@@ -1,5 +1,5 @@
 /**
- * POL-70/D88 — native TLS on the MAIN listener, driven over real sockets.
+ * POL-70/D89 — native TLS on the MAIN listener, driven over real sockets.
  *
  * The primary production path is a TLS-terminating ingress in front of plain :8080; native TLS
  * (TLS_CERT_FILE/TLS_KEY_FILE → Fastify's `https` option) is the cheap alternative for a bare host.
@@ -72,7 +72,7 @@ async function selfSignedServerCert(): Promise<{ keyPem: string; certPem: string
   return { keyPem: await pemKey(keys.privateKey), certPem: cert.toString("pem") };
 }
 
-describe("native TLS on the main listener (POL-70/D88)", () => {
+describe("native TLS on the main listener (POL-70/D89)", () => {
   let fastify: FastifyInstance;
   let port: number;
 

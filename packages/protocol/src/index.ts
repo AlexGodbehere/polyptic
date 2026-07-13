@@ -1478,6 +1478,31 @@ export const NetbootInfo = z.object({
 });
 export type NetbootInfo = z.infer<typeof NetbootInfo>;
 
+/** HTTPS surface for Settings (POL-70/D89): how THIS listener is serving TLS, if at all.
+ *  `off` = plain HTTP (TLS, if any, terminates upstream at an ingress — the server can't see it);
+ *  `provided` = native TLS from operator-supplied TLS_CERT_FILE/TLS_KEY_FILE;
+ *  `self-signed` = native TLS from the deployment's own persisted CA (TLS_MODE=self-signed) — the
+ *  one mode where the console offers the CA download + per-OS trust instructions, because trusting
+ *  that CA once is what turns the browser warning off for good. Secret-free: the CA *certificate*
+ *  is public material by definition; its private key never leaves the store. */
+export const HttpsInfo = z.object({
+  mode: z.enum(["off", "provided", "self-signed"]),
+  /** SANs baked into the active self-signed leaf (empty in the other modes) — every name/IP the
+   *  cert answers for, so an operator can see at a glance why some OTHER hostname still warns. */
+  sans: z.array(z.string()).default([]),
+  /** The downloadable CA (self-signed mode only). The fingerprint lets a careful operator verify
+   *  the download out-of-band before trusting it. */
+  ca: z
+    .object({
+      createdAt: z.string(),
+      fingerprintSha256: z.string(),
+      /** API path of the PEM download (relative to the API base), e.g. "/settings/https/ca.crt". */
+      downloadPath: z.string(),
+    })
+    .nullable(),
+});
+export type HttpsInfo = z.infer<typeof HttpsInfo>;
+
 /** One arch's published live image, as served UNGATED at `/dist/image/<arch>/manifest.json` and
  *  compared by every netbooted box's 5-minute update poll (POL-41). `urgent` is the fleet-wide
  *  roll-out switch: true → boxes running a different imageId reboot within minutes (splayed);

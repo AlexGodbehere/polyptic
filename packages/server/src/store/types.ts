@@ -239,6 +239,30 @@ export interface PersistedMtlsCa {
 }
 
 /**
+ * POL-70/D89 — the deployment's own SELF-SIGNED server TLS material (`TLS_MODE=self-signed`), for
+ * installs with no cert infrastructure at all (the homelab case). One row, REUSED across restarts:
+ * operators trust the CA certificate ONCE (Console ▸ Settings ▸ HTTPS ▸ Download) and every later
+ * boot serves a leaf chaining to it — re-minting the CA on boot would re-warn every browser, which
+ * is why persistence is the whole point. The LEAF may be re-minted from the same CA (new SANs, or
+ * nearing expiry) without breaking that trust. Distinct from {@link PersistedMtlsCa}: that CA
+ * authenticates AGENTS (client certs); this one authenticates the SERVER to browsers.
+ */
+export interface PersistedServerTls {
+  /** The CA certificate (PEM) — what operators download and add to their trust store. */
+  caCertPem: string;
+  /** The CA private key (PKCS#8 PEM) — signs the server leaf; never leaves the store. */
+  caKeyPem: string;
+  /** The current server leaf certificate (PEM), SANs covering every dialable host. */
+  certPem: string;
+  /** The leaf's private key (PKCS#8 PEM). */
+  keyPem: string;
+  /** SANs baked into the current leaf — drives the "re-mint on new host" check. */
+  sans: string[];
+  /** ISO-8601 creation timestamp of the CA. */
+  createdAt: string;
+}
+
+/**
  * Image-updates state (POL-41): the scheduled-rebuild settings, the urgent roll-out switch, and the
  * last rebuild-hook run. One row; absent until first mutated (defaults: schedule on at 01:00,
  * urgent off).
@@ -425,6 +449,11 @@ export interface Store {
   getPlayerTokenSecret(): Promise<string | undefined>;
   /** Persist the player-token secret (single row, written once on first boot). */
   setPlayerTokenSecret(secret: string): Promise<void>;
+  // ── Self-signed server TLS (POL-70/D89) ────────────────────────────────────
+  /** The persisted self-signed server TLS material (CA + current leaf). Undefined until first boot in self-signed mode. */
+  getServerTls(): Promise<PersistedServerTls | undefined>;
+  /** Persist the self-signed server TLS material (single row; leaf re-mints overwrite in place). */
+  setServerTls(tls: PersistedServerTls): Promise<void>;
 
   // ── Display settings (POL-6) ───────────────────────────────────────────────
   /** The persisted fleet-wide display settings (badge toggle). Undefined until first changed. */

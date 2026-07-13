@@ -1,5 +1,5 @@
 /**
- * authConfigFromEnv — the SECURE_COOKIES precedence contract (POL-43, then POL-70/D88).
+ * authConfigFromEnv — the SECURE_COOKIES precedence contract (POL-43, then POL-70/D89).
  *
  * The documented rule: an EXPLICIT SECURE_COOKIES always wins; then the DECLARED public scheme
  * (PUBLIC_BASE_URL) decides; NODE_ENV=production is only the default when neither speaks. The
@@ -32,7 +32,7 @@ describe("authConfigFromEnv secureCookies", () => {
     expect(authConfigFromEnv({ SECURE_COOKIES: "  ", NODE_ENV: "production" }).secureCookies).toBe(true);
   });
 
-  // ── POL-70/D88: the declared public scheme decides when SECURE_COOKIES is unset. ──
+  // ── POL-70/D89: the declared public scheme decides when SECURE_COOKIES is unset. ──
 
   test("an https PUBLIC_BASE_URL turns Secure ON with no other knobs (the TLS default path)", () => {
     expect(authConfigFromEnv({ PUBLIC_BASE_URL: "https://walls.example.org" }).secureCookies).toBe(true);

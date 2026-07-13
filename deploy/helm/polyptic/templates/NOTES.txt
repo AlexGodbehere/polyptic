@@ -45,7 +45,7 @@ Store:     {{ .Values.config.store }}
   {{- if eq $sc "false" }}
 
      ⚠️  config.secureCookies=false: operator sessions ride PLAIN HTTP. Fine on
-        a trusted lab LAN; anything else MUST be served over HTTPS (POL-70/D88
+        a trusted lab LAN; anything else MUST be served over HTTPS (POL-70/D89
         — leave secureCookies "" and cookies follow the public origin's scheme).
   {{- else if and (eq $sc "") (hasPrefix "http://" $pub) }}
 
@@ -54,7 +54,7 @@ Store:     {{ .Values.config.store }}
         default) or set config.publicBaseUrl to an https origin.
   {{- else if eq $sc "" }}
 
-     Session cookie security is AUTO (POL-70/D88): Secure follows the public
+     Session cookie security is AUTO (POL-70/D89): Secure follows the public
      origin{{ if $pub }} ({{ $pub }}){{ else }} (none derived — NODE_ENV={{ .Values.config.nodeEnv }} decides){{ end }}.
   {{- end }}
 {{- else }}

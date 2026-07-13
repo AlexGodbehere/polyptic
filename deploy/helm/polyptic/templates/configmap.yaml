@@ -11,12 +11,19 @@ data:
   STORE: {{ .Values.config.store | quote }}
   {{- $publicBase := include "polyptic.publicBaseUrl" . }}
   {{- if $publicBase }}
-  # The ONE public origin (POL-70/D88): explicit config.publicBaseUrl, or derived from the enabled
+  # The ONE public origin (POL-70/D89): explicit config.publicBaseUrl, or derived from the enabled
   # ingress. The server keys cookie security off its scheme (https → Secure) and uses it as the
   # last-resort base for request-derived URLs.
   PUBLIC_BASE_URL: {{ $publicBase | quote }}
   {{- end }}
   CORS_ORIGIN: {{ include "polyptic.corsOrigin" . | quote }}
+  {{- if eq .Values.tls.mode "self-signed" }}
+  # ── Native self-signed TLS (POL-70/D89): the server mints + persists its own CA/cert and serves
+  # HTTPS itself. SANs cover the derived public host, the in-cluster Service DNS names, and any
+  # extra tls.sans; the server adds localhost + its own hostname. Probes flip to HTTPS (deployment).
+  TLS_MODE: "self-signed"
+  TLS_SANS: {{ include "polyptic.tlsSans" . | quote }}
+  {{- end }}
   # The player lives under /player/ in the single image — the helper appends it (see _helpers.tpl).
   PLAYER_BASE_URL: {{ include "polyptic.playerBaseUrl" . | quote }}
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
@@ -24,7 +31,7 @@ data:
   AUTH_ENABLED: {{ .Values.config.authEnabled | quote }}
   {{- if ne (toString .Values.config.secureCookies) "" }}
   # Explicit override — "" (auto, the default) lets the server derive Secure from
-  # PUBLIC_BASE_URL's scheme, falling back to NODE_ENV (POL-70/D88).
+  # PUBLIC_BASE_URL's scheme, falling back to NODE_ENV (POL-70/D89).
   SECURE_COOKIES: {{ .Values.config.secureCookies | quote }}
   {{- end }}
   {{- if ne (toString .Values.config.captureIntervalMs) "" }}
