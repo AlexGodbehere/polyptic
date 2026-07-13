@@ -52,6 +52,47 @@ MANIFEST="$(curl -fsS --max-time 10 "$base/dist/image/$arch/manifest.json" 2>/de
 SERVED="$(printf '%s' "$MANIFEST" | sed -n 's/.*"imageId":"\([^"]*\)".*/\1/p')"
 [ -n "$SERVED" ] || exit 0
 
+# ── Self-heal the POL-47 boot splash onto the medium (POL-80) ───────────────────────────────────────
+# A stick flashed from an OLD (theme-less) medium shows a PLAIN GRUB menu on the OFFLINE/Wi-Fi path,
+# because that path can't reach the server to fetch the theme (GRUB/UEFI can't join WPA). This box IS
+# in Linux now and CAN reach the depot (wired OR Wi-Fi — the server was just proven reachable above),
+# so pull /boot/theme.txt + logo.png and drop them at the medium's /polyptic/boot/theme/, where
+# render-local-grub points `set theme=`. The theme is SHARED, not slotted: this is deliberately
+# independent of the A/B kernel/initrd slot refresh below, and runs on EVERY poll (a box already on
+# the current image never reaches that refresh, but its old stick still needs the splash). Idempotent
+# (a content compare, so a medium already current is never rewritten — no FAT churn, no log line),
+# atomic-ish (stage on tmpfs, then mv into place), and strictly best-effort: every step is guarded so
+# nothing here can block or brick the boot.
+heal_boot_theme() {
+  hm="$(mktemp -d 2>/dev/null)" || return 0
+  hdev="$(sh "$LIB/find-boot-medium.sh" "$hm" rw 2>/dev/null || true)"
+  # Only a medium with the local (offline) menu needs a baked theme: a plain server-menu netboot stick
+  # fetches the theme from the server, and a LEAN medium has no /polyptic tree.
+  if [ -n "$hdev" ] && [ -f "$hm/grub/local-$arch.cfg" ]; then
+    stg="$(mktemp -d 2>/dev/null || true)"
+    if [ -n "$stg" ] \
+       && curl -fsS --max-time 60 -o "$stg/theme.txt" "$base/boot/theme.txt" 2>/dev/null \
+       && curl -fsS --max-time 60 -o "$stg/logo.png"  "$base/boot/logo.png"  2>/dev/null \
+       && [ -s "$stg/theme.txt" ] && [ -s "$stg/logo.png" ]; then
+      td="$hm/polyptic/boot/theme"
+      if cmp -s "$stg/theme.txt" "$td/theme.txt" 2>/dev/null \
+         && cmp -s "$stg/logo.png" "$td/logo.png" 2>/dev/null; then
+        : # already current — leave the FAT untouched (the every-5-minutes steady state)
+      elif mkdir -p "$td" 2>/dev/null \
+           && cp "$stg/theme.txt" "$td/theme.txt.new" 2>/dev/null \
+           && cp "$stg/logo.png"  "$td/logo.png.new"  2>/dev/null \
+           && mv -f "$td/theme.txt.new" "$td/theme.txt" 2>/dev/null \
+           && mv -f "$td/logo.png.new"  "$td/logo.png"  2>/dev/null; then
+        echo "update-poll: healed the offline boot splash on $hdev from $base/boot/ (theme.txt + logo.png)"
+      fi
+      rm -f "$td/theme.txt.new" "$td/logo.png.new" 2>/dev/null || true
+    fi
+    [ -z "$stg" ] || rm -rf "$stg" 2>/dev/null || true
+  fi
+  umount "$hm" 2>/dev/null || true; rmdir "$hm" 2>/dev/null || true
+}
+heal_boot_theme
+
 # A box that booted the local menu's RECOVERY entry (medium pruned past retention → newest image on
 # an older kernel) runs the SERVED rootfs already, so the image-id comparison alone would never heal
 # it. The tell is structural: the running kernel has no /lib/modules directory in this rootfs. Such

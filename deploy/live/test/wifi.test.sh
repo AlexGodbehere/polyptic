@@ -363,6 +363,8 @@ case "$url" in
   */builds/*/vmlinuz)     [ -f "$STUB/curl_fail_kernel" ] && exit 22; cp "$STUB/new-vmlinuz" "$out" ;;
   */builds/*/initrd-wifi) [ -f "$STUB/curl_fail_initrd" ] && exit 22; cp "$STUB/new-initrd" "$out" ;;
   */builds/*/SHA256SUMS)  cp "$STUB/new-sums" "$out" ;;
+  */boot/theme.txt) [ -f "$STUB/served-theme" ] || exit 22; cp "$STUB/served-theme" "$out" ;;
+  */boot/logo.png)  [ -f "$STUB/served-logo" ]  || exit 22; cp "$STUB/served-logo"  "$out" ;;
   *) exit 22 ;;
 esac
 exit 0
@@ -455,6 +457,41 @@ out="$(up "$d")"
 has "poll window: waits"             "waiting for the nightly window" "$out"
 has "poll window: medium untouched"  "slot=a image=old-1" "$(head -n1 "$d/vol-POLYPTIC-BT/grub/local-arm64.cfg")"
 eq "poll window: no reboot"          "" "$(cat "$d/systemctl.log" 2>/dev/null || true)"
+
+# 38a) offline-splash self-heal (POL-80): a stick flashed from an OLD, theme-less medium gets the
+#      branded splash pulled from the server WITHOUT re-flashing — even when the image is ALREADY
+#      current (running==served, kernel matched), which is exactly the box that never reaches the A/B
+#      refresh. The theme dir does not exist on the medium beforehand.
+d="$(new_poll_case poll-theme cur-9 cur-9 cur-9)"   # up to date: heal runs, no reboot
+printf 'THEME-BODY-v1\n' > "$d/served-theme"
+printf 'LOGO-BYTES-v1\n' > "$d/served-logo"
+eq "theme heal: medium starts theme-less" "" "$(ls "$d/vol-POLYPTIC-BT/polyptic/boot/theme" 2>/dev/null || true)"
+out="$(up "$d")"
+tdir="$d/vol-POLYPTIC-BT/polyptic/boot/theme"
+eq "theme heal: theme.txt baked from the server" "THEME-BODY-v1" "$(cat "$tdir/theme.txt" 2>/dev/null)"
+eq "theme heal: logo.png baked from the server"  "LOGO-BYTES-v1" "$(cat "$tdir/logo.png" 2>/dev/null)"
+has "theme heal: logs the heal"                  "healed the offline boot splash" "$out"
+eq "theme heal: up-to-date box does not reboot"  "" "$(cat "$d/systemctl.log" 2>/dev/null || true)"
+
+# 38b) idempotent: a second poll with the medium already current rewrites NOTHING and logs nothing
+#      (the every-5-minutes steady state — no FAT churn).
+out2="$(up "$d")"
+hasnt "theme heal: idempotent second run is silent" "healed the offline boot splash" "$out2"
+eq "theme heal: theme.txt unchanged" "THEME-BODY-v1" "$(cat "$tdir/theme.txt" 2>/dev/null)"
+eq "theme heal: no stray temp files" "" "$(ls "$tdir" | grep '\.new$' || true)"
+
+# 38c) a changed server theme is re-pulled onto an already-themed medium (drift → re-heal).
+printf 'THEME-BODY-v2\n' > "$d/served-theme"
+out3="$(up "$d")"
+has "theme heal: re-heals on drift"       "healed the offline boot splash" "$out3"
+eq "theme heal: theme.txt updated to v2"  "THEME-BODY-v2" "$(cat "$tdir/theme.txt" 2>/dev/null)"
+
+# 38d) a server not serving the theme (/boot/* 404s) heals nothing and stays silent — never a
+#      half-written or empty theme (guards the deterministic-bake fallback path too).
+d="$(new_poll_case poll-notheme cur-9 cur-9 cur-9)"   # no served-theme/served-logo set → curl exits 22
+out="$(up "$d")"
+hasnt "theme heal: silent when server serves no theme" "healed the offline boot splash" "$out"
+eq "theme heal: no theme.txt written on 404" "" "$(cat "$d/vol-POLYPTIC-BT/polyptic/boot/theme/theme.txt" 2>/dev/null || true)"
 
 # ─── wifi-diagnostics.sh: the keyboard-less failure report (POL-77) ──────────────────────────────────
 # When association can't start the hook writes this report to the medium so a screen with no keyboard
