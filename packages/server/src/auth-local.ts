@@ -102,8 +102,24 @@ export interface AuthConfig {
   cookieSecret: string;
   /** True if the dev cookie secret is in use (drives the boot warning). */
   usingDevCookieSecret: boolean;
-  /** Mark the session cookie `secure` (HTTPS-only). Gate on SECURE_COOKIES / NODE_ENV=production. */
+  /** Mark the session cookie `secure` (HTTPS-only). SECURE_COOKIES → PUBLIC_BASE_URL scheme → NODE_ENV. */
   secureCookies: boolean;
+  /** The declared public scheme, when PUBLIC_BASE_URL parses: drives the plain-HTTP boot warning. */
+  publicScheme: "http" | "https" | null;
+}
+
+/** The scheme of PUBLIC_BASE_URL when it parses as an http(s) URL, else null (unset/garbage). */
+function publicSchemeFromEnv(env: NodeJS.ProcessEnv): "http" | "https" | null {
+  const raw = env.PUBLIC_BASE_URL?.trim();
+  if (!raw) return null;
+  try {
+    const proto = new URL(raw).protocol;
+    if (proto === "https:") return "https";
+    if (proto === "http:") return "http";
+  } catch {
+    // Not a URL — fall through to the NODE_ENV default rather than guess.
+  }
+  return null;
 }
 
 /** Read the auth config from the environment, secure-by-default. */
@@ -113,13 +129,23 @@ export function authConfigFromEnv(env: NodeJS.ProcessEnv = process.env): AuthCon
   const rawSecret = env.COOKIE_SECRET?.trim();
   const usingDevCookieSecret = !rawSecret || rawSecret.length === 0;
   const cookieSecret = usingDevCookieSecret ? DEV_COOKIE_SECRET : rawSecret;
-  // An EXPLICIT SECURE_COOKIES always wins (either way); NODE_ENV=production is only the
-  // default when it is unset. The old `|| production` forced Secure cookies on plain-HTTP
-  // production deploys, where the browser silently drops them — login "succeeds" but no
-  // session ever persists (found live on the first in-cluster deploy, POL-43).
+  // Precedence (POL-43, then POL-70):
+  //   1. An EXPLICIT SECURE_COOKIES always wins (either way). The old `|| production` forced
+  //      Secure cookies on plain-HTTP production deploys, where the browser silently drops them —
+  //      login "succeeds" but no session ever persists (found live on the first in-cluster deploy).
+  //   2. Else the DECLARED public scheme decides: PUBLIC_BASE_URL=https://… → Secure on,
+  //      http://… → Secure off (the same POL-43 silent-login-failure otherwise) — so a TLS
+  //      deployment is secure with zero extra knobs and a plain-HTTP homelab keeps working,
+  //      each with the matching boot banner (POL-70/D88).
+  //   3. Else NODE_ENV=production defaults Secure on (the pre-POL-70 behaviour, unchanged).
   const rawSecure = env.SECURE_COOKIES?.trim().toLowerCase();
-  const secureCookies = rawSecure ? rawSecure === "true" : env.NODE_ENV === "production";
-  return { enabled, cookieSecret, usingDevCookieSecret, secureCookies };
+  const publicScheme = publicSchemeFromEnv(env);
+  const secureCookies = rawSecure
+    ? rawSecure === "true"
+    : publicScheme
+      ? publicScheme === "https"
+      : env.NODE_ENV === "production";
+  return { enabled, cookieSecret, usingDevCookieSecret, secureCookies, publicScheme };
 }
 
 export interface AuthServiceDeps {

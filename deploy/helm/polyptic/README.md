@@ -37,9 +37,6 @@ helm install polyptic oci://ghcr.io/polyptic/charts/polyptic --version <x.y.z> \
   --set ingressRoute.host=polyptic.your-domain \
   --set ingressRoute.tls.certResolver=letsencrypt \
   --set ingressRoute.bootHost=boot.polyptic.your-domain \
-  --set config.corsOrigin=https://polyptic.your-domain \
-  --set config.playerBaseUrl=https://polyptic.your-domain \
-  --set media.publicBase=https://polyptic.your-domain \
   --set imageUpdates.arch=<amd64|arm64 — your BOXES' arch> \
   --set secrets.bootstrapToken="$(openssl rand -hex 24)" \
   --set secrets.adminEmail=you@example.com \
@@ -52,6 +49,10 @@ Two K3s-specific notes:
   carry a `kubernetes.io/arch` selector *and* a pod-affinity to the server's
   node (the depot PVC is RWO). On a single-node K3s VM that means: the VM's
   arch is the arch you can build images for.
+- **One hostname is enough (POL-70/D88).** `ingressRoute.host` derives
+  `PUBLIC_BASE_URL`, `CORS_ORIGIN`, `PLAYER_BASE_URL` and `MEDIA_PUBLIC_BASE`
+  as `https://<host>` automatically — set `config.publicBaseUrl` (or the
+  individual values) only when they genuinely differ.
 - **The boot path stays plain HTTP.** K3s Traefik listens on :80 (`web`) by
   default, so `bootHost` works immediately; point DNS for both hosts at the VM
   and bake `http://<bootHost>` into your boot media.
@@ -66,11 +67,7 @@ helm install polyptic deploy/helm/polyptic \
   --set ingress.enabled=true \
   --set ingress.className=nginx \
   --set ingress.host=polyptic.example.com \
-  --set ingress.tls.enabled=true \
   --set ingress.tls.secretName=polyptic-tls \
-  --set config.corsOrigin=https://polyptic.example.com \
-  --set config.playerBaseUrl=https://polyptic.example.com \
-  --set config.secureCookies=true \
   --set postgresql.enabled=false \
   --set externalDatabase.url='postgres://user:pass@pg.example:5432/polyptic' \
   --set secrets.cookieSecret="$(openssl rand -hex 32)" \
@@ -79,20 +76,31 @@ helm install polyptic deploy/helm/polyptic \
   --set secrets.adminPassword="$(openssl rand -base64 18)"
 ```
 
-## Production note (D29 / Phase 3f) — HTTPS + `SECURE_COOKIES=true`
+## Production note (D29 / Phase 3f, POL-70 / D88) — HTTPS is the default
 
-The operator auth gate (Phase 3f) signs an **http-only session cookie**. In any real
-deployment you **MUST**:
+The operator auth gate (Phase 3f) signs an **http-only session cookie**, and serving it
+over TLS is the chart's default posture (POL-70/D88):
 
-1. Serve the console over **HTTPS** (Ingress TLS or an upstream terminator), and
-2. Set **`config.secureCookies=true`** (renders `SECURE_COOKIES=true`).
+- **Enabling an ingress means TLS.** `ingress.tls.enabled` defaults **true** (the
+  Ingress references `ingress.tls.secretName` — pre-provisioned, or filled by
+  cert-manager via `ingress.annotations`, e.g.
+  `cert-manager.io/cluster-issuer: letsencrypt-prod`). The Traefik `ingressRoute.host`
+  router is https (`websecure`) by design.
+- **One hostname derives everything.** The enabled ingress host (or an explicit
+  `config.publicBaseUrl`) becomes `PUBLIC_BASE_URL` plus the defaults for
+  `CORS_ORIGIN`, `PLAYER_BASE_URL` and `MEDIA_PUBLIC_BASE` — all https.
+- **Cookie security is automatic.** `config.secureCookies` defaults to `""` (auto):
+  the server marks the session cookie `Secure` when `PUBLIC_BASE_URL` is https. A
+  `Secure` cookie is only sent back over HTTPS, so an HTTP origin would silently drop
+  the session and operators could never stay logged in (POL-43) — which is why a
+  *declared* plain-http deployment (`ingress.tls.enabled=false`, or an `http://`
+  publicBaseUrl) automatically drops the flag and the server warns loudly at boot
+  instead of breaking login. Plain HTTP is a supported degrade for trusted lab LANs,
+  never the recommended posture.
 
-A `secure` cookie is only sent back over HTTPS, so an HTTP origin would silently drop
-the session and operators could never stay logged in. The chart defaults
-`config.secureCookies: true` and `config.nodeEnv: production` for this reason — only
-flip them off for a throwaway HTTP/dev cluster. Likewise set a strong
-`secrets.cookieSecret`; if you leave it empty the chart generates one and preserves it
-across upgrades, but a managed value is required for reproducible/GitOps installs.
+Likewise set a strong `secrets.cookieSecret`; if you leave it empty the chart
+generates one and preserves it across upgrades, but a managed value is required for
+reproducible/GitOps installs.
 
 `config.authEnabled` defaults to `true`. **Never** set it false on a reachable
 deployment — that leaves every `/api/v1` route and the `/admin` WS unprotected (it
@@ -122,7 +130,8 @@ The server reads three env vars (rendered into the ConfigMap):
 - `MEDIA_DIR` — where uploads are written. Backed by the media volume below.
 - `MEDIA_PUBLIC_BASE` — absolute base URL prepended to `/media/<id>` when an upload
   becomes a `ContentSource.url`. **Must be reachable by the players/public wall** —
-  set it to your public origin (normally the same HTTPS host as `playerBaseUrl`).
+  derived from the public origin (`config.publicBaseUrl` / the ingress host,
+  POL-70/D88); set `media.publicBase` only when it genuinely differs.
 - `MEDIA_MAX_BYTES` — max accepted upload size, in bytes (default ~200MB).
 
 `media.persistence.enabled=true` (default) backs `MEDIA_DIR` with a
@@ -170,11 +179,11 @@ helm upgrade --install polyptic deploy/helm/polyptic \
   --set ingressRoute.enabled=true \
   --set ingressRoute.host=polyptic.example.com \
   --set ingressRoute.tls.certResolver=letsencrypt \
-  --set ingressRoute.bootHost=boot.polyptic.example.com \
-  --set config.corsOrigin=https://polyptic.example.com \
-  --set config.playerBaseUrl=https://polyptic.example.com \
-  --set media.publicBase=https://polyptic.example.com
+  --set ingressRoute.bootHost=boot.polyptic.example.com
 ```
+
+(`ingressRoute.host` also derives `PUBLIC_BASE_URL`, `CORS_ORIGIN`,
+`PLAYER_BASE_URL` and `MEDIA_PUBLIC_BASE` as `https://<host>` — POL-70/D88.)
 
 ## Netboot depot + automated image updates (POL-33…43)
 
@@ -275,18 +284,20 @@ rebuild Jobs work here even though the host is macOS.
 | `image.repository` / `image.tag` | `ghcr.io/polyptic/polyptic-server` / `""` (→ appVersion) | Server image. |
 | `replicaCount` | `1` | Single-writer control plane; keep at 1. |
 | `service.type` / `service.port` | `ClusterIP` / `8080` | Container always listens on `containerPort` (8080). |
-| `ingress.enabled` / `.host` / `.tls.enabled` / `.tls.secretName` | `false` / `polyptic.example.com` / `false` / `polyptic-tls` | HTTPS in prod. |
+| `ingress.enabled` / `.host` / `.tls.enabled` / `.tls.secretName` | `false` / `polyptic.example.com` / **`true`** / `polyptic-tls` | Enabling the ingress means TLS unless you opt out (POL-70/D88); cert-manager via `ingress.annotations`. |
 | `config.store` | `postgres` | `postgres` or `memory`. |
-| `config.corsOrigin` | `https://polyptic.example.com` | Comma-separated browser origins (cookies are cross-origin). |
+| `config.publicBaseUrl` | `""` (derived from the enabled ingress host) | The ONE public origin → `PUBLIC_BASE_URL` + the defaults below (POL-70/D88). |
+| `config.corsOrigin` | `""` (derived) | Comma-separated browser origins (cookies are cross-origin). |
+| `config.playerBaseUrl` | `""` (derived) | Origin the wall boxes open; the chart appends `/player`. |
 | `config.authEnabled` | `true` | The Phase 3f gate. Keep true. |
-| `config.secureCookies` | `true` | HTTPS-only cookies — see production note. |
+| `config.secureCookies` | `""` (auto) | Secure follows `PUBLIC_BASE_URL`'s scheme, else `NODE_ENV` — see production note. |
 | `config.captureIntervalMs` | `""` | Live-preview capture cadence (server default when empty). |
 | `secrets.cookieSecret` | `""` (generated) | Session signing key. |
 | `secrets.bootstrapToken` | `""` (OPEN) | Set for gated agent enrollment. |
 | `secrets.adminEmail` / `secrets.adminPassword` | `""` | Seed operator on first boot. |
 | `metrics.enabled` | `true` | Prometheus scrape annotations for `/metrics`. |
 | `media.dir` | `/var/lib/polyptic/media` | `MEDIA_DIR` — upload dir + media volumeMount path. |
-| `media.publicBase` | `https://polyptic.example.com` | `MEDIA_PUBLIC_BASE` — must be player-reachable. |
+| `media.publicBase` | `""` (derived) | `MEDIA_PUBLIC_BASE` — must be player-reachable. |
 | `media.maxBytes` | `209715200` | `MEDIA_MAX_BYTES` — max upload size (~200MB). |
 | `media.persistence.enabled` | `true` | Back `MEDIA_DIR` with a PVC (else ephemeral emptyDir). |
 | `media.persistence.size` / `.storageClass` / `.existingClaim` | `20Gi` / `""` / `""` | Media PVC sizing/class, or bring your own claim. |

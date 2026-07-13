@@ -84,6 +84,8 @@ agentMtls:
 ingress:
   enabled: false
   className: ""
+  # Annotations pass through verbatim — this is where cert-manager wires in
+  # (uncomment the issuer and cert-manager provisions `tls.secretName` itself).
   annotations: {}
     # cert-manager.io/cluster-issuer: letsencrypt-prod
     # nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
@@ -92,8 +94,12 @@ ingress:
   path: /
   pathType: Prefix
   tls:
-    # When enabled, emit a tls block for `host` using `secretName`.
-    enabled: false
+    # TLS is the DEFAULT (POL-70/D88): enabling the ingress emits a tls block for
+    # `host` using `secretName` (pre-provisioned, or filled by cert-manager via
+    # the annotation above). Opting OUT (enabled: false) serves the operator
+    # console — passwords and sessions — over plain HTTP; the server keeps
+    # working but drops the cookie Secure flag and warns loudly at boot.
+    enabled: true
     secretName: polyptic-tls
 
 resources:
@@ -165,29 +171,43 @@ config:
   # Registry backend: `postgres` (durable, default) or `memory` (ephemeral test double).
   store: postgres
 
-  # Comma-separated allowed CORS origins for the console/player (browsers send the
-  # session cookie cross-origin, so this MUST list every browser origin). In prod
-  # this is typically your HTTPS console origin.
-  corsOrigin: "https://polyptic.example.com"
+  # ONE public origin (scheme://host[:port], no path) for the whole operator/wall
+  # surface (POL-70/D88). When empty the chart DERIVES it from the enabled
+  # ingress: https://<ingressRoute.host>, or http(s)://<ingress.host> per
+  # ingress.tls.enabled. It becomes PUBLIC_BASE_URL and the default for the three
+  # origin-shaped values below — set those only when they genuinely differ.
+  # An https origin also flips session cookies Secure automatically.
+  publicBaseUrl: ""
 
-  # Public ORIGIN of this deployment (scheme://host[:port], no path). The server hands each wall box
-  # a player URL derived from it — the chart appends the /player path the single image serves the
-  # player app under, so do NOT add it yourself. Must be reachable from the wall boxes.
-  playerBaseUrl: "https://polyptic.example.com"
+  # Comma-separated allowed CORS origins for the console/player (browsers send the
+  # session cookie cross-origin, so this MUST list every browser origin). Empty
+  # derives from publicBaseUrl / the ingress host — set it only for extra origins
+  # (e.g. a separate dev console).
+  corsOrigin: ""
+
+  # Public ORIGIN the wall boxes open the player from. The chart appends the
+  # /player path the single image serves the player app under, so do NOT add it
+  # yourself. Empty derives from publicBaseUrl / the ingress host. Must be
+  # reachable from the wall boxes.
+  playerBaseUrl: ""
 
   # Fastify log level: trace|debug|info|warn|error|fatal.
   logLevel: info
 
-  # NODE_ENV — "production" implies secure cookies unless SECURE_COOKIES is set.
+  # NODE_ENV — "production" implies secure cookies when neither SECURE_COOKIES nor
+  # an http(s) PUBLIC_BASE_URL decides first.
   nodeEnv: production
 
   # AUTH GATE (Phase 3f / D29). Leave true for any real deployment. The e2e suite
   # runs with this false; NEVER ship a public deployment with auth disabled.
   authEnabled: true
 
-  # Mark session cookies `secure` (HTTPS-only). PRODUCTION over HTTPS MUST set this
-  # true (see README "Production note"). Left true here because the prod default is HTTPS.
-  secureCookies: true
+  # Mark session cookies `secure` (HTTPS-only). Leave "" (AUTO, the default): the
+  # server derives it from the public origin — https → Secure on, declared-http →
+  # Secure off (Secure cookies over plain HTTP are silently dropped by browsers,
+  # so login would "succeed" and never persist — POL-43), else NODE_ENV. Set an
+  # explicit true/false only to override that derivation.
+  secureCookies: ""
 
   # Capture cadence for the live-preview thumbnails (server → agent server/capture
   # poll interval, milliseconds). Empty uses the server's built-in default.
@@ -208,8 +228,9 @@ media:
 
   # Absolute base URL prepended to /media/<id> when an upload becomes a
   # ContentSource.url. MUST be reachable by the players/public wall — in prod this
-  # is normally your public HTTPS origin (e.g. https://polyptic.example.com).
-  publicBase: "https://polyptic.example.com"
+  # is normally your public HTTPS origin. Empty derives from config.publicBaseUrl /
+  # the ingress host (POL-70/D88).
+  publicBase: ""
 
   # Maximum accepted upload size, in bytes (streamed; rejected past this). ~200MB.
   # Quoted to keep Helm from coercing the large integer to scientific-notation float.

@@ -42,7 +42,8 @@ import { attachWebSockets } from "./ws";
 import { ServerToPlayerRender } from "@polyptic/protocol";
 
 import type { PersistedBootstrap } from "./store";
-import type { FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyHttpOptions, FastifyReply, FastifyRequest } from "fastify";
+import type { Server as HttpServer } from "node:http";
 
 /** API paths that authenticate themselves (or report their own 401) — excluded from the global gate. */
 const AUTH_PUBLIC_PATHS = new Set([
@@ -103,11 +104,38 @@ const MEDIA_PUBLIC_BASE = (
   "http://localhost:8080"
 ).replace(/\/+$/, "");
 
-const fastify = Fastify({
+// ── Native TLS (POL-70/D88): TLS_CERT_FILE + TLS_KEY_FILE serve the WHOLE listener over HTTPS. ──
+// The primary production path is a TLS-terminating ingress in front of plain :8080 (Kubernetes);
+// native TLS is the cheap alternative for a bare/docker host with a real certificate. Both env vars
+// are required together — asking for TLS and getting plain HTTP would be the worst failure mode, so
+// a half-configured pair refuses to start. NOTE: this makes EVERY route https, including the netboot
+// depot, which GRUB (no TLS stack, D47) can then no longer fetch — a netbooting fleet needs the
+// depot on plain HTTP (the ingress split, or a plain second deployment); the boot banner says so.
+const TLS_CERT_FILE = process.env.TLS_CERT_FILE?.trim() || undefined;
+const TLS_KEY_FILE = process.env.TLS_KEY_FILE?.trim() || undefined;
+if ((TLS_CERT_FILE === undefined) !== (TLS_KEY_FILE === undefined)) {
+  console.error(
+    "FATAL: TLS_CERT_FILE and TLS_KEY_FILE must be set TOGETHER (both PEM paths) — refusing to " +
+      "start half-configured rather than silently serve plain HTTP.",
+  );
+  process.exit(1);
+}
+const nativeTls =
+  TLS_CERT_FILE && TLS_KEY_FILE
+    ? { cert: await Bun.file(TLS_CERT_FILE).text(), key: await Bun.file(TLS_KEY_FILE).text() }
+    : undefined;
+
+const fastifyOptions = {
   logger: { level: process.env.LOG_LEVEL ?? "info" },
   // shim's UEFI HTTP Boot fetch requests its second stage as <dir>//grubx64.efi (double slash, D47).
   ignoreDuplicateSlashes: true,
-});
+  // `https` switches the underlying node server to TLS. Typed via the plain-HTTP overload (the
+  // https generic would ripple https.Server through every FastifyInstance signature in the repo
+  // for what is a runtime-only difference); the raw-server seams (WS upgrades, address()) are
+  // identical on both. The mTLS agent listener (POL-25) already proves node:https under Bun.
+  ...(nativeTls ? { https: nativeTls } : {}),
+};
+const fastify = Fastify(fastifyOptions as unknown as FastifyHttpOptions<HttpServer>);
 
 // ── Durable store: select by STORE env, run migrations, load persisted state ──
 const { store, kind: storeKind } = createStore();
@@ -503,6 +531,16 @@ fastify.log.info(
 // Start the periodic live-preview capture sweep (no-op when CAPTURE_INTERVAL_MS=0).
 capture.start();
 
+// Native-TLS banner (POL-70/D88) — before the auth banners so the transport story reads first.
+if (nativeTls) {
+  fastify.log.info(
+    { event: "tls.native" },
+    "serving NATIVE TLS (TLS_CERT_FILE/TLS_KEY_FILE): every route on this listener is https — " +
+      "including the netboot depot, which GRUB (no TLS stack) can NOT fetch. A netbooting fleet " +
+      "needs the boot paths on plain http (ingress split by host, or a plain-HTTP depot deployment).",
+  );
+}
+
 // Auth boot banner: secure by default; make the dev shortcuts loud.
 if (!authConfig.enabled) {
   fastify.log.warn(
@@ -518,11 +556,27 @@ if (!authConfig.enabled) {
         "COOKIE_SECRET to a long random value in any non-throwaway deployment.",
     );
   }
+  // ── POL-70/D88: HTTPS is the default posture; plain HTTP degrades LOUDLY, never refuses. ──
+  // Zero-click boot (non-negotiable #4) must keep working on a trusted plain-HTTP homelab, but the
+  // POL-59/POL-67 audits both carry the caveat "the tunnel is as trustworthy as the network" —
+  // HTTPS is the prerequisite for hostile networks, so serving auth over plain HTTP gets a banner.
   if (!authConfig.secureCookies) {
     fastify.log.warn(
       { event: "auth.cookie.insecure" },
-      "session cookies are NOT marked `secure` (SECURE_COOKIES unset / NODE_ENV≠production) so they " +
-        "work over http on localhost — PRODUCTION MUST BE SERVED OVER HTTPS with SECURE_COOKIES=true.",
+      "⚠️  AUTH OVER PLAIN HTTP: session cookies are NOT marked `secure` " +
+        (authConfig.publicScheme === "http"
+          ? "(PUBLIC_BASE_URL is http://)"
+          : "(SECURE_COOKIES unset / NODE_ENV≠production / no https PUBLIC_BASE_URL)") +
+        " — operator passwords and sessions ride the wire in CLEARTEXT, and the remote shell/DevTools " +
+        "tunnels are only as trustworthy as the network (POL-59/POL-67 audits). Fine for localhost or " +
+        "a trusted lab LAN; ANY OTHER DEPLOYMENT MUST BE SERVED OVER HTTPS (ingress TLS or " +
+        "TLS_CERT_FILE/TLS_KEY_FILE) — Secure cookies then follow automatically from an https " +
+        "PUBLIC_BASE_URL (POL-70/D88).",
+    );
+  } else if (authConfig.publicScheme === "https") {
+    fastify.log.info(
+      { event: "auth.cookie.secure" },
+      "session cookies are Secure (https PUBLIC_BASE_URL) — the operator surface is HTTPS end to end.",
     );
   }
 }
@@ -571,6 +625,7 @@ try {
       event: "server.listening",
       port: PORT,
       host: HOST,
+      scheme: nativeTls ? "https (native TLS)" : "http",
       ws: ["/agent", "/player", "/admin"],
       corsOrigin: CORS_ORIGIN,
       playerBaseUrl: PLAYER_BASE_URL,

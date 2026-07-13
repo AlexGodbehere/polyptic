@@ -190,16 +190,58 @@ each arch (POL-75), not the global imageUpdates.arch.
 {{- end }}
 
 {{/*
+The ONE public origin of the deployment (POL-70/D88) — scheme://host[:port], no
+trailing slash. Precedence: explicit config.publicBaseUrl → the enabled ingress
+(IngressRoute host is https by design — its entrypoint is websecure; the generic
+Ingress follows ingress.tls.enabled, which defaults ON) → "" (underivable: no
+PUBLIC_BASE_URL is emitted and the server falls back to NODE_ENV semantics).
+This single value feeds PUBLIC_BASE_URL and the defaults for CORS_ORIGIN,
+PLAYER_BASE_URL and MEDIA_PUBLIC_BASE, so a TLS deployment needs exactly one
+host name to end up HTTPS everywhere.
+*/}}
+{{- define "polyptic.publicBaseUrl" -}}
+{{- if .Values.config.publicBaseUrl -}}
+{{- trimSuffix "/" .Values.config.publicBaseUrl -}}
+{{- else if .Values.ingressRoute.enabled -}}
+{{- printf "https://%s" .Values.ingressRoute.host -}}
+{{- else if .Values.ingress.enabled -}}
+{{- if .Values.ingress.tls.enabled -}}
+{{- printf "https://%s" .Values.ingress.host -}}
+{{- else -}}
+{{- printf "http://%s" .Values.ingress.host -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+CORS_ORIGIN: explicit config.corsOrigin, else the public origin, else the
+documentation placeholder (matches the pre-POL-70 default).
+*/}}
+{{- define "polyptic.corsOrigin" -}}
+{{- .Values.config.corsOrigin | default (include "polyptic.publicBaseUrl" .) | default "https://polyptic.example.com" -}}
+{{- end }}
+
+{{/*
+MEDIA_PUBLIC_BASE: explicit media.publicBase, else the public origin, else the
+documentation placeholder.
+*/}}
+{{- define "polyptic.mediaPublicBase" -}}
+{{- .Values.media.publicBase | default (include "polyptic.publicBaseUrl" .) | default "https://polyptic.example.com" -}}
+{{- end }}
+
+{{/*
 The URL the server hands each wall box to open (PLAYER_BASE_URL).
 
 The single image serves the CONSOLE at / and the PLAYER at /player/ (server/src/spa.ts), so the
 player base is the public origin + /player. Getting this wrong points every wall screen at the
 operator's LOGIN PAGE — which is exactly what happened on the first real deployment. Operators
 therefore set `config.playerBaseUrl` to the plain origin (same as corsOrigin) and the chart appends
-the path. Idempotent: an origin that already ends in /player is left alone.
+the path — or, since POL-70/D88, set nothing and it derives from the public origin. Idempotent: an
+origin that already ends in /player is left alone.
 */}}
 {{- define "polyptic.playerBaseUrl" -}}
-{{- $base := trimSuffix "/" .Values.config.playerBaseUrl -}}
+{{- $origin := .Values.config.playerBaseUrl | default (include "polyptic.publicBaseUrl" .) | default "https://polyptic.example.com" -}}
+{{- $base := trimSuffix "/" $origin -}}
 {{- if hasSuffix "/player" $base -}}
 {{- $base -}}
 {{- else -}}

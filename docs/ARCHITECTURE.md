@@ -46,6 +46,15 @@ New integrations = new adapters; the core model never changes.
 
 When we say "build the auth-strategy seam from day one," we mean Bucket A is a per-tile config field. Bucket B (admin OIDC) is its own thing (Phase 6).
 
+## Deployment — HTTPS by default (POL-70 / D88)
+
+The **operator surface** (console, REST, `/admin` + `/player` WS, media) is HTTPS by default; **the netboot depot is plain HTTP by contract** (GRUB/shim have no TLS stack, D47) and never becomes https. Don't conflate either with the mTLS *agent* listener (D82) — that is its own raw-TLS port, never behind an HTTP ingress.
+
+- **Primary path: a TLS-terminating ingress** in front of the plain `:8080` listener. Everything already survives termination: browsers follow the page protocol for WS (`wss:` on an https page — console and player both derive, never hardcode), the session cookie turns `Secure` automatically (below), and `computeBaseUrl` honours `X-Forwarded-Proto/Host`. The Helm chart makes this the well-lit path: name a host (`ingress.host` + `ingress.enabled`, or `ingressRoute.host`) and `PUBLIC_BASE_URL`, `CORS_ORIGIN`, `PLAYER_BASE_URL` and `MEDIA_PUBLIC_BASE` all derive **https** from that one hostname; `ingress.tls.enabled` **defaults true** (cert-manager wires in via `ingress.annotations`). On Traefik, `ingressRoute.bootHost` keeps the boot depot on a separate plain-HTTP router — that split is the supported way to run HTTPS *and* netboot from one cluster.
+- **Native TLS** for bare/docker hosts: `TLS_CERT_FILE` + `TLS_KEY_FILE` (PEM paths, both or the boot refuses) switch the whole listener to https — REST, all three WS channels, media. It also makes the netboot depot https-only, which GRUB cannot fetch: a netbooting fleet needs the boot paths on plain http (the banner says so).
+- **Secure cookies follow the declared scheme.** Precedence: explicit `SECURE_COOKIES` → `PUBLIC_BASE_URL` scheme (`https://` → Secure on; `http://` → Secure OFF, because a Secure cookie over plain http is silently dropped and login "succeeds" without persisting — POL-43) → `NODE_ENV=production`.
+- **Plain HTTP degrades, never refuses.** Zero-click boot on a trusted plain-HTTP homelab keeps working (non-negotiable #4); the server prints a loud `auth.cookie.insecure` banner — operator credentials in cleartext, and the POL-59/POL-67 shell/DevTools tunnels are only as trustworthy as the network. HTTPS is the prerequisite for hostile networks.
+
 ## API sketch (REST + WS)
 ```
 GET    /api/v1/machines | /screens | /layouts | /scenes
