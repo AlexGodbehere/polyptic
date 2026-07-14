@@ -401,6 +401,7 @@ export const useConsoleStore = defineStore("console", {
         dashboard: [],
         image: [],
         video: [],
+        stream: [],
         playlist: [],
         page: [],
       };
