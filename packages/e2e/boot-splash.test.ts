@@ -261,3 +261,33 @@ describe("the cluster Jobs carry the committed splash assets into /repo (POL-88)
     expect(command).toContain("mkdir -p /repo/deploy /repo/packages/server/assets");
   });
 });
+
+describe("the player reports the build it is actually running (POL-117)", () => {
+  // `packages/player/package.json` is permanently 0.0.0 — the real version exists only as the git tag,
+  // which release.yml hands the image build as POLYPTIC_VERSION (the agent binary reads exactly that;
+  // agent/src/version.ts). The player's vite.config used package.json, so every wall's badge, idle
+  // splash and diag line said `v0.0.0` — worthless exactly when you are staring at a misbehaving screen
+  // asking which build it is. Caught on the real box, 2026-07-14. Two halves, both pinned here: the
+  // config must READ the env, and the Dockerfile must declare the ARG BEFORE the SPA builds (an ARG is
+  // only in scope for the RUNs that follow it — declared after, vite saw nothing).
+  const VITE = read("packages", "player", "vite.config.ts");
+  const DOCKERFILE = read("deploy", "server.Dockerfile");
+
+  test("vite stamps POLYPTIC_VERSION into __APP_VERSION__, falling back to package.json", () => {
+    expect(VITE).toContain("process.env.POLYPTIC_VERSION");
+    expect(VITE).toContain("__APP_VERSION__: JSON.stringify(buildVersion)");
+    expect(VITE).toMatch(/\|\|\s*pkg\.version/); // a dev build still says something
+  });
+
+  test("the leading `v` of a tag is stripped, so the wall shows 0.2.30 not v0.2.30", () => {
+    expect(VITE).toMatch(/replace\(\/\^v\/, ""\)/);
+  });
+
+  test("the Dockerfile declares POLYPTIC_VERSION BEFORE it builds the SPAs", () => {
+    const argAt = DOCKERFILE.indexOf("ARG POLYPTIC_VERSION");
+    const playerBuildAt = DOCKERFILE.indexOf("cd packages/player && bun run build");
+    expect(argAt).toBeGreaterThan(-1);
+    expect(playerBuildAt).toBeGreaterThan(-1);
+    expect(argAt).toBeLessThan(playerBuildAt); // the whole bug, in one assertion
+  });
+});
