@@ -455,7 +455,13 @@ either behaviour.
 
 - **The medium grows** from ~64 MiB to a few hundred MB per built arch (the wlan firmware is most
   of it — the fleet's chipsets are unknown, so Intel/Realtek/MediaTek/Qualcomm-Atheros/Broadcom/
-  Marvell all ride along). `LEAN=1` still builds the old tiny, tokenless, wired-only dongle.
+  Marvell all ride along). `LEAN=1` still builds the old tiny, tokenless, wired-only dongle — but it
+  is an **opt-in escape hatch only** (POL-122/D110): nothing selects it for you, because a lean and a
+  full medium share a filename and a URL, so a stick that silently cannot boot a Wi-Fi screen is
+  worse than no stick at all. A deployment with no live image yet publishes **no medium**, and the
+  console says so ("Building the first OS image …") rather than offering a download that lies. Every
+  medium now ships a sidecar `polyptic-boot.json` saying what it is (`lean`, arches, image ids,
+  whether a token is baked), which is what lets the console tell you.
 - **Two initrds per build.** The lean `initrd` keeps the wired GRUB-HTTP fetch fast (that fetch runs
   at a few MB/s and is on every wired power-on's critical path); `initrd-wifi` only ever loads from
   fast local media. Both come from the same dracut run against the same kernel.

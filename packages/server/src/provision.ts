@@ -38,7 +38,7 @@ import { open, readFile, stat } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { BootReportBody, NetbootInfo } from "@polyptic/protocol";
+import { BootMediumInfo, BootMediumManifest, BootReportBody, NetbootInfo } from "@polyptic/protocol";
 import type { BootReportBody as BootReport } from "@polyptic/protocol";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
@@ -100,9 +100,11 @@ const IMAGE_FILE_RE = /^(vmlinuz|initrd|initrd-wifi|rootfs\.squashfs|polyptic-li
 const IMAGE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /** The boot-depot files (POL-33/D47): `polyptic-boot.img` is the universal `dd`-able FAT32 dongle (both
  *  arches on one stick); the four `.efi` files are the SIGNED loaders (shim + network GRUB per arch) for
- *  UEFI HTTP Boot and the offload flow. All TOKENLESS (they only chain `/boot/grub.cfg`), so this route
- *  is ungated like `/dist/agent`. */
-const BOOT_FILE_RE = /^(polyptic-boot\.img|shimx64\.efi|shimaa64\.efi|grubx64\.efi|grubaa64\.efi)$/;
+ *  UEFI HTTP Boot and the offload flow; `polyptic-boot.json` is the medium's self-description (POL-122,
+ *  secret-free: it says WHETHER a token is baked, never what it is). All TOKENLESS (they only chain
+ *  `/boot/grub.cfg`), so this route is ungated like `/dist/agent`. */
+const BOOT_FILE_RE =
+  /^(polyptic-boot\.img|polyptic-boot\.json|shimx64\.efi|shimaa64\.efi|grubx64\.efi|grubaa64\.efi)$/;
 /** The four signed loaders the depot serves and the offload flow installs (for the boot summary). */
 const SIGNED_LOADER_FILES = ["shimx64.efi", "shimaa64.efi", "grubx64.efi", "grubaa64.efi"] as const;
 /** `POST /boot/report` throttle (POL-58): a rack being offloaded posts a handful of lines a minute, so
@@ -514,21 +516,87 @@ async function sendBootAsset(
   return reply.send(createReadStream(abs));
 }
 
+/** The manifest `build-boot-medium.sh` drops beside the image so the medium describes itself. */
+const BOOT_MEDIUM_MANIFEST = "polyptic-boot.json";
+
+/** Below this, a manifest-less medium can only be the LEAN one (POL-122). The lean medium is a flat
+ *  64 MiB; a payload medium is >= 384 MiB by construction (build-boot-medium.sh sizes it to hold every
+ *  arch's kernel+initrd plus a spare A/B slot). 256 MiB sits in the empty middle of that gap, so the
+ *  inference cannot flip either way. Only used for media baked BEFORE POL-122, which carry no manifest. */
+const LEAN_MEDIUM_MAX_BYTES = 256 * 1024 * 1024;
+
+/** The published boot medium, resolved off disk: where it is, and WHAT it is. */
+export interface ResolvedBootMedium {
+  /** Absolute path of the `.img` on disk. */
+  path: string;
+  bytes: number;
+  /** Wired-only (no local payload, no Wi-Fi): from the manifest, else inferred from the size. */
+  lean: boolean;
+  arches: Array<"arm64" | "amd64">;
+  imageIds: Record<string, string>;
+  mediumId: string | null;
+  builtAt: string | null;
+  /** `null` when the medium carries no manifest — we cannot know, so we do not claim. */
+  tokenBaked: boolean | null;
+  /** Whether a manifest was found (false → `lean` is inferred and the rest is empty/unknown). */
+  selfDescribed: boolean;
+}
+
 /**
  * Resolve the downloadable boot medium under `bootDistDir`, traversal-safe: the universal `dd`-able
- * `polyptic-boot.img` dongle (one stick boots amd64 AND arm64, no per-arch media). Returns its absolute
- * path when it is a regular file, else `null` (the medium is optional, the UI falls back to pointing
+ * `polyptic-boot.img` dongle (one stick boots amd64 AND arm64, no per-arch media). Returns its shape
+ * when it is a regular file, else `null` (the medium is optional, the UI falls back to pointing
  * DHCP option-67 / UEFI HTTP Boot at the shim URL when it's absent).
+ *
+ * POL-122: it also reads the sidecar manifest, because "a file exists" was never enough to answer the
+ * only question that matters to an operator — can a Wi-Fi screen boot from this? A LEAN medium can't,
+ * and it wears the same filename. A medium with no manifest predates POL-122; its lean-ness is then
+ * inferred from the file size (see {@link LEAN_MEDIUM_MAX_BYTES}) and nothing else is claimed.
  */
-export async function resolveBootMedium(bootDistDir: string): Promise<string | null> {
+export async function resolveBootMedium(bootDistDir: string): Promise<ResolvedBootMedium | null> {
   const abs = safeResolve(bootDistDir, "polyptic-boot.img");
   if (!abs) return null;
+  let bytes: number;
   try {
-    if ((await stat(abs)).isFile()) return abs;
+    const st = await stat(abs);
+    if (!st.isFile()) return null;
+    bytes = st.size;
   } catch {
-    // medium not bundled
+    return null; // medium not bundled
   }
-  return null;
+
+  const manifestPath = safeResolve(bootDistDir, BOOT_MEDIUM_MANIFEST);
+  if (manifestPath) {
+    try {
+      // Parse at the edge: a corrupt/partial manifest degrades to the inferred shape below, it never
+      // takes the route down (the medium itself is still perfectly downloadable).
+      const m = BootMediumManifest.parse(JSON.parse(await readFile(manifestPath, "utf8")));
+      return {
+        path: abs,
+        bytes,
+        lean: m.lean,
+        arches: m.arches,
+        imageIds: m.imageIds,
+        mediumId: m.mediumId,
+        builtAt: m.builtAt,
+        tokenBaked: m.tokenBaked,
+        selfDescribed: true,
+      };
+    } catch {
+      // no manifest, or an unreadable one — fall through to inference
+    }
+  }
+  return {
+    path: abs,
+    bytes,
+    lean: bytes <= LEAN_MEDIUM_MAX_BYTES,
+    arches: [],
+    imageIds: {},
+    mediumId: null,
+    builtAt: null,
+    tokenBaked: null,
+    selfDescribed: false,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -781,11 +849,27 @@ export function registerProvisionRoutes(
         // not bundled for this arch — omit the entry
       }
     }
+    const mediumUrl = medium ? `${base}/dist/boot/polyptic-boot.img` : null;
     return NetbootInfo.parse({
       baseUrl: base,
       mode: enrollment.open ? "open" : "gated",
       bootConfigUrl: `${base}/boot/grub.cfg`,
-      bootMediumUrl: medium ? `${base}/dist/boot/polyptic-boot.img` : null,
+      bootMediumUrl: mediumUrl,
+      // POL-122: say WHAT the download is, not just that a file exists. A lean (wired-only) medium
+      // is surfaced as lean so the console can warn instead of implying Wi-Fi screens will boot.
+      bootMedium:
+        medium && mediumUrl
+          ? BootMediumInfo.parse({
+              url: mediumUrl,
+              lean: medium.lean,
+              arches: medium.arches,
+              imageIds: medium.imageIds,
+              mediumId: medium.mediumId,
+              builtAt: medium.builtAt,
+              tokenBaked: medium.tokenBaked,
+              selfDescribed: medium.selfDescribed,
+            })
+          : null,
       liveIsos,
     });
   });
@@ -820,7 +904,8 @@ export async function provisionBootSummary(config: ProvisionConfig): Promise<{
   agentAmd64: boolean;
   imageDistDir: boolean;
   imageAmd64: boolean;
-  bootMedium: boolean;
+  /** POL-122: the boot banner distinguishes the two media — a `lean` line is a warning, not an OK. */
+  bootMedium: "none" | "lean" | "full";
   signedLoaders: boolean;
 }> {
   const [agentDir, arm64, amd64, imageDir, imageAmd64, medium, loaders] =
@@ -830,7 +915,9 @@ export async function provisionBootSummary(config: ProvisionConfig): Promise<{
       isFile(resolve(config.agentDistDir, "polyptic-agent-amd64")),
       isDir(config.imageDistDir),
       isFile(resolve(config.imageDistDir, "amd64", "rootfs.squashfs")),
-      resolveBootMedium(config.bootDistDir).then((p) => p !== null),
+      resolveBootMedium(config.bootDistDir).then((m): "none" | "lean" | "full" =>
+        m === null ? "none" : m.lean ? "lean" : "full",
+      ),
       // Serving UEFI HTTP Boot / offload needs ALL FOUR loaders (shim + network GRUB, both arches).
       Promise.all(
         SIGNED_LOADER_FILES.map((f) => isFile(resolve(config.bootDistDir, f))),

@@ -1511,11 +1511,59 @@ export type EnrollmentInfo = z.infer<typeof EnrollmentInfo>;
  *  the enrolment token that the boot flow bakes in lives only in {@link EnrollmentInfo}; this just
  *  surfaces the URLs an operator needs (control-plane base, the `/boot/grub.cfg` config URL, and the
  *  boot-medium download when present). */
+/** What the published boot medium ACTUALLY is (POL-122/D110). Two media wear the same filename:
+ *  the FULL universal medium (local payload per arch + Wi-Fi config — boots a Wi-Fi-only screen)
+ *  and the LEAN one (`LEAN=1`: wired netboot only, no payload, no Wi-Fi). They used to be
+ *  indistinguishable from outside — same name, same URL, no metadata — so an operator downloading
+ *  a lean stick had no way to know their Wi-Fi screens could never boot from it. The build script
+ *  now writes a sidecar manifest (`polyptic-boot.json`) beside the image and the server surfaces
+ *  it here, so the console can tell the truth. `selfDescribed: false` = a medium baked before
+ *  POL-122 (no manifest); its shape is then INFERRED from the image size (the lean medium is
+ *  64 MiB, a payload medium is >= 384 MiB by construction) and the finer facts are unknown. */
+export const BootMediumInfo = z.object({
+  /** Where to download it (the same ungated `/dist/boot/polyptic-boot.img` route). */
+  url: z.string(),
+  /** Wired-netboot-only: no local payload, no Wi-Fi. A Wi-Fi-only screen cannot boot from it. */
+  lean: z.boolean(),
+  /** Arches whose local boot payload rides on the medium (empty on a lean medium). */
+  arches: z.array(z.enum(["arm64", "amd64"])).default([]),
+  /** The live-image id baked per arch, so the console can say how stale the stick is. */
+  imageIds: z.record(z.string(), z.string()).default({}),
+  /** The medium's own identity marker (`polyptic/medium-id` on the stick), when it has one. */
+  mediumId: z.string().nullable().default(null),
+  builtAt: z.string().nullable().default(null),
+  /** Whether an enrolment token is baked into the LOCAL menu — which makes the file a credential.
+   *  `null` when unknown (a pre-POL-122 medium with no manifest). */
+  tokenBaked: z.boolean().nullable().default(null),
+  /** Whether the medium shipped its own manifest (false → the fields above are inferred). */
+  selfDescribed: z.boolean().default(false),
+});
+export type BootMediumInfo = z.infer<typeof BootMediumInfo>;
+
+/** The sidecar manifest `deploy/build-boot-medium.sh` writes beside the image (`polyptic-boot.json`,
+ *  emitted by `deploy/write-boot-manifest.sh`) and the server parses at the edge. This is a
+ *  cross-process contract like any other: the shell writes it, the server reads it, so it lives
+ *  here. Unknown/extra keys are ignored — an older or newer manifest degrades, it never 500s. */
+export const BootMediumManifest = z.object({
+  mediumId: z.string().nullable().default(null),
+  builtAt: z.string().nullable().default(null),
+  lean: z.boolean(),
+  arches: z.array(z.enum(["arm64", "amd64"])).default([]),
+  imageIds: z.record(z.string(), z.string()).default({}),
+  tokenBaked: z.boolean().default(false),
+  /** The image's size in bytes, as the builder saw it (informational). */
+  bytes: z.number().int().nonnegative().nullable().default(null),
+});
+export type BootMediumManifest = z.infer<typeof BootMediumManifest>;
+
 export const NetbootInfo = z.object({
   baseUrl: z.string(),
   mode: z.enum(["open", "gated"]),
   bootConfigUrl: z.string(),
   bootMediumUrl: z.string().nullable(),
+  /** The published medium's real shape, `null` when none is published (POL-122). `bootMediumUrl`
+   *  stays the download URL; this says WHAT that download is. */
+  bootMedium: BootMediumInfo.nullable().default(null),
   /** Self-contained bootable Polyptic live ISOs in the image depot (POL-38/D49): write to a USB
    *  stick (or attach to a UEFI VM) and the box boots straight into Polyptic and enrols — the
    *  manual-provisioning alternative to netboot. One entry per arch whose artifact exists on
