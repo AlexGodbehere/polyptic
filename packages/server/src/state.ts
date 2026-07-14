@@ -21,6 +21,8 @@
  * registration/approval order. The mapping is stable per (machineId, connector): a reconnecting
  * machine reuses its existing screen ids, and the counter resumes past the highest persisted id.
  */
+import { randomUUID } from "node:crypto";
+
 import {
   ContentSource,
   DashboardSurface,
@@ -44,6 +46,7 @@ import type {
   DisplayBackend,
   DisplaySettings,
   Geometry,
+  HostIdentity,
   KioskBrowser,
   Machine,
   Mural,
@@ -55,6 +58,7 @@ import type {
   PageImageResolution,
   PageWeatherData,
   Placement,
+  PreRegistration,
   SceneContent,
   Screen,
   ScreenSlice,
@@ -72,6 +76,8 @@ import type {
 } from "./store/types";
 import type { TokenService } from "./tokens";
 import type { ActivityLog } from "./activity";
+import { matchPreRegistration, normalizeMac } from "./preregistration";
+import type { PreRegistrationMatch } from "./preregistration";
 
 /** Where players live. The agent points each output's browser at this base + ?screen=<id>. */
 const PLAYER_BASE_URL = process.env.PLAYER_BASE_URL ?? "http://localhost:5173";
@@ -148,6 +154,13 @@ export interface RegisterMachineInput {
   outputs: Output[];
   /** The box's os.hostname(), used as the human machine label on first registration. */
   hostname?: string;
+  /** POL-104 — what the box IS (MACs / DMI serial / arch). Persisted, so a pending card is informative
+   *  even while the box is offline. A hello that carries none NEVER blanks what we already know. */
+  hardware?: HostIdentity;
+  /** POL-104 — the enrolment token this hello authenticated against. Stamped onto the machine at FIRST
+   *  enrolment only (provenance: which stick/batch the box came in on) and never rewritten after. */
+  enrolledTokenId?: string;
+  enrolledTokenName?: string;
 }
 
 export interface RegisterMachineResult {
@@ -261,6 +274,8 @@ export class ControlPlane {
   private readonly machines = new Map<string, Machine>();
   /** machineId → sha256(credential) hex. Kept off the wire `Machine`; persisted via the DTO. */
   private readonly credentialHashes = new Map<string, string>();
+  /** POL-104 — boxes declared before they ever booted, keyed by record id. */
+  private readonly preRegistrations = new Map<string, PreRegistration>();
   private screenCounter = 0;
 
   /** Phase 3 — the named, switchable canvases. */
@@ -361,6 +376,10 @@ export class ControlPlane {
       lastSeen: machine.lastSeen,
       shellEnabled: machine.shellEnabled ?? false,
       shellArmedAt: machine.shellArmedAt,
+      hardware: machine.hardware,
+      enrolledTokenId: machine.enrolledTokenId,
+      enrolledTokenName: machine.enrolledTokenName,
+      preRegistered: machine.preRegistered ?? false,
     };
   }
 
@@ -385,8 +404,17 @@ export class ControlPlane {
         lastSeen: m.lastSeen,
         shellEnabled: m.shellEnabled ?? false,
         shellArmedAt: m.shellArmedAt,
+        hardware: m.hardware,
+        enrolledTokenId: m.enrolledTokenId,
+        enrolledTokenName: m.enrolledTokenName,
+        preRegistered: m.preRegistered ?? false,
       });
       if (m.credentialHash) this.credentialHashes.set(m.id, m.credentialHash);
+    }
+
+    // POL-104 — pre-registrations: boxes an operator declared before they ever booted.
+    for (const record of await this.store.listPreRegistrations()) {
+      this.preRegistrations.set(record.id, record);
     }
 
     for (const s of persisted.screens) {
@@ -763,6 +791,14 @@ export class ControlPlane {
       lastSeen: new Date().toISOString(),
       shellEnabled: existing?.shellEnabled ?? false,
       shellArmedAt: existing?.shellArmedAt,
+      // POL-104: never blank what we already know. An agent too old to report hardware (or one that
+      // could not read its own DMI this boot) must not erase the card an operator relies on. And a
+      // machine's enrolment provenance is written ONCE, at first enrolment — a later token re-enrol
+      // does not rewrite which batch the box came in on.
+      hardware: input.hardware ?? existing?.hardware,
+      enrolledTokenId: existing?.enrolledTokenId ?? input.enrolledTokenId,
+      enrolledTokenName: existing?.enrolledTokenName ?? input.enrolledTokenName,
+      preRegistered: existing?.preRegistered ?? false,
     };
     this.machines.set(input.machineId, machine);
 
@@ -797,9 +833,79 @@ export class ControlPlane {
       lastSeen: new Date().toISOString(),
       shellEnabled: existing?.shellEnabled ?? false,
       shellArmedAt: existing?.shellArmedAt,
+      hardware: input.hardware ?? existing?.hardware,
+      enrolledTokenId: existing?.enrolledTokenId ?? input.enrolledTokenId,
+      enrolledTokenName: existing?.enrolledTokenName ?? input.enrolledTokenName,
+      preRegistered: existing?.preRegistered ?? false,
     };
     this.machines.set(input.machineId, machine);
     await this.store.upsertMachine(this.toPersistedMachine(machine));
+  }
+
+  // ── Pre-registration (POL-104) ────────────────────────────────────────────
+
+  /** Every pre-registration record, creation-ordered. */
+  listPreRegistrations(): PreRegistration[] {
+    return [...this.preRegistrations.values()].map((r) => ({ ...r }));
+  }
+
+  /** Declare a box before it boots. Write-through. */
+  async addPreRegistration(input: Omit<PreRegistration, "id" | "createdAt">): Promise<PreRegistration> {
+    const record: PreRegistration = {
+      ...input,
+      id: randomUUID(),
+      createdAt: new Date().toISOString(),
+      // Normalize the soft keys at the door, so a paste of `AA-BB-CC-DD-EE-01` matches a box that
+      // reports `aa:bb:cc:dd:ee:01`.
+      mac: normalizeMac(input.mac) ?? input.mac,
+    };
+    this.preRegistrations.set(record.id, record);
+    await this.store.upsertPreRegistration(record);
+    return { ...record };
+  }
+
+  /** Forget a pre-registration. A box that already matched it keeps its name/approval — the record is
+   *  a declaration, not a lease. */
+  async removePreRegistration(id: string): Promise<boolean> {
+    if (!this.preRegistrations.delete(id)) return false;
+    await this.store.deletePreRegistration(id);
+    return true;
+  }
+
+  /**
+   * A box has just enrolled and AUTHENTICATED. Does an operator's pre-registration claim it? If so:
+   * adopt its label, mark the machine pre-registered, and claim the record for this machine. The
+   * caller (the WS hello handler) then approves the box if the record says `autoApprove` — that is
+   * the zero-click commissioning path (DoD: "a pre-registered box enrolls, auto-names, auto-tags and
+   * auto-approves with zero clicks").
+   *
+   * Returns the match so the handler can log/announce WHICH key matched — a MAC match is a weaker
+   * claim than a serial, and an operator debugging a mis-named box needs to know which it was.
+   */
+  async applyPreRegistration(
+    machineId: string,
+    hardware: HostIdentity | undefined,
+  ): Promise<PreRegistrationMatch | undefined> {
+    const machine = this.machines.get(machineId);
+    if (!machine) return undefined;
+
+    const match = matchPreRegistration(this.listPreRegistrations(), machineId, hardware);
+    if (!match) return undefined;
+
+    const record: PreRegistration = {
+      ...match.record,
+      matchedMachineId: machineId,
+      matchedAt: new Date().toISOString(),
+      matchedOn: match.matchedOn,
+    };
+    this.preRegistrations.set(record.id, record);
+    await this.store.upsertPreRegistration(record);
+
+    if (record.label) machine.label = record.label;
+    machine.preRegistered = true;
+    await this.store.upsertMachine(this.toPersistedMachine(machine));
+
+    return { record, matchedOn: match.matchedOn };
   }
 
   /**

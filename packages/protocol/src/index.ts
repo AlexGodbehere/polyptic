@@ -55,6 +55,28 @@ export type KioskBrowser = z.infer<typeof KioskBrowser>;
 export const EnrollmentStatus = z.enum(["pending", "approved", "rejected"]);
 export type EnrollmentStatus = z.infer<typeof EnrollmentStatus>;
 
+/**
+ * POL-104 — what a box IS, physically. Sent on every `agent/hello` and used for two things: to match a
+ * pre-registration (see {@link PreRegistration}), and to make a pending-approval card informative — an
+ * operator approving 50 boxes was previously staring at 50 identical UUIDs.
+ *
+ * Every field is optional and best-effort. A box in a VM has no chassis serial (or a placeholder one);
+ * an unprivileged agent may not be able to read `/sys/class/dmi/id/product_serial` at all; a
+ * Wi-Fi-bridged VM's MAC is rewritten by its host (POL-63/POL-78). NOTHING here is a credential and
+ * nothing here is trusted as proof — the enrolment token is the credential, this is a description.
+ */
+export const HostIdentity = z.object({
+  /** Non-loopback, non-virtual interface MACs, lower-case colon form, sorted. */
+  macs: z.array(z.string()).default([]),
+  /** DMI chassis/product serial, when readable and not an obvious placeholder. */
+  dmiSerial: z.string().optional(),
+  dmiProduct: z.string().optional(),
+  dmiVendor: z.string().optional(),
+  /** `x64` / `arm64` — the box's CPU architecture, as the agent's runtime reports it. */
+  arch: z.string().optional(),
+});
+export type HostIdentity = z.infer<typeof HostIdentity>;
+
 /** A client machine. Plumbing — users address screens, not machines. */
 export const Machine = z.object({
   id: z.string(), // stable; sourced from /etc/machine-id
@@ -72,6 +94,14 @@ export const Machine = z.object({
   /** POL-59 — when the shell was armed / last used. A sweep auto-disarms a box idle past the TTL
    *  (SHELL_ARM_TTL_MS) so a forgotten armed box is not a standing shell-openable target. */
   shellArmedAt: z.string().datetime().optional(),
+  /** POL-104 — what the box IS (MACs / DMI serial / arch), as it last reported. Descriptive, never a
+   *  credential; kept so a PENDING card is informative even while the box is offline. */
+  hardware: HostIdentity.optional(),
+  /** POL-104 — the enrolment token this machine FIRST enrolled on, and its name at that moment. */
+  enrolledTokenId: z.string().optional(),
+  enrolledTokenName: z.string().optional(),
+  /** POL-104 — this machine matched a pre-registration (named / tagged / approved from it). */
+  preRegistered: z.boolean().optional(),
 });
 export type Machine = z.infer<typeof Machine>;
 
@@ -442,6 +472,9 @@ export const AgentHello = z.object({
   outputs: z.array(Output),
   /** The box's os.hostname(), used as the human machine label (additive-safe; optional). */
   hostname: z.string().optional(),
+  /** POL-104 — the box's physical identity (MACs / DMI serial / arch). Optional: a pre-POL-104 agent
+   *  sends none, and a pending card then simply says less. */
+  hardware: HostIdentity.optional(),
   /** First contact only: the operator-configured enrollment secret. The server validates it,
    * creates the machine as `pending`, and replies `server/enrolled` with a durable credential. */
   bootstrapToken: z.string().optional(),
@@ -1046,6 +1079,20 @@ export const MachineView = z.object({
    *  Absent while the box is offline, before its first heartbeat, or when it runs an agent/backend
    *  that samples nothing — the console then says so rather than drawing empty meters. */
   vitals: MachineVitals.optional(),
+  /** POL-104 — what the box IS: MACs, chassis serial, arch. Persisted from `agent/hello`, so a card
+   *  still shows it while the box is OFFLINE (an operator commissioning a rack needs to tell one
+   *  pending UUID from another, and the boxes come and go). Absent for a pre-POL-104 agent. */
+  hardware: HostIdentity.optional(),
+  /** POL-104 — the address the agent's socket is coming from, RIGHT NOW. Live-only (a stale IP is a
+   *  lie), so it is present only while the machine is online. */
+  ip: z.string().optional(),
+  /** POL-104 — the enrolment token this machine first enrolled on: which stick/batch it came in on.
+   *  `name` is a snapshot taken at enrolment, so a deleted token still reads sensibly. */
+  enrolledVia: z
+    .object({ tokenId: z.string(), name: z.string(), revoked: z.boolean().default(false) })
+    .optional(),
+  /** POL-104 — this machine matched a pre-registration and was named/approved from it. */
+  preRegistered: z.boolean().optional(),
   screens: z.array(ScreenView),
 });
 export type MachineView = z.infer<typeof MachineView>;
@@ -1566,13 +1613,135 @@ export const ChangePasswordBody = z.object({
 });
 export type ChangePasswordBody = z.infer<typeof ChangePasswordBody>;
 
-/** Enrollment-token visibility for Settings + the cold-start wizard. `open` mode auto-approves with
- *  no token; `gated` mode requires the bootstrap token (shown only to a signed-in operator). */
+// ── Enrolment tokens + pre-registration (POL-104) ────────────────────────────
+//
+// Before POL-104 a gated deployment had exactly ONE bootstrap token, baked into every boot medium
+// ever flashed. That is a flat fleet credential: one stick that walks out of the building
+// compromises enrolment for the whole estate, and rotating it means re-flashing every medium.
+//
+// A deployment now holds a SET of named tokens, each optionally scoped by an expiry and/or a cap on
+// how many NEW machines it may onboard, and each revocable on its own. Exactly one is the BAKE token
+// — the one `/boot/grub.cfg` (and therefore `build-boot-medium.sh`, which lifts it back out of that
+// very menu) writes into a medium's kernel cmdline.
+//
+// BACKWARD COMPATIBILITY IS THE WHOLE GAME HERE. Every already-flashed stick in the field carries the
+// old flat token. On first boot after the upgrade the server LIFTS that token into the token table as
+// a record named "Original bootstrap token" (`legacy: true`) with no expiry and no cap, and keeps it
+// as the bake token — so every medium that worked yesterday works today, and nothing changes until an
+// operator deliberately rotates or revokes it.
+
+export const EnrollmentTokenView = z.object({
+  id: z.string(),
+  /** Operator-chosen name — the batch/site this token was cut for ("Floor 3 rollout", "Site: Leeds"). */
+  name: z.string(),
+  /** The secret itself. Only ever served to a signed-in operator over the auth-gated settings route. */
+  secret: z.string(),
+  createdAt: z.string().datetime(),
+  /** Hard expiry. After this instant the token enrols nothing. Null = never expires. */
+  expiresAt: z.string().datetime().nullable(),
+  /** Cap on how many NEW machines this token may enrol. Null = uncapped. A re-enrol of a machine that
+   *  ALREADY counted against the cap (a box that lost its credential) does not consume a second slot. */
+  maxEnrollments: z.number().int().positive().nullable(),
+  /** How many machines have first-enrolled on this token. */
+  uses: z.number().int().nonnegative(),
+  /** Revoked = blocks NEW enrolments and token re-enrols. Machines ALREADY enrolled on it keep their
+   *  durable per-machine credential and keep running — revoking a token never darkens a working wall. */
+  revokedAt: z.string().datetime().nullable(),
+  lastUsedAt: z.string().datetime().nullable(),
+  /** The token baked into `/boot/grub.cfg` and therefore into the next boot medium. Exactly one. */
+  bake: z.boolean(),
+  /** The pre-POL-104 flat bootstrap token, lifted into the table on upgrade. Never expires, never
+   *  capped — the media already in the field depend on it. */
+  legacy: z.boolean(),
+});
+export type EnrollmentTokenView = z.infer<typeof EnrollmentTokenView>;
+
+/** Enrollment visibility for Settings + the cold-start wizard. `open` mode auto-approves with
+ *  no token; `gated` mode requires one of the enrolment tokens (shown only to a signed-in operator).
+ *  `token` is the BAKE token's secret — kept as a scalar for the pre-POL-104 console/wizard. */
 export const EnrollmentInfo = z.object({
   mode: z.enum(["open", "gated"]),
   token: z.string().nullable(),
+  /** POL-104 — every live token. Absent on a pre-POL-104 server (the console degrades to the scalar). */
+  tokens: z.array(EnrollmentTokenView).default([]),
 });
 export type EnrollmentInfo = z.infer<typeof EnrollmentInfo>;
+
+/** POST /api/v1/settings/enrollment/tokens — cut a new batch token. */
+export const CreateEnrollmentTokenBody = z.object({
+  name: z.string().min(1).max(120),
+  /** Days from now until it expires. Omit for a token that never expires. */
+  expiresInDays: z.number().int().positive().max(3650).optional(),
+  /** Cap on NEW machines. Omit for uncapped. */
+  maxEnrollments: z.number().int().positive().max(100000).optional(),
+  /** Make this the token baked into new boot media. */
+  bake: z.boolean().default(false),
+});
+export type CreateEnrollmentTokenBody = z.infer<typeof CreateEnrollmentTokenBody>;
+
+/** POST /api/v1/settings/enrollment/tokens/:id/rotate — cut a successor and put the old one on a
+ *  GRACE window rather than killing it, so boots in flight (and media not yet re-flashed) still land. */
+export const RotateEnrollmentTokenBody = z.object({
+  /** Hours the OLD secret keeps working. 0 = revoke immediately (an emergency: a stick is gone). */
+  graceHours: z.number().int().nonnegative().max(8760).default(24),
+});
+export type RotateEnrollmentTokenBody = z.infer<typeof RotateEnrollmentTokenBody>;
+
+/**
+ * A box the operator declared BEFORE it ever booted. Matched on the first `agent/hello` that
+ * authenticates, and only then: pre-registration is not a credential and grants no access on its own
+ * — the box must still present a valid enrolment token. It decides what happens to a box that has
+ * ALREADY proved it belongs: what it is called, which tags it carries, and whether an operator has to
+ * click Approve at all.
+ *
+ * Keys, in match order (first hit wins; an AMBIGUOUS match — two records at the same tier — matches
+ * NOTHING, because auto-naming the wrong box is worse than one manual approval):
+ *   machineId  — the box's own stable netboot identity (`dmi-…`/`mac-…`). Strongest.
+ *   dmiSerial  — the chassis serial off the sticker. Strong on real hardware, absent/garbage in VMs.
+ *   mac        — weakest, and DELIBERATELY so: a Wi-Fi-bridged VM's MAC is rewritten by its host
+ *                (POL-63/POL-78 homelab lesson), and a MAC is trivially spoofable by anyone who could
+ *                already have got this far. It is a convenience for the common case, never a proof.
+ */
+export const PreRegistration = z.object({
+  id: z.string(),
+  /** The friendly name to give the box on enrolment ("Lobby left"). */
+  label: z.string().min(1).max(200).optional(),
+  /** Tags to apply on enrolment (composes with POL-103 machine tags; stored + shown today). */
+  tags: z.array(z.string().min(1).max(60)).default([]),
+  /** Approve the box the moment it enrols — the zero-click commissioning path. */
+  autoApprove: z.boolean().default(true),
+  machineId: z.string().min(1).optional(),
+  dmiSerial: z.string().min(1).optional(),
+  /** Normalized lower-case colon form (`aa:bb:cc:dd:ee:ff`). */
+  mac: z.string().min(1).optional(),
+  note: z.string().max(500).optional(),
+  createdAt: z.string().datetime(),
+  /** The machine this record matched, once it has been claimed. A record claims at most one box. */
+  matchedMachineId: z.string().optional(),
+  matchedAt: z.string().datetime().optional(),
+  /** Which key actually matched — shown to the operator, because a MAC match is a weaker claim. */
+  matchedOn: z.enum(["machineId", "dmiSerial", "mac"]).optional(),
+});
+export type PreRegistration = z.infer<typeof PreRegistration>;
+
+/** POST /api/v1/pre-registrations — one record, or a CSV paste of many. */
+export const CreatePreRegistrationBody = z.object({
+  label: z.string().min(1).max(200).optional(),
+  tags: z.array(z.string().min(1).max(60)).default([]),
+  autoApprove: z.boolean().default(true),
+  machineId: z.string().min(1).optional(),
+  dmiSerial: z.string().min(1).optional(),
+  mac: z.string().min(1).optional(),
+  note: z.string().max(500).optional(),
+});
+export type CreatePreRegistrationBody = z.infer<typeof CreatePreRegistrationBody>;
+
+/** POST /api/v1/pre-registrations/import — `label,mac-or-serial-or-machineId,tags…` per line. */
+export const ImportPreRegistrationsBody = z.object({
+  csv: z.string().max(200_000),
+  autoApprove: z.boolean().default(true),
+});
+export type ImportPreRegistrationsBody = z.infer<typeof ImportPreRegistrationsBody>;
 
 /** Netboot (POL-33/D47) surface for Settings: where a bare box's signed shim+GRUB chain fetches its
  *  boot menu from, and whether a prebuilt boot medium is bundled for download. Deliberately SECRET-FREE,

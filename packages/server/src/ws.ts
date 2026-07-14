@@ -45,7 +45,7 @@ import {
 } from "@polyptic/protocol";
 import type { MtlsBundle } from "@polyptic/protocol";
 import type { FastifyBaseLogger } from "fastify";
-import type { Server } from "node:http";
+import type { IncomingMessage, Server } from "node:http";
 import type { Server as HttpsServer } from "node:https";
 import type { RawData } from "ws";
 
@@ -132,6 +132,19 @@ export function parseDevtoolsUpgradePath(pathname: string): { screenId: string; 
   return { screenId, path: m[2] };
 }
 
+/**
+ * POL-104 — where an agent is dialling FROM, for the pending card. A forwarded-for header wins when
+ * present (behind an ingress the socket's peer is the ingress, which tells an operator nothing about
+ * which box is on the other end); otherwise the socket's own peer address. Best-effort: some runtimes
+ * do not populate `remoteAddress` on an upgrade at all, and an absent IP is simply omitted from the
+ * card — a fact we cannot establish is never invented.
+ */
+function peerAddress(req: IncomingMessage): string | undefined {
+  const forwarded = req.headers["x-forwarded-for"];
+  const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(",")[0]?.trim();
+  return first && first.length > 0 ? first : (req.socket?.remoteAddress ?? undefined);
+}
+
 export function attachWebSockets(deps: WsDeps): ShellRelay {
   const { server, control, enrollment, auth, playerAuth, hub, agentHub, adminHub, presence, broadcaster, activity, capture, devtoolsRelay, log, allowedOrigins, agentMtls } =
     deps;
@@ -156,7 +169,10 @@ export function attachWebSockets(deps: WsDeps): ShellRelay {
 
     if (pathname === "/agent") {
       // Device channel — authenticated via enrollment credentials on agent/hello, NOT a user session.
-      agentWss.handleUpgrade(req, socket, head, (ws) => agentWss.emit("connection", ws, "plain"));
+      // POL-104: the peer address rides along so a pending card can say where the box is dialling from.
+      agentWss.handleUpgrade(req, socket, head, (ws) =>
+        agentWss.emit("connection", ws, "plain", peerAddress(req)),
+      );
     } else if (pathname === "/player") {
       // Device channel — players carry no user session, but they are NOT anonymous: the agent
       // launched them at a server-minted URL carrying a per-screen bearer token, echoed back in
@@ -241,8 +257,8 @@ export function attachWebSockets(deps: WsDeps): ShellRelay {
     }
   });
 
-  agentWss.on("connection", (ws: WebSocket, channel: AgentChannel) =>
-    handleAgent(ws, channel ?? "plain", agentMtls, control, enrollment, agentHub, presence, broadcaster, activity, capture, shellRelay, devtoolsRelay, log),
+  agentWss.on("connection", (ws: WebSocket, channel: AgentChannel, remoteAddress?: string) =>
+    handleAgent(ws, channel ?? "plain", remoteAddress, agentMtls, control, enrollment, agentHub, presence, broadcaster, activity, capture, shellRelay, devtoolsRelay, log),
   );
 
   // POL-25 — the mTLS agent channel: a second listener whose TLS handshake already rejected any
@@ -261,7 +277,9 @@ export function attachWebSockets(deps: WsDeps): ShellRelay {
         socket.destroy();
         return;
       }
-      agentWss.handleUpgrade(req, socket, head, (ws) => agentWss.emit("connection", ws, "mtls"));
+      agentWss.handleUpgrade(req, socket, head, (ws) =>
+        agentWss.emit("connection", ws, "mtls", peerAddress(req)),
+      );
     });
   }
   playerWss.on("connection", (ws: WebSocket) =>
@@ -277,6 +295,9 @@ export function attachWebSockets(deps: WsDeps): ShellRelay {
 function handleAgent(
   ws: WebSocket,
   channel: AgentChannel,
+  /** POL-104 — the peer address this agent is dialling from (live-only: it is recorded in Presence,
+   *  never persisted, because a stale IP on an offline box is a lie). */
+  remoteAddress: string | undefined,
   agentMtls: AgentMtlsChannel | undefined,
   control: ControlPlane,
   enrollment: Enrollment,
@@ -354,7 +375,14 @@ function handleAgent(
       const reason = decision.reason ?? "enrollment rejected";
       sendRejected(reason);
       log.info(
-        { event: "agent.rejected", machineId: msg.machineId, reason },
+        {
+          event: "agent.rejected",
+          machineId: msg.machineId,
+          reason,
+          // POL-104 — when the token was RECOGNISED but refused (revoked/expired/used up), name it:
+          // "invalid token" sends an operator hunting for a typo that isn't there.
+          ...(decision.tokenId ? { tokenId: decision.tokenId, tokenName: decision.tokenName } : {}),
+        },
         "agent enrollment rejected — closing socket",
       );
       ws.close();
@@ -405,6 +433,11 @@ function handleAgent(
       presenceMarked = true;
     }
 
+    // POL-104 — the box's address, recorded live (never persisted) so a pending card can say where it
+    // is dialling from. An operator commissioning a rack matches a card to a box by its IP as often as
+    // by anything else.
+    if (!issueOnly && remoteAddress) presence.noteMachineAddress(machineId, remoteAddress);
+
     const input: RegisterMachineInput = {
       machineId: msg.machineId,
       agentVersion: msg.agentVersion,
@@ -412,6 +445,9 @@ function handleAgent(
       browser: msg.browser,
       outputs: msg.outputs,
       hostname: msg.hostname,
+      hardware: msg.hardware,
+      enrolledTokenId: decision.tokenId,
+      enrolledTokenName: decision.tokenName,
     };
 
     try {
@@ -468,7 +504,43 @@ function handleAgent(
           // hash, hand the agent its durable credential, then park it pending. No screens, no apply.
           const credential = decision.credential ?? "";
           await control.enrollPending(input, hashCredential(credential));
+          // POL-104 — this box consumed one of the token's enrolments (the cap counts NEW machines; a
+          // re-enrol of a box that already counted does not consume a second slot).
+          if (decision.tokenId) await enrollment.recordUse(decision.tokenId);
           sendEnrolled(msg.machineId, credential, "pending", mtlsBundle);
+
+          // POL-104 — did an operator declare this box before it ever booted? Pre-registration is
+          // consulted ONLY here, AFTER the token gate: it is not a credential and admits nothing on
+          // its own. It names the box, and — when the record says so — approves it, which is the
+          // zero-click commissioning path (no blind pending card, no click).
+          const preReg = await control.applyPreRegistration(msg.machineId, msg.hardware);
+          const label = control.getMachine(msg.machineId)?.label ?? msg.machineId;
+          if (preReg?.record.autoApprove && !issueOnly) {
+            const approved = await control.approveMachine(msg.machineId);
+            if (approved) {
+              sendApply(msg.machineId, approved.assignments);
+              activity.push(
+                "good",
+                `${label} enrolled and auto-approved (pre-registered, matched on ${preReg.matchedOn})`,
+              );
+              log.info(
+                {
+                  event: "agent.enrolled",
+                  machineId: msg.machineId,
+                  outputs: msg.outputs.length,
+                  issuedCert: Boolean(mtlsBundle),
+                  status: "approved",
+                  preRegistrationId: preReg.record.id,
+                  matchedOn: preReg.matchedOn,
+                  tokenId: decision.tokenId,
+                  screens: approved.assignments.map((a) => a.screenId),
+                },
+                "new machine enrolled — pre-registered, auto-approved",
+              );
+              break;
+            }
+          }
+
           sendPending(decision.reason, msg.machineId);
           log.info(
             {
@@ -477,6 +549,10 @@ function handleAgent(
               outputs: msg.outputs.length,
               issuedCert: Boolean(mtlsBundle),
               status: "pending",
+              tokenId: decision.tokenId,
+              tokenName: decision.tokenName,
+              preRegistered: Boolean(preReg),
+              ...(preReg ? { matchedOn: preReg.matchedOn } : {}),
             },
             "new machine enrolled — awaiting operator approval",
           );

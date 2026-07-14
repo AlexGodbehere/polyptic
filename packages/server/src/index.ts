@@ -160,8 +160,8 @@ const activity = new ActivityLog();
 const control = new ControlPlane(store, activity);
 await control.init();
 
-// ── Enrollment policy (Phase 2b/3f): seed the bootstrap from the store; on first boot derive it from
-// POLYPTIC_BOOTSTRAP_TOKEN (set → gated, unset → open). The Settings "regenerate" mutates it later. ──
+// ── Enrollment policy (Phase 2b/3f, POL-104): seed the bootstrap from the store; on first boot derive
+// it from POLYPTIC_BOOTSTRAP_TOKEN (set → gated, unset → open). ──
 let bootstrap: PersistedBootstrap | undefined = await store.getBootstrap();
 if (!bootstrap) {
   const envToken = process.env.POLYPTIC_BOOTSTRAP_TOKEN?.trim();
@@ -171,13 +171,57 @@ if (!bootstrap) {
       : { mode: "open", token: null };
   await store.setBootstrap(bootstrap);
 }
-const enrollment = new Enrollment(bootstrap.token ?? undefined);
+
+// POL-104 — the token SET. Every write goes through the store; `bootstrap` is kept mirroring whichever
+// token is currently baked, so the pre-POL-104 read path (and a downgrade) still finds a live token.
+const enrollment = new Enrollment(undefined, {
+  persist: async (token) => {
+    await store.upsertEnrollmentToken(token);
+    if (token.bake) await store.setBootstrap({ mode: "gated", token: token.secret });
+  },
+  forget: async (id) => store.deleteEnrollmentToken(id),
+});
+
+const persistedTokens = await store.listEnrollmentTokens();
+if (persistedTokens.length > 0) {
+  enrollment.load(
+    persistedTokens.map((t) => ({
+      id: t.id,
+      name: t.name,
+      secret: t.secret,
+      createdAt: t.createdAt,
+      expiresAt: t.expiresAt ?? null,
+      maxEnrollments: t.maxEnrollments ?? null,
+      uses: t.uses,
+      revokedAt: t.revokedAt ?? null,
+      lastUsedAt: t.lastUsedAt ?? null,
+      bake: t.bake,
+      legacy: t.legacy,
+    })),
+  );
+} else if (bootstrap.token) {
+  // THE MIGRATION. A deployment upgrading into POL-104 has exactly one secret — the flat bootstrap
+  // token — and it is BAKED INTO EVERY BOOT MEDIUM ALREADY IN THE FIELD (`/boot/grub.cfg` writes it
+  // into the kernel cmdline; `build-boot-medium.sh` lifts it back out of that menu at bake time). Lift
+  // it into the token table verbatim: same secret, no expiry, no cap, still the token new media bake.
+  // Every stick that enrolled a box yesterday enrols one today; nothing changes until an operator
+  // deliberately rotates or revokes it. A token model change that bricks the sticks already flashed is
+  // not shippable, and this is the line that makes sure it doesn't.
+  enrollment.setToken(bootstrap.token);
+  const legacy = enrollment.list()[0];
+  if (legacy) await store.upsertEnrollmentToken(legacy);
+  fastify.log.info(
+    { event: "enrollment.legacy_lifted", tokenId: legacy?.id },
+    "POL-104: lifted the existing bootstrap token into the enrolment-token table (no expiry, no cap, " +
+      "still the token baked into new media) — every boot medium already flashed keeps enrolling",
+  );
+}
 
 const hub = new PlayerHub();
 const agentHub = new AgentHub();
 const adminHub = new AdminHub();
 const presence = new Presence();
-const broadcaster = new AdminBroadcaster({ control, playerHub: hub, presence, adminHub, activity, log: fastify.log });
+const broadcaster = new AdminBroadcaster({ control, playerHub: hub, presence, adminHub, activity, log: fastify.log, enrollment });
 
 // ── Content auth (POL-24): the OAuth client-credentials token cache. Seeded from the persisted
 // profiles; refreshes in the background at ~75% of each token's lifetime. When a profile's token

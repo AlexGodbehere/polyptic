@@ -14,8 +14,10 @@ import type {
   PersistedCredentialProfile,
   PersistedDisplaySettings,
   PersistedImageRollout,
+  PersistedEnrollmentToken,
   PersistedMachine,
   PersistedMtlsCa,
+  PersistedPreRegistration,
   PersistedServerTls,
   PersistedMural,
   PersistedPlacement,
@@ -62,6 +64,10 @@ export class MemoryStore implements Store {
   private readonly sessions = new Map<string, PersistedSession>();
   /** The enrollment bootstrap (mode + token), seeded on first boot. */
   private bootstrap: PersistedBootstrap | undefined;
+  /** Keyed by token id — the POL-104 enrolment tokens (insertion-ordered). */
+  private readonly enrollmentTokens = new Map<string, PersistedEnrollmentToken>();
+  /** Keyed by record id — the POL-104 pre-registrations (insertion-ordered). */
+  private readonly preRegistrations = new Map<string, PersistedPreRegistration>();
   /** The mTLS agent CA (POL-25), generated on the first boot with AGENT_MTLS_PORT set. */
   private mtlsCa: PersistedMtlsCa | undefined;
   /** The player-token HMAC secret (POL-54), generated on first boot. */
@@ -324,6 +330,32 @@ export class MemoryStore implements Store {
 
   async setBootstrap(bootstrap: PersistedBootstrap): Promise<void> {
     this.bootstrap = clone(bootstrap);
+  }
+
+  // ── Enrolment tokens + pre-registration (POL-104) ────────────────────────────
+
+  async listEnrollmentTokens(): Promise<PersistedEnrollmentToken[]> {
+    return [...this.enrollmentTokens.values()].map(clone);
+  }
+
+  async upsertEnrollmentToken(token: PersistedEnrollmentToken): Promise<void> {
+    this.enrollmentTokens.set(token.id, clone(token));
+  }
+
+  async deleteEnrollmentToken(id: string): Promise<void> {
+    this.enrollmentTokens.delete(id);
+  }
+
+  async listPreRegistrations(): Promise<PersistedPreRegistration[]> {
+    return [...this.preRegistrations.values()].map(clone);
+  }
+
+  async upsertPreRegistration(record: PersistedPreRegistration): Promise<void> {
+    this.preRegistrations.set(record.id, clone(record));
+  }
+
+  async deletePreRegistration(id: string): Promise<void> {
+    this.preRegistrations.delete(id);
   }
 
   // ── mTLS agent CA (POL-25) ───────────────────────────────────────────────────
