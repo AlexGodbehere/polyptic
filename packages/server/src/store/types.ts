@@ -180,6 +180,29 @@ export interface PersistedScene {
   scheduleAt?: string | null;
 }
 
+/**
+ * POL-90 — a live TAKEOVER (or cast) row. Overrides are composed over desired state at send time, so
+ * this row is the whole of the layer: there is no snapshot of what it covered and nothing to restore.
+ * It is persisted (rather than kept purely in memory like Presence) so a fire-alarm takeover survives
+ * a control-plane restart — the boot LOAD drops any row whose `expiresAt` has already passed, so a
+ * bounce can never resurrect a takeover that should have reverted while the server was down.
+ */
+export interface PersistedOverride {
+  id: string;
+  /** "fleet" | "mural" | "wall" | "screen" — re-validated against the contract on load. */
+  scope: string;
+  /** The mural / wall / screen id. NULL for a fleet-scope takeover. */
+  targetId: string | null;
+  /** The library source it shows. NULL when it shows an ad-hoc url. */
+  sourceId: string | null;
+  /** The ad-hoc url it shows. NULL when it shows a library source. */
+  url: string | null;
+  label: string;
+  startedAt: string;
+  /** ISO-8601 auto-revert instant. NULL = runs until an operator ends it. */
+  expiresAt: string | null;
+}
+
 // ── Local operator accounts + sessions + enrollment bootstrap (Phase 3f / D29) ──
 
 /**
@@ -315,6 +338,8 @@ export interface PersistedState {
   credentialProfiles: PersistedCredentialProfile[];
   /** POL-57 — remembered page zoom per (screen-or-wall, content) pair. */
   zoomPreferences: PersistedZoomPreference[];
+  /** POL-90 — live takeovers/casts that outlived a restart (expired ones are dropped on load). */
+  overrides: PersistedOverride[];
 }
 
 /**
@@ -398,6 +423,14 @@ export interface Store {
   deleteCredentialProfile(id: string): Promise<void>;
   /** All persisted credential profiles. */
   listCredentialProfiles(): Promise<PersistedCredentialProfile[]>;
+
+  // ── Takeovers / casts (POL-90) ─────────────────────────────────────────────
+  /** Insert-or-update a live override row. */
+  upsertOverride(override: PersistedOverride): Promise<void>;
+  /** Delete an override row (ended early, or swept after expiry). No-op if absent. */
+  deleteOverride(id: string): Promise<void>;
+  /** All persisted overrides (including any that have expired — the caller drops those). */
+  listOverrides(): Promise<PersistedOverride[]>;
 
   // ── Scenes (Phase 3d) ──────────────────────────────────────────────────────
   /** Insert-or-update a scene row (id + name + mural + snapshot jsonb + schedule_at). */

@@ -36,6 +36,23 @@ const { ident, identMany, flash, isIdenting } = useIdent();
 // The content library, for the "Assign from library" pickers (single screen + combined surface).
 const librarySources = computed(() => store.sources);
 
+// ── Cast / takeover (POL-90) ───────────────────────────────────────────────
+// Casting IS a takeover at screen scope — one mechanism, two words for it. The Inspector opens the
+// same composer the Wall's top bar does, pre-scoped to what is selected.
+const castOnScreen = () => {
+  if (single.value) store.openTakeoverDialog("screen", single.value.id);
+};
+const castOnWall = () => {
+  if (wall.value) store.openTakeoverDialog("wall", wall.value.id);
+};
+/** The takeover currently on this selection (if any) — what the chip reads, End ends. */
+const screenTakeover = computed(() =>
+  single.value ? store.overrideForScreen(single.value.id) : undefined,
+);
+const wallTakeover = computed(() =>
+  wall.value ? store.overrideForScreen(wall.value.memberScreenIds[0] ?? "") : undefined,
+);
+
 const selectedIds = computed(() => store.selectedScreenIds);
 const count = computed(() => selectedIds.value.length);
 
@@ -335,6 +352,13 @@ function selectOne(id: string) {
         <button class="split-btn" @click="splitWall">Split</button>
       </div>
 
+      <!-- POL-90 — a live takeover here, or the button that starts one. -->
+      <div v-if="wallTakeover" class="takeover-chip">
+        <span class="tc-what">On air now: {{ wallTakeover.label }}</span>
+        <button class="tc-end" @click="store.endTakeover(wallTakeover.id)">End</button>
+      </div>
+      <button v-else class="cast-btn" @click="castOnWall">Cast onto this surface…</button>
+
       <div class="section-label">Content · spans whole surface</div>
       <div v-if="wallHasContent" class="content-card">
         <span class="thumb seamed">
@@ -459,6 +483,14 @@ function selectOne(id: string) {
         <span class="dot accent"></span>
         {{ identingSingle ? "Flashing on wall…" : "Ident — flash on wall" }}
       </button>
+
+      <!-- POL-90 — Cast: a short-lived screen-scope takeover. The chip shows whatever layer is on
+           this screen right now (its own cast, or a broader takeover reaching it), and ends it. -->
+      <div v-if="screenTakeover" class="takeover-chip">
+        <span class="tc-what">On air now: {{ screenTakeover.label }}</span>
+        <button class="tc-end" @click="store.endTakeover(screenTakeover.id)">End</button>
+      </div>
+      <button v-else class="cast-btn" @click="castOnScreen">Cast onto this screen…</button>
 
       <div class="section-label">Content</div>
       <div v-if="hasContent" class="content-card">
@@ -1119,5 +1151,51 @@ function selectOne(id: string) {
 .member-kind {
   font-size: 10.5px;
   color: var(--muted2);
+}
+
+/* POL-90 — cast / takeover affordances. */
+.cast-btn {
+  width: 100%;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cast-btn:hover {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.takeover-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.tc-what {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--fg);
+}
+.tc-end {
+  border: 1px solid var(--warn);
+  background: transparent;
+  color: var(--warn);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
 }
 </style>

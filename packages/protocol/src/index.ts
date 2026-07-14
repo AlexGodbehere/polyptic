@@ -1246,6 +1246,38 @@ export const BootReportBody = z.object({
 });
 export type BootReportBody = z.infer<typeof BootReportBody>;
 
+// ── Takeover / cast: the override layer (POL-90) ─────────────────────────────
+//
+// An Override sits ABOVE desired state: it does not mutate a screen's, wall's or mural's assigned
+// content, it is COMPOSED OVER it at send time. Ending it (or letting its TTL run out) simply drops
+// the layer, and the underlying desired state re-fans-out — no snapshot, no restore, nothing to
+// forget to undo. A "cast" is just a screen-scope override: ONE mechanism serves both.
+
+/** What an override covers. Precedence, most specific first: screen > wall > mural > fleet. */
+export const OverrideScope = z.enum(["fleet", "mural", "wall", "screen"]);
+export type OverrideScope = z.infer<typeof OverrideScope>;
+
+/**
+ * A live takeover. `targetId` is the mural / video-wall / screen id it covers (absent for `fleet` —
+ * the emergency-broadcast scope). The content is the SAME assignment shape screens and walls already
+ * take (a library `sourceId` or an ad-hoc `url`), so ad-hoc URLs ride the existing ContentAssignment
+ * path and inherit POL-24 credential stamping and the POL-86 prober for free. `expiresAt` absent =
+ * runs until an operator ends it; present = auto-reverts at that instant, which is the whole point.
+ */
+export const Override = z.object({
+  id: z.string(),
+  scope: OverrideScope,
+  /** The mural / wall / screen this covers. Absent iff scope is `fleet`. */
+  targetId: z.string().optional(),
+  sourceId: z.string().optional(),
+  url: z.string().url().optional(),
+  /** What it is showing, resolved at start time — the chip + feed read this, never the raw url. */
+  label: z.string(),
+  startedAt: z.string(), // ISO-8601
+  expiresAt: z.string().optional(), // ISO-8601; absent = no TTL
+});
+export type Override = z.infer<typeof Override>;
+
 /** Full registry snapshot, pushed to admin clients on connect and on every change. */
 export const ServerToAdminState = z.object({
   t: z.literal("admin/state"),
@@ -1259,6 +1291,7 @@ export const ServerToAdminState = z.object({
   activity: z.array(ActivityEvent).optional(), // Live Activity feed (newest first); optional = back-compat
   settings: DisplaySettings.optional(), // POL-6 — fleet-wide display settings (badge toggle); optional = back-compat
   credentialProfiles: z.array(CredentialProfileView).optional(), // POL-24 — content auth profiles; optional = back-compat
+  overrides: z.array(Override).optional(), // POL-90 — live takeovers/casts; optional = back-compat
 });
 export const ServerToAdminMessage = z.discriminatedUnion("t", [ServerToAdminState]);
 export type ServerToAdminMessage = z.infer<typeof ServerToAdminMessage>;
@@ -1326,6 +1359,29 @@ export const SetContentBody = z
     message: "provide exactly one of sourceId or url",
   });
 export type SetContentBody = z.infer<typeof SetContentBody>;
+
+/**
+ * Start a takeover / cast (POL-90). The content is the usual assignment (exactly one of `sourceId` /
+ * `url`); `targetId` names the mural / wall / screen unless the scope is `fleet`. `ttlSeconds` is the
+ * auto-revert — omit it for a takeover that runs until an operator ends it (and take the "forgot to
+ * undo it" risk knowingly). The server stamps `startedAt`/`expiresAt` and resolves the label.
+ */
+export const StartOverrideBody = z
+  .object({
+    scope: OverrideScope,
+    targetId: z.string().min(1).optional(),
+    sourceId: z.string().min(1).optional(),
+    url: z.string().url().optional(),
+    /** 10s … 24h. Absent = no expiry (ends only when an operator ends it). */
+    ttlSeconds: z.number().int().min(10).max(86_400).optional(),
+  })
+  .refine((b) => (b.sourceId === undefined) !== (b.url === undefined), {
+    message: "provide exactly one of sourceId or url",
+  })
+  .refine((b) => (b.scope === "fleet") === (b.targetId === undefined), {
+    message: "targetId is required for every scope except fleet, which takes none",
+  });
+export type StartOverrideBody = z.infer<typeof StartOverrideBody>;
 
 /** Set the page zoom on a single screen's OR a video wall's framed content (POL-57). The server
  *  remembers the value against the (target, content) pair, so re-assigning the same page to the same

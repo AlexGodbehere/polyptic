@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onMounted } from "vue";
 import NavRail from "./NavRail.vue";
+import TakeoverBar from "./TakeoverBar.vue";
+import TakeoverModal from "./TakeoverModal.vue";
 import { useConsoleStore } from "../stores/console";
 
 // The shell is mounted for the whole authenticated session, so it owns the admin-channel lifecycle.
@@ -13,8 +15,12 @@ onMounted(() => store.connect());
   <div class="app-shell">
     <NavRail />
     <main class="app-main">
+      <!-- POL-90 — a live takeover is fleet state: every console shows it, on every page, counting
+           down, with an End button. The composer lives here too, opened from anywhere via the store. -->
+      <TakeoverBar />
       <router-view />
     </main>
+    <TakeoverModal />
   </div>
 </template>
 

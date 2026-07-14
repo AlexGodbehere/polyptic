@@ -20,6 +20,7 @@ import {
   RenameVideoWallBody,
   SetContentBody,
   SetZoomBody,
+  StartOverrideBody,
   UpdateContentSourceBody,
   UpdateCredentialProfileBody,
   UpdateSceneBody,
@@ -28,6 +29,7 @@ import type {
   ContentSource,
   CredentialProfileTestResult,
   CredentialProfileView,
+  Override,
   Scene,
   VideoWall,
 } from "@polyptic/protocol";
@@ -532,4 +534,21 @@ export async function updateScene(sceneId: string, body: UpdateSceneBody): Promi
 /** DELETE /api/v1/scenes/:sceneId — delete a saved scene. */
 export function deleteScene(sceneId: string): Promise<unknown> {
   return send("DELETE", `/scenes/${encodeURIComponent(sceneId)}`);
+}
+
+// ── Takeover / cast (POL-90) ──────────────────────────────────────────────────
+
+/**
+ * POST /api/v1/overrides — start a takeover: a layer composed OVER desired state at send time, with
+ * an optional TTL that auto-reverts it. A cast is the same thing at screen scope. Nothing on the
+ * server is snapshotted, so there is nothing for an operator to remember to put back.
+ */
+export async function startOverride(body: StartOverrideBody): Promise<Override> {
+  const res = await send<{ override: Override }>("POST", "/overrides", StartOverrideBody.parse(body));
+  return res.override;
+}
+
+/** DELETE /api/v1/overrides/:id — end a takeover early. The underlying content returns immediately. */
+export function endOverride(overrideId: string): Promise<unknown> {
+  return send("DELETE", `/overrides/${encodeURIComponent(overrideId)}`);
 }

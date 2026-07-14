@@ -24,6 +24,7 @@
 import {
   ContentSource,
   DashboardSurface,
+  Override,
   ImageSurface,
   PlaylistSurface,
   PageSurface,
@@ -48,6 +49,7 @@ import type {
   Machine,
   Mural,
   Output,
+  OverrideScope,
   PageData,
   PageDefinition,
   PageEmbedResolution,
@@ -58,6 +60,7 @@ import type {
   SceneContent,
   Screen,
   ScreenSlice,
+  StartOverrideBody,
   Surface,
   UpdateContentSourceBody,
   UpdateCredentialProfileBody,
@@ -67,11 +70,22 @@ import type {
 import type {
   PersistedCredentialProfile,
   PersistedMachine,
+  PersistedOverride,
   PersistedScene,
   Store,
 } from "./store/types";
 import type { TokenService } from "./tokens";
 import type { ActivityLog } from "./activity";
+
+/** POL-90 — " for 30m" / " for 45s", or "" for a takeover that runs until an operator ends it. */
+function durationSuffix(o: { startedAt: string; expiresAt?: string }): string {
+  if (o.expiresAt === undefined) return "";
+  const seconds = Math.round((Date.parse(o.expiresAt) - Date.parse(o.startedAt)) / 1000);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
+  if (seconds % 3600 === 0) return ` for ${seconds / 3600}h`;
+  if (seconds % 60 === 0) return ` for ${seconds / 60}m`;
+  return ` for ${seconds}s`;
+}
 
 /** Where players live. The agent points each output's browser at this base + ?screen=<id>. */
 const PLAYER_BASE_URL = process.env.PLAYER_BASE_URL ?? "http://localhost:5173";
@@ -193,6 +207,22 @@ export type SetZoomResult =
       wallId?: string;
     };
 
+/** Result of `startOverride` (POL-90): the live layer + every screen whose send-time slice it now
+ *  changes (the caller re-pushes those), or why the takeover was refused. */
+export type StartOverrideResult =
+  | { ok: true; override: Override; screenIds: string[] }
+  | {
+      ok: false;
+      error: "unknown-source" | "unknown-mural" | "unknown-wall" | "unknown-screen";
+    };
+
+/** Result of `endOverride` / `expireOverrides` (POL-90): the dropped layer(s) + the screens whose
+ *  underlying desired state must now be re-pushed (that re-push IS the revert). */
+export interface DropOverrideResult {
+  overrides: Override[];
+  screenIds: string[];
+}
+
 /**
  * An assignment of content to a screen or wall (Phase 3c): EITHER a library source (`sourceId`) OR an
  * ad-hoc link (`url`). Exactly one is set (the REST edge validates this via `SetContentBody`).
@@ -286,6 +316,12 @@ export class ControlPlane {
   private readonly scenes = new Map<string, Scene>();
   private sceneCounter = 0;
 
+  /** POL-90 — live takeovers/casts, keyed by override id. NOT part of desired state: this layer is
+   *  composed OVER it at send time (see `composeOverride`), so ending one restores nothing — it just
+   *  stops being applied. Persisted, so a fire-alarm takeover survives a control-plane restart. */
+  private readonly overrides = new Map<string, Override>();
+  private overrideCounter = 0;
+
   /** POL-24 — credential profiles keyed by id. Held as the FULL persisted row (incl. the client
    *  secret) because the control plane is where the secret is written through; every outward-facing
    *  read goes via `getCredentialProfileViews`, which never carries it. */
@@ -325,7 +361,7 @@ export class ControlPlane {
   private suppressEmit = false;
 
   /** Push a Live Activity line if a log is wired (no-op otherwise). Never throws into a mutation. */
-  private emit(severity: "info" | "good" | "warn" | "bad", text: string): void {
+  private emit(severity: "info" | "good" | "warn" | "bad" | "accent", text: string): void {
     if (this.suppressEmit) return;
     this.activity?.push(severity, text);
   }
@@ -547,6 +583,48 @@ export class ControlPlane {
       }
     }
     this.sceneCounter = maxScene;
+
+    // ── Takeovers / casts (POL-90) ────────────────────────────────────────────
+    // Overrides SURVIVE a restart — a fire-alarm takeover must not be undone by a pod bounce. But an
+    // override whose TTL ran out while the server was down is DEAD: drop it (and its row) on load, so
+    // a bounce can never resurrect a takeover that should already have reverted. Same for a layer
+    // whose target (or library source) no longer exists — a stale row must never strand a wall.
+    const nowOnBoot = Date.now();
+    for (const o of persisted.overrides) {
+      const parsed = Override.safeParse({
+        id: o.id,
+        scope: o.scope,
+        targetId: o.targetId ?? undefined,
+        sourceId: o.sourceId ?? undefined,
+        url: o.url ?? undefined,
+        label: o.label,
+        startedAt: o.startedAt,
+        expiresAt: o.expiresAt ?? undefined,
+      });
+      const expired =
+        parsed.success && parsed.data.expiresAt !== undefined
+          ? Date.parse(parsed.data.expiresAt) <= nowOnBoot
+          : false;
+      const orphaned =
+        parsed.success &&
+        (!this.overrideTargetExists(parsed.data) ||
+          (parsed.data.sourceId !== undefined && !this.contentSources.has(parsed.data.sourceId)));
+      if (!parsed.success || expired || orphaned) {
+        await this.store.deleteOverride(o.id);
+        continue;
+      }
+      this.overrides.set(parsed.data.id, parsed.data);
+    }
+    // Resume the counter past the highest persisted "override-N" so new ids stay unique.
+    let maxOverride = 0;
+    for (const o of this.overrides.values()) {
+      const match = /^override-(\d+)$/.exec(o.id);
+      if (match) {
+        const n = Number(match[1]);
+        if (Number.isFinite(n)) maxOverride = Math.max(maxOverride, n);
+      }
+    }
+    this.overrideCounter = maxOverride;
 
     // ── Credential profiles (POL-24) ──────────────────────────────────────────
     for (const cp of persisted.credentialProfiles) {
@@ -2510,6 +2588,25 @@ export class ControlPlane {
    * mutates stored state.
    */
   decorateSliceForSend(slice: ScreenSlice): ScreenSlice {
+    // POL-90 — the takeover layer is composed HERE, at SEND time, over the stored (desired) slice.
+    // Every send path in the server funnels through this one function (REST pushes, the page-data and
+    // credential re-pushes, and `player/hello`), so a takeover reaches a wall by exactly the keyed
+    // DOM-diff path content already uses — and ending it needs no restore, only another send.
+    const composed = this.composeOverride(slice);
+    return this.decorateResolvedSlice(composed.slice, composed.overrideSourceId);
+  }
+
+  /**
+   * The send-time decoration of an ALREADY-COMPOSED slice (POL-42 page data + POL-24 credential
+   * stamping). `overrideSourceId` is the POL-90 layer's own content identity when a takeover is on
+   * this screen — a library source id, or `null` for an ad-hoc URL — so its content is stamped with
+   * ITS source's credentials, not the desired content's. `undefined` = no takeover; look the source up
+   * from desired state as before.
+   */
+  private decorateResolvedSlice(
+    slice: ScreenSlice,
+    overrideSourceId?: string | null,
+  ): ScreenSlice {
     if (slice.surfaces.length === 0) return slice;
 
     // POL-42 — page surfaces get their live half stamped in: resolved (credential-stamped) embeds,
@@ -2526,7 +2623,12 @@ export class ControlPlane {
 
     if (!this.tokenProvider) return decorated;
     const wall = this.getWallForScreen(slice.screenId);
-    const sourceId = wall ? this.wallSourceIds.get(wall.id) : this.screenSourceIds.get(slice.screenId);
+    const sourceId =
+      overrideSourceId !== undefined
+        ? (overrideSourceId ?? undefined)
+        : wall
+          ? this.wallSourceIds.get(wall.id)
+          : this.screenSourceIds.get(slice.screenId);
     const direct = sourceId ? this.tokenForSource(sourceId) : undefined;
     let changed = false;
     const surfaces = decorated.surfaces.map((surface): Surface => {
@@ -2548,6 +2650,342 @@ export class ControlPlane {
       return { ...surface, url: ControlPlane.stampToken(surface.url, direct.param, direct.token) };
     });
     return changed ? { ...decorated, surfaces } : decorated;
+  }
+
+  // ── Takeover / cast: the override layer (POL-90) ────────────────────────────
+  //
+  // An override is a LAYER, not a mutation. Desired state (`state.slices`) is never touched; the
+  // layer is composed over it in `decorateSliceForSend`, which every send path already funnels
+  // through. That is what makes auto-revert trivial and safe: expiry (or "end takeover") deletes ONE
+  // record and re-sends the SAME desired slice that was there all along — no snapshot to restore, no
+  // bookkeeping to get wrong, and nothing that can strand a wall on content nobody chose.
+  //
+  // PRECEDENCE (pinned): screen > wall > mural > fleet — the most specific layer wins, exactly like a
+  // CSS specificity chain. A fire-alarm fleet broadcast therefore does NOT stomp on the cast an
+  // operator put on the atrium a minute ago; ending the cast drops that screen back to the fleet
+  // layer, and ending the fleet layer drops everything back to desired state. Ties are impossible:
+  // each (scope, targetId) pair holds at most one override (starting a second one replaces it).
+  //
+  // Overrides sit ABOVE scenes and schedules too: applying a scene rewrites DESIRED state, which is
+  // the layer underneath — so a scheduled scene change during a takeover happens silently, and the
+  // wall reveals it the moment the takeover ends.
+
+  /** Every live takeover, newest first (the console renders one countdown chip per entry). */
+  getOverrides(): Override[] {
+    return [...this.overrides.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  }
+
+  getOverride(id: string): Override | undefined {
+    return this.overrides.get(id);
+  }
+
+  private nextOverrideId(): string {
+    this.overrideCounter += 1;
+    return `override-${this.overrideCounter}`;
+  }
+
+  /** Whether an override still names something the registry knows about. Fleet always does. */
+  private overrideTargetExists(o: Pick<Override, "scope" | "targetId">): boolean {
+    switch (o.scope) {
+      case "fleet":
+        return true;
+      case "mural":
+        return o.targetId !== undefined && this.murals.has(o.targetId);
+      case "wall":
+        return o.targetId !== undefined && this.videoWalls.has(o.targetId);
+      case "screen":
+        return o.targetId !== undefined && this.getScreen(o.targetId) !== undefined;
+    }
+  }
+
+  /** Whether an override has passed its TTL. A layer with no `expiresAt` never expires by itself. */
+  private isExpired(o: Override, nowMs: number): boolean {
+    return o.expiresAt !== undefined && Date.parse(o.expiresAt) <= nowMs;
+  }
+
+  /** Whether an override covers a given screen (its scope's reach at this moment). */
+  private overrideCoversScreen(o: Override, screenId: string): boolean {
+    switch (o.scope) {
+      case "fleet":
+        return true;
+      case "mural":
+        return this.placements.get(screenId)?.muralId === o.targetId;
+      case "wall":
+        return this.videoWalls.get(o.targetId ?? "")?.memberScreenIds.includes(screenId) ?? false;
+      case "screen":
+        return o.targetId === screenId;
+    }
+  }
+
+  /** Every screen an override reaches right now — the set the caller re-pushes on start and on drop. */
+  screensUnderOverride(o: Override): string[] {
+    return this.state.screens.filter((s) => this.overrideCoversScreen(o, s.id)).map((s) => s.id);
+  }
+
+  /**
+   * The override that governs a screen at `nowMs`, or undefined. Most specific wins (screen > wall >
+   * mural > fleet); an expired layer is never returned even if the sweep has not run yet, so a slice
+   * sent in the gap between expiry and the next sweep tick is already the reverted one.
+   */
+  effectiveOverride(screenId: string, nowMs: number = Date.now()): Override | undefined {
+    const rank: Record<OverrideScope, number> = { screen: 3, wall: 2, mural: 1, fleet: 0 };
+    let best: Override | undefined;
+    for (const o of this.overrides.values()) {
+      if (this.isExpired(o, nowMs)) continue;
+      if (!this.overrideCoversScreen(o, screenId)) continue;
+      if (best === undefined || rank[o.scope] > rank[best.scope]) best = o;
+    }
+    return best;
+  }
+
+  /**
+   * Compose the takeover layer over a screen's desired slice, at send time.
+   *
+   * The composed surface REUSES the id desired content would have used on that target (`content-web`
+   * for a single screen, `wall:<id>` for a combined surface), so the player reconciles it onto the
+   * SAME keyed tile and swaps in place — no remount, no reload, the D5 instant path unchanged. A
+   * screen inside a video wall takes the wall's span math for any non-screen-scope layer, so an
+   * emergency broadcast spans the video wall instead of tiling four copies of itself across it.
+   *
+   * If the layer cannot be resolved (its library source was deleted mid-takeover), composition falls
+   * back to desired state rather than blanking the wall: an override may replace content, never strand
+   * a screen.
+   */
+  private composeOverride(slice: ScreenSlice): {
+    slice: ScreenSlice;
+    overrideSourceId?: string | null;
+  } {
+    const o = this.effectiveOverride(slice.screenId);
+    if (!o) return { slice };
+
+    const resolved = this.resolveSpec({ sourceId: o.sourceId, url: o.url });
+    if ("error" in resolved) return { slice }; // dangling source → the desired content stays on the glass
+
+    const wall = o.scope === "screen" ? undefined : this.getWallForScreen(slice.screenId);
+    const zoomTarget = wall ? wall.id : slice.screenId;
+    const zoom = this.zoomFor(
+      zoomTarget,
+      this.sourceKeyFor(resolved.sourceId, specUrl(resolved.spec)),
+    );
+
+    const surfaces = wall
+      ? this.spanSurfacesFor(wall, resolved.spec, slice.screenId, zoom)
+      : [
+          this.buildSurface(
+            resolved.spec,
+            "content-web",
+            { x: 0, y: 0, w: slice.canvas.w, h: slice.canvas.h },
+            undefined,
+            zoom,
+          ),
+        ];
+    // A wall member with no placement has no span to compute — leave it on desired state.
+    if (surfaces.length === 0) return { slice };
+
+    return {
+      slice: { ...slice, surfaces },
+      overrideSourceId: resolved.sourceId,
+    };
+  }
+
+  /**
+   * The spanning surface ONE member of a video wall renders for a spec — the same union-bbox math
+   * `computeWallSlices` uses, but pure: it computes nothing else and stores nothing (composition
+   * happens on the way out of the door, so it must never touch state).
+   */
+  private spanSurfacesFor(
+    wall: VideoWall,
+    spec: ResolvedSpec,
+    screenId: string,
+    zoom: number,
+  ): Surface[] {
+    const members: Placement[] = [];
+    for (const id of wall.memberScreenIds) {
+      const placement = this.placements.get(id);
+      if (placement && placement.muralId === wall.muralId) members.push(placement);
+    }
+    const mine = members.find((p) => p.screenId === screenId);
+    if (!mine) return [];
+
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of members) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + p.w);
+      maxY = Math.max(maxY, p.y + p.h);
+    }
+
+    return [
+      this.buildSurface(
+        spec,
+        `wall:${wall.id}`,
+        { x: 0, y: 0, w: mine.w, h: mine.h },
+        { contentW: maxX - minX, contentH: maxY - minY, offsetX: mine.x - minX, offsetY: mine.y - minY },
+        zoom,
+      ),
+    ];
+  }
+
+  /**
+   * Start a takeover (or a cast — a screen-scope takeover; ONE mechanism). Validates the target and
+   * the content, then adds ONE record. Desired state is untouched, so there is nothing to snapshot.
+   * A second takeover on the SAME (scope, target) REPLACES the first — an operator re-casting a wall
+   * means "show this instead", not "queue behind what I did a minute ago".
+   *
+   * Bumps the revision (what the walls show has changed) and returns the screens to re-push.
+   */
+  async startOverride(body: StartOverrideBody): Promise<StartOverrideResult> {
+    const resolved = this.resolveSpec({ sourceId: body.sourceId, url: body.url });
+    if ("error" in resolved) return { ok: false, error: "unknown-source" };
+
+    if (!this.overrideTargetExists({ scope: body.scope, targetId: body.targetId })) {
+      const error =
+        body.scope === "mural"
+          ? "unknown-mural"
+          : body.scope === "wall"
+            ? "unknown-wall"
+            : "unknown-screen";
+      return { ok: false, error };
+    }
+
+    // One layer per (scope, target): re-casting the same target replaces the previous record.
+    for (const [id, existing] of this.overrides) {
+      if (existing.scope === body.scope && existing.targetId === body.targetId) {
+        this.overrides.delete(id);
+        await this.store.deleteOverride(id);
+      }
+    }
+
+    const startedAtMs = Date.now();
+    const override = Override.parse({
+      id: this.nextOverrideId(),
+      scope: body.scope,
+      targetId: body.targetId,
+      sourceId: resolved.sourceId ?? undefined,
+      url: body.url,
+      label: this.resolvedContentName(resolved.spec, resolved.sourceId),
+      startedAt: new Date(startedAtMs).toISOString(),
+      expiresAt:
+        body.ttlSeconds !== undefined
+          ? new Date(startedAtMs + body.ttlSeconds * 1000).toISOString()
+          : undefined,
+    });
+
+    this.overrides.set(override.id, override);
+    await this.persistOverride(override);
+    this.bumpRevision();
+    await this.store.setRevision(this.state.revision);
+
+    const screenIds = this.screensUnderOverride(override);
+    this.emit(
+      "accent",
+      `Takeover — ${this.overrideTargetLabel(override)} → ${override.label}${durationSuffix(override)}`,
+    );
+    return { ok: true, override, screenIds };
+  }
+
+  /**
+   * End a takeover early (any operator may; a takeover is fleet-visible, not owned). Dropping the
+   * record IS the revert: the caller re-pushes the screens it covered and the desired content — or a
+   * still-live broader layer — comes straight back.
+   */
+  async endOverride(id: string): Promise<DropOverrideResult | null> {
+    const override = this.overrides.get(id);
+    if (!override) return null;
+
+    const screenIds = this.screensUnderOverride(override);
+    this.overrides.delete(id);
+    await this.store.deleteOverride(id);
+    this.bumpRevision();
+    await this.store.setRevision(this.state.revision);
+
+    this.emit("info", `Takeover ended — ${this.overrideTargetLabel(override)} (${override.label})`);
+    return { overrides: [override], screenIds };
+  }
+
+  /**
+   * Drop every takeover whose TTL has run out at `nowMs` — the auto-revert, and the whole point of
+   * the feature. Injected clock (like `disarmExpiredShells`) so expiry is a pure, testable function
+   * of time rather than of a timer. Returns the dropped layers + the screens to re-push; an empty
+   * result means the sweep found nothing and the caller sends nothing.
+   */
+  async expireOverrides(nowMs: number): Promise<DropOverrideResult> {
+    const expired = [...this.overrides.values()].filter((o) => this.isExpired(o, nowMs));
+    if (expired.length === 0) return { overrides: [], screenIds: [] };
+
+    const screenIds = new Set<string>();
+    for (const o of expired) {
+      for (const screenId of this.screensUnderOverride(o)) screenIds.add(screenId);
+      this.overrides.delete(o.id);
+      await this.store.deleteOverride(o.id);
+      this.emit(
+        "info",
+        `Takeover expired — ${this.overrideTargetLabel(o)} is back to its scheduled content`,
+      );
+    }
+    this.bumpRevision();
+    await this.store.setRevision(this.state.revision);
+
+    return { overrides: expired, screenIds: [...screenIds] };
+  }
+
+  /**
+   * Drop any override that pointed at something that has just ceased to exist (a removed screen, a
+   * split wall, a deleted mural, a deleted library source) — a layer with nothing to resolve must
+   * never linger in the console's chip strip. Returns the screens to re-push, if any.
+   */
+  async reapOrphanedOverrides(): Promise<DropOverrideResult> {
+    const orphans = [...this.overrides.values()].filter(
+      (o) =>
+        !this.overrideTargetExists(o) ||
+        (o.sourceId !== undefined && !this.contentSources.has(o.sourceId)),
+    );
+    if (orphans.length === 0) return { overrides: [], screenIds: [] };
+
+    const screenIds = new Set<string>();
+    for (const o of orphans) {
+      for (const screenId of this.screensUnderOverride(o)) screenIds.add(screenId);
+      this.overrides.delete(o.id);
+      await this.store.deleteOverride(o.id);
+      this.emit("warn", `Takeover ended — ${this.overrideTargetLabel(o)} no longer exists`);
+    }
+    this.bumpRevision();
+    await this.store.setRevision(this.state.revision);
+    return { overrides: orphans, screenIds: [...screenIds] };
+  }
+
+  /** A human name for what a takeover covers — what the feed line and the countdown chip say. */
+  overrideTargetLabel(o: Override): string {
+    switch (o.scope) {
+      case "fleet":
+        return "every screen";
+      case "mural":
+        return this.murals.get(o.targetId ?? "")?.name ?? "a mural";
+      case "wall": {
+        const wall = this.videoWalls.get(o.targetId ?? "");
+        return wall?.name ?? wall?.id ?? "a combined surface";
+      }
+      case "screen":
+        return this.getScreen(o.targetId ?? "")?.friendlyName ?? "a screen";
+    }
+  }
+
+  /** Write an override through to the store (the DTO's nulls are the contract's absences). */
+  private async persistOverride(o: Override): Promise<void> {
+    const row: PersistedOverride = {
+      id: o.id,
+      scope: o.scope,
+      targetId: o.targetId ?? null,
+      sourceId: o.sourceId ?? null,
+      url: o.url ?? null,
+      label: o.label,
+      startedAt: o.startedAt,
+      expiresAt: o.expiresAt ?? null,
+    };
+    await this.store.upsertOverride(row);
   }
 
   /** POL-42 — wire the poller after construction (same pattern as setTokenProvider). */

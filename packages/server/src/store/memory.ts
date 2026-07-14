@@ -18,6 +18,7 @@ import type {
   PersistedMtlsCa,
   PersistedServerTls,
   PersistedMural,
+  PersistedOverride,
   PersistedPlacement,
   PersistedScene,
   PersistedScreen,
@@ -52,6 +53,8 @@ export class MemoryStore implements Store {
   private readonly contentSources = new Map<string, PersistedContentSource>();
   /** Keyed by scene id — saved wall snapshots (Phase 3d). */
   private readonly scenes = new Map<string, PersistedScene>();
+  /** Keyed by override id — live takeovers/casts (POL-90). */
+  private readonly overrides = new Map<string, PersistedOverride>();
   /** Keyed by profile id — credential profiles for content auth (POL-24). */
   private readonly credentialProfiles = new Map<string, PersistedCredentialProfile>();
   /** Keyed by `<targetId>\0<sourceKey>` — remembered page zoom per pair (POL-57). */
@@ -87,6 +90,7 @@ export class MemoryStore implements Store {
       scenes: [...this.scenes.values()].map(clone),
       credentialProfiles: [...this.credentialProfiles.values()].map(clone),
       zoomPreferences: [...this.zoomPreferences.values()].map(clone),
+      overrides: [...this.overrides.values()].map(clone),
     };
   }
 
@@ -247,6 +251,20 @@ export class MemoryStore implements Store {
 
   async listCredentialProfiles(): Promise<PersistedCredentialProfile[]> {
     return [...this.credentialProfiles.values()].map(clone);
+  }
+
+  // ── Takeovers / casts (POL-90) ──────────────────────────────────────────────
+
+  async upsertOverride(override: PersistedOverride): Promise<void> {
+    this.overrides.set(override.id, clone(override));
+  }
+
+  async deleteOverride(id: string): Promise<void> {
+    this.overrides.delete(id);
+  }
+
+  async listOverrides(): Promise<PersistedOverride[]> {
+    return [...this.overrides.values()].map(clone);
   }
 
   // ── Scenes (Phase 3d) ───────────────────────────────────────────────────────
