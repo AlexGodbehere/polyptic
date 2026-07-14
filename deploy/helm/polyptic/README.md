@@ -289,9 +289,19 @@ Console is picked up by the next re-bake with no chart value to keep in sync.
 Two consequences: on a gated fleet the downloadable `.img` is a **credential**
 (same trust model as the live ISO), and after rotating the token you re-run
 the Job (`helm upgrade` suffices) and re-flash Wi-Fi sticks — wired sticks
-don't carry it and don't care. Before the first full rebuild the depot has no
-payload, so the Job builds the LEAN wired-only medium and says so; the next
-`helm upgrade` after an image build re-bakes it in full.
+don't carry it and don't care.
+
+**A fresh install publishes no medium at all (POL-122).** Before the first
+image build the depot has no payload, and the Job then **skips the bake and
+publishes nothing**, logging what is missing and what unblocks it. It used to
+fall back to a `LEAN=1` wired-only medium so that the download button worked
+"from minute one" — but lean and full media share a filename and a URL, so
+that button handed every new deployment a stick that silently cannot boot a
+Wi-Fi-only screen. The console now gates the download instead (the medium
+ships a `polyptic-boot.json` manifest saying what it is). Build the first live
+image — Console ▸ Settings ▸ Image updates ▸ **Full rebuild** — and the medium
+is baked with it; `helm upgrade` re-bakes it too. `LEAN=1` remains an explicit
+opt-in on `deploy/build-boot-medium.sh` for a genuinely wired-only dongle.
 
 ## Dev workflow (local cluster)
 

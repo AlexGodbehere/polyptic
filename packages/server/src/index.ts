@@ -549,6 +549,16 @@ fastify.log.info(
     `netboot[iso-amd64=${provisionSummary.imageAmd64} medium=${provisionSummary.bootMedium} ` +
     `signed-loaders=${provisionSummary.signedLoaders}] (Secure Boot: supported)`,
 );
+if (provisionSummary.bootMedium === "lean") {
+  // POL-122: a lean medium is a WIRED-ONLY dongle wearing the universal medium's filename. It boots
+  // no Wi-Fi screen, and nothing downstream can tell the difference by looking at the file. Say so.
+  fastify.log.warn(
+    { event: "provision.boot-medium.lean", bootDistDir: provisionConfig.bootDistDir },
+    "the published boot medium is LEAN (wired netboot only — no local payload, no Wi-Fi): " +
+      "Wi-Fi-only screens cannot boot from it. Re-bake it from a live image (Console ▸ Settings ▸ " +
+      "Image updates ▸ Full rebuild, then re-run the boot-medium Job / helm upgrade).",
+  );
+}
 
 // Start the periodic live-preview capture sweep (no-op when CAPTURE_INTERVAL_MS=0).
 capture.start();

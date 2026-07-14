@@ -247,6 +247,22 @@ const buildChip = computed<{ label: string; title: string; tone: "busy" | "bad" 
 /** ISO downloads bake the enrolment token — said at the point of download, not in a footer (POL-68). */
 const ISO_CREDENTIAL_NOTE = "bakes the current enrolment token — treat the file as a credential";
 
+/**
+ * What the bootloader download REALLY is right now (POL-122). "A file exists" was the old test, and
+ * it lied twice over: a fresh install published a LEAN (wired-only) medium under the same filename,
+ * and the button offered it as if it would boot anything. Four honest states:
+ *   full     — the real universal medium: download it.
+ *   lean     — a wired-only medium (an older deploy left one on the depot): downloadable, but say so.
+ *   building — no medium, an image build is in flight: the medium is baked from it. Wait.
+ *   none     — no medium, no image: build one.
+ */
+const mediumState = computed<"full" | "lean" | "building" | "none" | null>(() => {
+  if (!store.netboot) return null; // not loaded yet — the UI shows nothing rather than a wrong thing
+  const m = store.netboot.bootMedium;
+  if (m) return m.lean ? "lean" : "full";
+  return store.imageUpdates?.lastBuild?.status === "running" ? "building" : "none";
+});
+
 function onDownloadBootloader(): void {
   // The design opens the how-to modal; the download itself is the point, so do both. The anchor's
   // own navigation starts the transfer — we only add the instructions the operator needs next.
@@ -519,11 +535,15 @@ async function onSignOut(): Promise<void> {
               <span v-else class="latest-id none">No image published yet</span>
             </div>
             <a
-              v-if="store.netboot?.bootMediumUrl"
+              v-if="store.netboot?.bootMediumUrl && (mediumState === 'full' || mediumState === 'lean')"
               class="btn btn-primary dl-btn"
               :href="store.netboot.bootMediumUrl"
               download
-              :title="`The bootloader ${ISO_CREDENTIAL_NOTE}`"
+              :title="
+                mediumState === 'lean'
+                  ? 'Wired-only medium: it netboots a screen on Ethernet, but a Wi-Fi-only screen cannot boot from it.'
+                  : `The bootloader ${ISO_CREDENTIAL_NOTE}`
+              "
               @click="onDownloadBootloader"
             >
               <svg
@@ -533,14 +553,27 @@ async function onSignOut(): Promise<void> {
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" />
                 <line x1="12" x2="12" y1="15" y2="3" />
               </svg>
-              Download bootloader
+              {{ mediumState === "lean" ? "Download (wired-only)" : "Download bootloader" }}
             </a>
-            <button v-else type="button" class="btn btn-primary dl-btn" disabled>Bootloader not built</button>
+            <button v-else-if="mediumState === 'building'" type="button" class="btn btn-primary dl-btn" disabled>
+              <span class="spinner" />
+              Building the first OS image…
+            </button>
+            <button v-else type="button" class="btn btn-primary dl-btn" disabled>No bootloader yet</button>
           </div>
 
-          <p v-if="!store.netboot?.bootMediumUrl && store.netboot" class="hint gap-sm">
-            No prebuilt bootloader is bundled. Build one into <code class="code">BOOT_DIST_DIR</code> with
-            <code class="code">deploy/build-boot-medium.sh</code>.
+          <!-- POL-122: never imply a stick can boot a screen it can't. The empty/building depot is already
+               spoken for by POL-121's notice below, so these two cover only what IT doesn't: a medium that
+               is missing even though an image exists, and a medium that is present but WIRED-ONLY. -->
+          <p v-if="mediumState === 'none' && !netbootNotice" class="hint gap-sm">
+            No bootloader is published, though this deployment has an OS image to bake one from — run a
+            <b>Full rebuild</b> from the ⋯ menu above, or build one into <code class="code">BOOT_DIST_DIR</code>
+            with <code class="code">deploy/build-boot-medium.sh</code>.
+          </p>
+          <p v-else-if="mediumState === 'lean'" class="hint gap-sm hint-warn">
+            This bootloader is <b>wired-only</b>: no local payload, no Wi-Fi config. It netboots a screen on
+            Ethernet, but a screen with no cable cannot boot from it. Run a <b>Full rebuild</b> to publish the
+            full medium — one stick, wired and Wi-Fi, both arches.
           </p>
 
           <!-- POL-121: an empty depot is not a footnote — it is the difference between a fleet that
@@ -1153,6 +1186,11 @@ async function onSignOut(): Promise<void> {
 .notice-warn {
   color: var(--warn);
   background: var(--warn-soft);
+}
+
+/* A published medium that cannot boot half the fleet is a warning, not a footnote (POL-122). */
+.hint-warn {
+  color: var(--warn);
 }
 
 /* HTTPS card (POL-70/D89): the per-OS trust steps. Hint-toned so the card stays calm. */
