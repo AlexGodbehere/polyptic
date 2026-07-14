@@ -877,7 +877,7 @@ function mediaFacts(s: ContentSource): string {
         <div class="modal-actions">
           <button class="btn-secondary" :disabled="uploading" @click="closeUpload">Cancel</button>
           <button class="btn-primary" :disabled="uploading || !uploadFile" @click="doUpload">
-            {{ uploading ? "Uploading…" : "Upload" }}
+            {{ converting ? "Converting…" : uploading ? "Uploading…" : "Upload" }}
           </button>
         </div>
       </div>
