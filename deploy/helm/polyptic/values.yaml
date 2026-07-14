@@ -355,16 +355,20 @@ netboot:
   # Mount path of the depot volume; IMAGE_DIST_DIR/BOOT_DIST_DIR derive from it
   # (<depotDir>/image and <depotDir>/boot).
   depotDir: /var/lib/polyptic/depot
-  # Build the downloadable boot medium (polyptic-boot.img + signed loaders) onto
-  # the depot via a per-revision Job, so the console's bootloader download works
-  # from minute one. Needs an address to bake (imageUpdates.bakeBase or
-  # ingressRoute.bootHost) and a persistent depot; without either the Job is
-  # skipped. POL-69: the Job also bakes the CURRENT enrolment token (lifted from
-  # the server's /boot/grub.cfg at build time) and the local Wi-Fi payload from
-  # the depot, so the downloaded stick boots Wi-Fi-only screens on gated fleets
-  # — which makes the .img a credential there, and a token rotation wants a
-  # `helm upgrade` re-bake + re-flash of Wi-Fi sticks. Before the first image
-  # build it falls back to the LEAN wired-only medium, loudly.
+  # Build the downloadable boot medium (polyptic-boot.img + its manifest + the
+  # signed loaders) onto the depot via a per-revision Job, so the console's
+  # bootloader download works as soon as there is an image to bake into it.
+  # Needs an address to bake (imageUpdates.bakeBase or ingressRoute.bootHost)
+  # and a persistent depot; without either the Job is skipped. POL-69: the Job
+  # also bakes the CURRENT enrolment token (lifted from the server's
+  # /boot/grub.cfg at build time) and the local Wi-Fi payload from the depot, so
+  # the downloaded stick boots Wi-Fi-only screens on gated fleets — which makes
+  # the .img a credential there, and a token rotation wants a `helm upgrade`
+  # re-bake + re-flash of Wi-Fi sticks. POL-122: with no live image in the depot
+  # (a fresh install) the Job publishes NOTHING and says why — it never falls
+  # back to the LEAN wired-only medium, which is indistinguishable from the real
+  # one once downloaded and boots no Wi-Fi screen. Build the first image and the
+  # next `helm upgrade` (or the full rebuild itself) bakes the real medium.
   autoBuildMedium: true
   persistence:
     # Back the depot with a PVC. The live image is rebuilt nightly/weekly and

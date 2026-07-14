@@ -47,6 +47,9 @@ watch(
       for (const k of Object.keys(identing)) delete identing[k];
       void store.fetchEnrollment();
       void store.fetchNetboot();
+      // POL-122: with no medium published, whether an image BUILD is in flight is the difference
+      // between "wait, it's coming" and "nothing is happening" — so the wizard needs it too.
+      void store.fetchImageUpdates();
     }
   },
   { immediate: true },
@@ -61,8 +64,16 @@ const enrollmentOpen = computed(() => store.enrollmentOpen);
 
 // The network bootloader (POL-33/D54), the only way a bare machine becomes a screen. Null until the
 // netboot info loads, and null-valued when no medium is built into this deployment's depot.
-const netbootLoaded = computed(() => store.netboot !== null);
 const bootMediumUrl = computed(() => store.netboot?.bootMediumUrl ?? null);
+
+/** What the download really is (POL-122) — see the same computed in Settings.vue. A LEAN medium is
+ *  wired-only and boots no Wi-Fi screen, and until now it wore the same name and the same button. */
+const mediumState = computed<"full" | "lean" | "building" | "none" | null>(() => {
+  if (store.netboot === null) return null; // not loaded — claim nothing
+  const m = store.netboot.bootMedium;
+  if (m) return m.lean ? "lean" : "full";
+  return store.imageUpdates?.lastBuild?.status === "running" ? "building" : "none";
+});
 
 function openOnboardSettings(): void {
   emit("close");
@@ -195,10 +206,18 @@ function close(): void {
           </ol>
 
           <div class="dl-row">
-            <a v-if="bootMediumUrl" class="btn-download" :href="bootMediumUrl" download>
-              Download bootloader
+            <a
+              v-if="bootMediumUrl && (mediumState === 'full' || mediumState === 'lean')"
+              class="btn-download"
+              :href="bootMediumUrl"
+              download
+            >
+              {{ mediumState === "lean" ? "Download (wired-only)" : "Download bootloader" }}
             </a>
-            <button v-else class="btn-download" type="button" disabled>Bootloader not built</button>
+            <button v-else-if="mediumState === 'building'" class="btn-download" type="button" disabled>
+              Building the first OS image…
+            </button>
+            <button v-else class="btn-download" type="button" disabled>No bootloader yet</button>
             <span v-if="enrollmentLoaded && enrollmentOpen" class="enrol-open">
               <span class="enrol-open-badge">Open mode</span>
               <span>No token needed. Any agent that connects is auto-registered.</span>
@@ -208,8 +227,26 @@ function close(): void {
               is nothing to type on the machine.
             </span>
           </div>
-          <div v-if="netbootLoaded && !bootMediumUrl" class="run-hint gap">
-            No bootloader is built into this deployment.
+          <!-- POL-122: an honest gate. "Bootloader not built" was said even while the very image it is
+               baked from was building, and a wired-only (lean) medium was offered as if it booted anything. -->
+          <div v-if="mediumState === 'building'" class="run-hint gap">
+            Building the first OS image — screens can't netboot until it finishes. The bootloader is baked from
+            that image; it appears here (and in
+            <button type="button" class="link-btn" @click="openOnboardSettings">
+              Settings ▸ Onboard Screens
+            </button>
+            ) the moment it's ready.
+          </div>
+          <div v-else-if="mediumState === 'lean'" class="run-hint gap warn">
+            This bootloader is wired-only — no local payload, no Wi-Fi. It boots a screen on Ethernet; a screen
+            with no cable cannot boot from it. Run a Full rebuild in
+            <button type="button" class="link-btn" @click="openOnboardSettings">
+              Settings ▸ Onboard Screens
+            </button>
+            to publish the full medium.
+          </div>
+          <div v-else-if="mediumState === 'none'" class="run-hint gap">
+            No bootloader is published in this deployment.
             <button type="button" class="link-btn" @click="openOnboardSettings">
               Settings ▸ Onboard Screens
             </button>
@@ -412,6 +449,10 @@ function close(): void {
 }
 .run-hint.gap {
   margin-bottom: 12px;
+}
+/* A wired-only medium can't boot half a fleet — that reads as a warning, not a footnote (POL-122). */
+.run-hint.warn {
+  color: var(--warn, #e0a750);
 }
 
 /* bootloader download */
