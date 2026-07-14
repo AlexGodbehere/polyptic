@@ -17,11 +17,13 @@ import {
   diskTooltip,
   formatBytes,
   formatPercent,
+  formatUptime,
   memoryTooltip,
   meterLevel,
   nextOverloaded,
   overloadPeak,
   softwareRenderingConnectors,
+  totalBrowserRss,
   totalRespawns,
 } from "../src/vitals";
 
@@ -116,6 +118,28 @@ describe("tooltips (the design's detail strings)", () => {
     expect(formatBytes(1536)).toBe("1.5 KB");
     expect(formatBytes(8 * 1024 ** 3)).toBe("8 GB");
     expect(formatBytes(undefined)).toBe("—");
+  });
+
+  test("uptime shows the two most significant units", () => {
+    expect(formatUptime(6 * 86400 + 4 * 3600 + 59 * 60)).toBe("6d 4h");
+    expect(formatUptime(3 * 3600 + 12 * 60 + 30)).toBe("3h 12m");
+    expect(formatUptime(45 * 60)).toBe("45m");
+    expect(formatUptime(0)).toBe("0m");
+    expect(formatUptime(undefined)).toBe("—");
+  });
+
+  test("browser RSS sums only the browsers that reported one", () => {
+    expect(
+      totalBrowserRss({
+        browsers: [
+          { connector: "DP-1", running: true, rssBytes: 300 * 1024 ** 2 },
+          { connector: "DP-2", running: true, rssBytes: 112 * 1024 ** 2 },
+          { connector: "DP-3", running: false }, // no reading — not a zero
+        ],
+      }),
+    ).toBe(412 * 1024 ** 2);
+    expect(totalBrowserRss({ browsers: [{ connector: "DP-1", running: false }] })).toBeUndefined();
+    expect(totalBrowserRss(undefined)).toBeUndefined();
   });
 
   test("a machine with no readings still produces sane tooltips", () => {

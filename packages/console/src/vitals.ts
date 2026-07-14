@@ -109,6 +109,25 @@ export function diskTooltip(vitals: MachineVitals | undefined): string {
   return `${formatBytes(free)} free of ${formatBytes(vitals.diskTotalBytes)}`;
 }
 
+/** "6d 4h" / "3h 12m" / "45m" — the two most significant units only. */
+export function formatUptime(seconds: number | undefined): string {
+  if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return "—";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+/** Resident set across every kiosk browser on the box, or undefined if no browser reported one. */
+export function totalBrowserRss(vitals: MachineVitals | undefined): number | undefined {
+  const readings = (vitals?.browsers ?? [])
+    .map((b) => b.rssBytes)
+    .filter((n): n is number => typeof n === "number");
+  return readings.length > 0 ? readings.reduce((sum, n) => sum + n, 0) : undefined;
+}
+
 /** How stale is this sample? (The strip greys out if a box stops sampling but stays connected.) */
 export function sampleAgeSeconds(vitals: MachineVitals | undefined, now: number): number | null {
   if (!vitals?.at) return null;
