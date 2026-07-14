@@ -206,7 +206,8 @@ function showToast(message: string): void {
             anything.
           </p>
         </div>
-        <button class="connect-btn" @click="wizardOpen = true">Connect a machine</button>
+        <!-- Enrolling a box is an ADMIN flow (approve + the enrolment token are admin-only). -->
+        <button v-if="store.isAdmin" class="connect-btn" @click="wizardOpen = true">Connect a machine</button>
       </header>
 
       <!-- first-run empty state -->
@@ -230,7 +231,7 @@ function showToast(message: string): void {
               dials in and appears below as Pending. Approve it to admit its screens.
             </div>
           </div>
-          <button class="connect-btn ghost" @click="wizardOpen = true">Guided setup →</button>
+          <button v-if="store.isAdmin" class="connect-btn ghost" @click="wizardOpen = true">Guided setup →</button>
         </div>
 
         <!-- pending -->
@@ -253,9 +254,13 @@ function showToast(message: string): void {
                     {{ countLabel(m.outputCount, "screen") }} · {{ lastSeen(m) }}
                   </div>
                 </div>
-                <button class="btn-remove" @click="remove(m)">Remove</button>
-                <button class="btn-reject" @click="reject(m)">Reject</button>
-                <button class="btn-approve" @click="approve(m)">Approve</button>
+                <!-- POL-107: enrolment is an ADMIN verb (the server 403s these routes for anyone
+                     else) — a non-admin sees the pending box, and no way to admit it. -->
+                <template v-if="store.isAdmin">
+                  <button class="btn-remove" @click="remove(m)">Remove</button>
+                  <button class="btn-reject" @click="reject(m)">Reject</button>
+                  <button class="btn-approve" @click="approve(m)">Approve</button>
+                </template>
               </div>
               <div class="pending-note">
                 Not yet admitted — shows nothing until you approve it. Its
@@ -289,14 +294,16 @@ function showToast(message: string): void {
                 </span>
                 <span class="last-seen">{{ lastSeen(m) }}</span>
 
-                <!-- cluster 1: Ident all -->
-                <button v-if="m.screens.length" class="btn-ghost-sm" @click="identAll(m)">
+                <!-- cluster 1: Ident all — an operator may flash panels; a viewer may not. -->
+                <button v-if="m.screens.length && store.canAuthor" class="btn-ghost-sm" @click="identAll(m)">
                   <span class="ident-dot"></span>Ident all
                 </button>
 
-                <!-- cluster 2: the stateful console button (POL-68 §3) -->
+                <!-- cluster 2: the stateful console button (POL-68 §3). ADMIN-only (POL-107): a root
+                     PTY on a wall box is the most powerful thing this console can do, and the /admin
+                     WS refuses the shell frames for any other role. -->
                 <button
-                  v-if="!m.shellEnabled"
+                  v-if="!m.shellEnabled && store.isAdmin"
                   class="btn-ghost-sm"
                   :disabled="!m.online || enabling.has(m.id)"
                   :title="
@@ -311,7 +318,7 @@ function showToast(message: string): void {
                   </template>
                   <template v-else>Enable console</template>
                 </button>
-                <div v-else class="split">
+                <div v-else-if="store.isAdmin" class="split">
                   <button
                     class="split-main"
                     :disabled="!m.online"
@@ -351,7 +358,9 @@ function showToast(message: string): void {
                 </div>
 
                 <!-- cluster 3: ⋯ overflow (Reboot · Revoke access · Remove machine) -->
-                <div class="menu-wrap">
+                <!-- POL-107 — reboot / revoke / remove are ADMIN verbs. A marketing viewer cannot
+                     reboot a box: the button is gone here, and the route 403s regardless. -->
+                <div v-if="store.isAdmin" class="menu-wrap">
                   <button
                     class="kebab"
                     :class="{ open: menuFor === m.id }"
@@ -422,8 +431,10 @@ function showToast(message: string): void {
                     Access denied · {{ formatLastSeen(m.lastSeen, now) }}
                   </div>
                 </div>
-                <button class="btn-remove" @click="remove(m)">Remove</button>
-                <button class="btn-approve" @click="reapprove(m)">Re-approve</button>
+                <template v-if="store.isAdmin">
+                  <button class="btn-remove" @click="remove(m)">Remove</button>
+                  <button class="btn-approve" @click="reapprove(m)">Re-approve</button>
+                </template>
               </div>
             </div>
           </div>
