@@ -21,6 +21,11 @@
  *   POST /api/v1/machines/:machineId/reboot   -> server/reboot to a connected, approved agent;
  *                                                404 unknown; 409 not-approved or offline
  *
+ * POL-90 operator routes (takeover / cast — one mechanism):
+ *   GET    /api/v1/overrides                 -> Override[] (live takeovers, newest first)
+ *   POST   /api/v1/overrides                 -> start a takeover over desired state (201); TTL optional
+ *   DELETE /api/v1/overrides/:id             -> end it early; the underlying content comes straight back
+ *
  * POL-50 operator route:
  *   POST /api/v1/screens/:screenId/inspect    -> server/inspect: pop the kiosk browser's Web Inspector
  *                                                ON that panel; 202 delivered (the agent's ack decides
@@ -42,6 +47,7 @@ import {
   PlaceScreenBody,
   RebootBody,
   ShellArmBody,
+  StartOverrideBody,
   RenameMuralBody,
   RenameScreenBody,
   RenameVideoWallBody,
@@ -104,6 +110,7 @@ function playlistItemErrorDetail(
 }
 const CredentialProfileParams = z.object({ id: z.string().min(1) });
 const SceneParams = z.object({ id: z.string().min(1) });
+const OverrideParams = z.object({ id: z.string().min(1) });
 const SurfacesBody = z.object({ surfaces: z.array(Surface) });
 const DemoWebBody = z.object({ screenId: z.string().min(1), url: z.string().url() });
 const RejectBody = z.object({ reason: z.string().optional() });
@@ -1439,6 +1446,83 @@ export function registerRestRoutes(
     );
     broadcaster.broadcast();
     return reply.code(201).send({ ok: true, source });
+  });
+
+  // ── POL-90 routes (takeover / cast) ───────────────────────────────────────────
+  //
+  // A takeover is a LAYER over desired state, composed at send time (ControlPlane.decorateSliceForSend).
+  // So these routes never touch a screen's stored content: they add or drop ONE record and re-push the
+  // affected screens. The re-push is what reverts the wall — the desired slice was there all along.
+  // A "cast" is a screen-scope takeover; the same two routes serve both.
+
+  // GET /api/v1/overrides -> Override[]  (live takeovers, newest first)
+  fastify.get("/api/v1/overrides", async () => control.getOverrides());
+
+  // POST /api/v1/overrides  { scope, targetId?, sourceId|url, ttlSeconds? } -> start a takeover (201)
+  fastify.post("/api/v1/overrides", async (request, reply) => {
+    const body = StartOverrideBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ error: "invalid body", issues: body.error.issues });
+    }
+
+    const result = await control.startOverride(body.data);
+    if (!result.ok) {
+      const detail =
+        result.error === "unknown-source"
+          ? `unknown content source: ${body.data.sourceId}`
+          : `unknown ${body.data.scope}: ${body.data.targetId}`;
+      return reply.code(404).send({ error: detail });
+    }
+
+    // The instant path: the SAME keyed-surface render every content change rides (D5).
+    for (const screenId of result.screenIds) {
+      pushRender(screenId, control.sliceForPlayer(screenId));
+    }
+
+    fastify.log.info(
+      {
+        event: "override.start",
+        overrideId: result.override.id,
+        scope: result.override.scope,
+        targetId: result.override.targetId ?? null,
+        expiresAt: result.override.expiresAt ?? null,
+        screens: result.screenIds.length,
+        revision: control.state.revision,
+      },
+      "takeover started",
+    );
+    broadcaster.broadcast();
+    return reply.code(201).send({ ok: true, override: result.override });
+  });
+
+  // DELETE /api/v1/overrides/:id -> end a takeover early (any operator may); the wall reverts at once
+  fastify.delete("/api/v1/overrides/:id", async (request, reply) => {
+    const params = OverrideParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+
+    const result = await control.endOverride(params.data.id);
+    if (!result) {
+      return reply.code(404).send({ error: `unknown override: ${params.data.id}` });
+    }
+
+    // Dropping the layer IS the revert — re-push the desired (or next-broadest) slice to each screen.
+    for (const screenId of result.screenIds) {
+      pushRender(screenId, control.sliceForPlayer(screenId));
+    }
+
+    fastify.log.info(
+      {
+        event: "override.end",
+        overrideId: params.data.id,
+        screens: result.screenIds.length,
+        revision: control.state.revision,
+      },
+      "takeover ended by an operator",
+    );
+    broadcaster.broadcast();
+    return { ok: true, overrideId: params.data.id, screens: result.screenIds };
   });
 
   // ── Phase 3d routes (scenes) ──────────────────────────────────────────────────

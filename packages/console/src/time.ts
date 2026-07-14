@@ -41,6 +41,24 @@ export function formatRelativeShort(iso: string | undefined, nowMs: number): str
   return `${days}d`;
 }
 
+/**
+ * A takeover's remaining time as a clock (POL-90): "29:41", or "1:04:12" past the hour. Counts down
+ * against the same ticking `nowMs` the rest of this module takes, so every console shows the same
+ * number to the second. Returns "" for a takeover with no TTL (it runs until an operator ends it),
+ * and "0:00" once it is up — the sweep drops it a moment later.
+ */
+export function formatCountdown(expiresAt: string | undefined, nowMs: number): string {
+  if (!expiresAt) return "";
+  const end = Date.parse(expiresAt);
+  if (Number.isNaN(end)) return "";
+  const secs = Math.max(0, Math.round((end - nowMs) / 1000));
+  const hours = Math.floor(secs / 3600);
+  const mins = Math.floor((secs % 3600) / 60);
+  const rest = secs % 60;
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return hours > 0 ? `${hours}:${pad(mins)}:${pad(rest)}` : `${mins}:${pad(rest)}`;
+}
+
 /** "2 screens" / "1 screen". */
 export function countLabel(count: number, singular: string): string {
   return `${count} ${count === 1 ? singular : `${singular}s`}`;

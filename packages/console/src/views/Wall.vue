@@ -33,6 +33,18 @@ function pickSource(id: string) {
   store.pickSource(id);
 }
 
+/**
+ * POL-90 — open the takeover composer, pre-scoped to whatever the operator is looking at: the
+ * selected combined surface, the single selected screen, else the whole fleet (the emergency-broadcast
+ * scope). The composer still lets them change their mind.
+ */
+function openTakeover() {
+  if (store.selectedWallId) store.openTakeoverDialog("wall", store.selectedWallId);
+  else if (store.selectedScreenIds.length === 1) {
+    store.openTakeoverDialog("screen", store.selectedScreenIds[0]);
+  } else store.openTakeoverDialog("fleet");
+}
+
 const alerts = computed(() => store.screens.filter((s) => !s.online).length);
 const alertText = computed(() =>
   alerts.value > 0
@@ -66,6 +78,13 @@ function onSourceDragStart(e: DragEvent, id: string) {
         {{ screenCount }} screens
         <span class="alert" :style="{ color: alertColor }">{{ alertText }}</span>
       </div>
+      <button
+        class="takeover-btn"
+        title="Put content on the wall right now, over whatever it is showing"
+        @click="openTakeover"
+      >
+        Takeover
+      </button>
       <ActivityBell />
     </header>
 
@@ -346,5 +365,21 @@ function onSourceDragStart(e: DragEvent, id: string) {
   50% {
     opacity: 0.3;
   }
+}
+
+/* POL-90 — the takeover button: present, but not a red button begging to be pressed. */
+.takeover-btn {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+}
+.takeover-btn:hover {
+  border-color: var(--warn);
+  color: var(--warn);
 }
 </style>

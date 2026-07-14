@@ -41,6 +41,7 @@ import type {
   PersistedServerTls,
   PersistedMural,
   PersistedPlacement,
+  PersistedOverride,
   PersistedScene,
   PersistedScreen,
   PersistedSession,
@@ -152,6 +153,17 @@ interface ZoomPreferenceRow {
   target_id: string;
   source_key: string;
   zoom: number;
+}
+
+interface OverrideRow {
+  id: string;
+  scope: string;
+  target_id: string | null;
+  source_id: string | null;
+  url: string | null;
+  label: string;
+  started_at: Date | string;
+  expires_at: Date | string | null;
 }
 
 interface SceneRow {
@@ -335,6 +347,22 @@ export class PostgresStore implements Store {
         schedule_at text
       )
     `;
+    // Live takeovers / casts (POL-90). The override layer is composed OVER desired state at send
+    // time, so a row is the whole layer — there is nothing snapshotted to restore when it ends.
+    // Persisted so a fire-alarm takeover survives a control-plane restart; `load()` drops rows whose
+    // expires_at has already passed, so a bounce can never resurrect one that should have reverted.
+    await sql`
+      CREATE TABLE IF NOT EXISTS overrides (
+        id         text PRIMARY KEY,
+        scope      text NOT NULL,
+        target_id  text,
+        source_id  text,
+        url        text,
+        label      text NOT NULL DEFAULT '',
+        started_at timestamptz NOT NULL DEFAULT now(),
+        expires_at timestamptz
+      )
+    `;
     // Local operator accounts (Phase 3f / D29). Passwords are stored ONLY as argon2id hashes; the
     // plaintext is never persisted. Email is unique (stored normalized: trimmed + lower-cased).
     await sql`
@@ -445,6 +473,7 @@ export class PostgresStore implements Store {
       sceneRows,
       credentialProfileRows,
       zoomPreferenceRows,
+      overrideRows,
     ] = await Promise.all([
       sql<MachineRow[]>`SELECT id, label, agent_version, backend, outputs, status, credential_hash, last_seen, shell_enabled, shell_armed_at FROM machines`,
       sql<ScreenRow[]>`SELECT id, friendly_name, machine_id, connector FROM screens`,
@@ -457,6 +486,7 @@ export class PostgresStore implements Store {
       sql<SceneRow[]>`SELECT id, name, mural_id, snapshot, schedule_at FROM scenes`,
       sql<CredentialProfileRow[]>`SELECT id, name, strategy, token_endpoint, client_id, client_secret, scope, audience, token_param FROM credential_profiles`,
       sql<ZoomPreferenceRow[]>`SELECT target_id, source_key, zoom FROM zoom_preferences`,
+      sql<OverrideRow[]>`SELECT id, scope, target_id, source_id, url, label, started_at, expires_at FROM overrides`,
     ]);
 
     const machines: PersistedMachine[] = machineRows.map((row) => {
@@ -560,6 +590,17 @@ export class PostgresStore implements Store {
       };
     });
 
+    const overrides: PersistedOverride[] = overrideRows.map((row) => ({
+      id: row.id,
+      scope: row.scope,
+      targetId: row.target_id,
+      sourceId: row.source_id,
+      url: row.url,
+      label: row.label,
+      startedAt: new Date(row.started_at).toISOString(),
+      expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+    }));
+
     const revision = metaRows[0] ? Number(metaRows[0].revision) : 0;
 
     return {
@@ -574,6 +615,7 @@ export class PostgresStore implements Store {
       scenes,
       credentialProfiles,
       zoomPreferences,
+      overrides,
     };
   }
 
@@ -891,6 +933,53 @@ export class PostgresStore implements Store {
   }
 
   // ── Scenes (Phase 3d) ───────────────────────────────────────────────────────
+
+  // ── Takeovers / casts (POL-90) ──────────────────────────────────────────────
+
+  async upsertOverride(override: PersistedOverride): Promise<void> {
+    const sql = this.sql;
+    await sql`
+      INSERT INTO overrides (id, scope, target_id, source_id, url, label, started_at, expires_at)
+      VALUES (
+        ${override.id},
+        ${override.scope},
+        ${override.targetId},
+        ${override.sourceId},
+        ${override.url},
+        ${override.label},
+        ${new Date(override.startedAt)},
+        ${override.expiresAt ? new Date(override.expiresAt) : null}
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        scope      = EXCLUDED.scope,
+        target_id  = EXCLUDED.target_id,
+        source_id  = EXCLUDED.source_id,
+        url        = EXCLUDED.url,
+        label      = EXCLUDED.label,
+        started_at = EXCLUDED.started_at,
+        expires_at = EXCLUDED.expires_at
+    `;
+  }
+
+  async deleteOverride(id: string): Promise<void> {
+    const sql = this.sql;
+    await sql`DELETE FROM overrides WHERE id = ${id}`;
+  }
+
+  async listOverrides(): Promise<PersistedOverride[]> {
+    const sql = this.sql;
+    const rows = await sql<OverrideRow[]>`SELECT id, scope, target_id, source_id, url, label, started_at, expires_at FROM overrides`;
+    return rows.map((row) => ({
+      id: row.id,
+      scope: row.scope,
+      targetId: row.target_id,
+      sourceId: row.source_id,
+      url: row.url,
+      label: row.label,
+      startedAt: new Date(row.started_at).toISOString(),
+      expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+    }));
+  }
 
   async upsertScene(scene: PersistedScene): Promise<void> {
     const sql = this.sql;

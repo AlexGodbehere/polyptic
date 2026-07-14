@@ -224,6 +224,7 @@ export function buildAdminState(
     activity: activity.recent(), // D25 — Live Activity feed (newest first, bounded)
     settings: control.getDisplaySettings(), // POL-6 — fleet-wide display settings (badge toggle)
     credentialProfiles: control.getCredentialProfileViews(), // POL-24 — content auth (never the secret)
+    overrides: control.getOverrides(), // POL-90 — live takeovers/casts (every console sees the countdown)
   });
 }
 

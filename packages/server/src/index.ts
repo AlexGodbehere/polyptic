@@ -28,6 +28,7 @@ import { AgentHub, PlayerHub } from "./hub";
 import { MediaStore, registerMediaServeRoute } from "./media";
 import { DEFAULT_RETAIN_BUILDS, ImageUpdates } from "./image-updates";
 import { registerOpsRoutes } from "./ops";
+import { startOverrideSweeper } from "./overrides";
 import { computeBaseUrl, provisionBootSummary, provisionConfigFromEnv, registerProvisionRoutes } from "./provision";
 import { initSelfSignedTls, registerHttpsRoutes, requiredSans, resolveTlsEnv } from "./server-tls";
 import type { ServerTlsRuntime, TlsEnvConfig } from "./server-tls";
@@ -544,6 +545,11 @@ fastify.log.info(
 
 // Start the periodic live-preview capture sweep (no-op when CAPTURE_INTERVAL_MS=0).
 capture.start();
+
+// POL-90 — the takeover sweep: drop any override whose TTL has run out (and any whose target/content
+// has vanished) and re-push the screens it covered. That re-push of the untouched desired slice IS
+// the auto-revert; nothing was ever snapshotted, so nothing can be restored wrong.
+startOverrideSweeper({ control, hub, broadcaster, log: fastify.log });
 
 // Native-TLS banner (POL-70/D89) — before the auth banners so the transport story reads first.
 if (nativeTls) {

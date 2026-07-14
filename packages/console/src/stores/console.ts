@@ -27,6 +27,9 @@ import type {
   MachineView,
   Mural,
   NetbootInfo,
+  Override,
+  OverrideScope,
+  StartOverrideBody,
   Placement,
   Scene,
   ScreenView,
@@ -137,6 +140,9 @@ export interface ConsoleState {
   credentialProfiles: CredentialProfileView[];
   /** Saved wall snapshots (Phase 3d), mirrored from admin/state. */
   scenes: Scene[];
+  /** Live takeovers/casts (POL-90), mirrored from admin/state.overrides — so EVERY console sees the
+   *  same countdown, and any operator can end one. Optional on the wire → [] against an older server. */
+  overrides: Override[];
   /** The Live Activity feed (D25) — bounded, newest-first human event log, mirrored from
    *  admin/state.activity. The field is OPTIONAL on the wire (back-compat), so it defaults to []
    *  when a server omits it. */
@@ -152,6 +158,10 @@ export interface ConsoleState {
   /** A library source "armed" in the Wall's left library: click it, then click a screen/wall on the
    *  canvas to assign it (client-only UI state). Null = nothing armed. */
   pickedSourceId: string | null;
+  /** The takeover composer's open target (POL-90), or null when it is closed. Client-only UI state:
+   *  any view can open it (the Wall top bar, the Inspector's Cast action) and the modal lives once,
+   *  in the app shell. */
+  takeoverDialog: { scope: OverrideScope; targetId?: string } | null;
   /** The library source currently being DRAGGED onto the canvas (set on dragstart, read on drop).
    *  Carried in the store rather than the DragEvent's dataTransfer, whose getData() is unreliable
    *  across real HTML5 drops. Null = no drag in progress. */
@@ -180,6 +190,7 @@ export const useConsoleStore = defineStore("console", {
     contentSources: [],
     credentialProfiles: [],
     scenes: [],
+    overrides: [],
     activity: [],
     activeSceneId: null,
     activeMuralId: null,
@@ -187,6 +198,7 @@ export const useConsoleStore = defineStore("console", {
     selectedWallId: null,
     pickedSourceId: null,
     draggingSourceId: null,
+    takeoverDialog: null,
     theme: initialTheme(),
   }),
 
@@ -426,6 +438,41 @@ export const useConsoleStore = defineStore("console", {
       return state.pickedSourceId
         ? state.contentSources.find((s) => s.id === state.pickedSourceId)
         : undefined;
+    },
+
+    // ── Takeover / cast (POL-90) ────────────────────────────────────────────────
+
+    /** The takeover governing a screen right now, most specific first: screen > wall > mural > fleet.
+     *  Mirrors the server's precedence exactly — the console must never claim a different winner than
+     *  the one that is actually on the glass. */
+    overrideForScreen(): (screenId: string) => Override | undefined {
+      const rank: Record<OverrideScope, number> = { screen: 3, wall: 2, mural: 1, fleet: 0 };
+      return (screenId: string) => {
+        const wall = this.wallForScreen(screenId);
+        const muralId = this.placementForScreen(screenId)?.muralId;
+        let best: Override | undefined;
+        for (const o of this.overrides) {
+          const covers =
+            o.scope === "fleet" ||
+            (o.scope === "screen" && o.targetId === screenId) ||
+            (o.scope === "wall" && o.targetId === wall?.id) ||
+            (o.scope === "mural" && o.targetId === muralId);
+          if (!covers) continue;
+          if (!best || rank[o.scope] > rank[best.scope]) best = o;
+        }
+        return best;
+      };
+    },
+
+    /** The takeover on a combined surface itself (a wall-scope layer), if any. */
+    overrideForWall(state): (wallId: string) => Override | undefined {
+      return (wallId: string) =>
+        state.overrides.find((o) => o.scope === "wall" && o.targetId === wallId);
+    },
+
+    /** Whether ANY takeover is live — drives the console-wide takeover bar. */
+    takeoverActive(state): boolean {
+      return state.overrides.length > 0;
     },
 
     // ── Scenes (Phase 3d) ──────────────────────────────────────────────────────
@@ -704,6 +751,8 @@ export const useConsoleStore = defineStore("console", {
         // POL-24 — credential profiles are optional on the wire (older servers omit them).
         this.credentialProfiles = msg.credentialProfiles ?? [];
         this.scenes = msg.scenes;
+        // POL-90 — live takeovers. Optional on the wire (older servers omit them).
+        this.overrides = msg.overrides ?? [];
         // The Live Activity feed is optional on the wire (older servers omit it); default to [].
         // The server sends it newest-first and pre-bounded, so we mirror it as-is.
         this.activity = msg.activity ?? [];
@@ -1378,6 +1427,48 @@ export const useConsoleStore = defineStore("console", {
       if (!id) return;
       this.setWallContent(wallId, { sourceId: id });
       this.pickedSourceId = null;
+    },
+
+    // ── Takeover / cast (POL-90) ────────────────────────────────────────────────
+
+    /**
+     * Start a takeover: put THIS on THAT, right now, optionally for N seconds. The server composes it
+     * over desired state at send time — nothing is snapshotted, so the auto-revert cannot go wrong.
+     * Deliberately NOT optimistic: a takeover is fleet-visible state that every console must agree on,
+     * so we wait for the authoritative admin/state rather than draw a chip for a layer the server may
+     * have refused. Returns an operator-readable error, or null on success.
+     */
+    async startTakeover(body: StartOverrideBody): Promise<string | null> {
+      try {
+        await api.startOverride(body);
+        return null;
+      } catch (err) {
+        console.error("[console] startTakeover failed", err);
+        const detail =
+          err instanceof api.ApiError && typeof (err.payload as { error?: unknown })?.error === "string"
+            ? (err.payload as { error: string }).error
+            : null;
+        return detail ?? "The takeover was refused — is that content still in the library?";
+      }
+    },
+
+    /** Open the takeover composer against a target (fleet, a mural, a combined surface, a screen). */
+    openTakeoverDialog(scope: OverrideScope, targetId?: string): void {
+      this.takeoverDialog = { scope, targetId };
+    },
+
+    closeTakeoverDialog(): void {
+      this.takeoverDialog = null;
+    },
+
+    /** End a takeover early. Any operator may end any takeover — it is fleet state, not property. */
+    async endTakeover(id: string): Promise<void> {
+      this.overrides = this.overrides.filter((o) => o.id !== id); // optimistic: the chip goes at once
+      try {
+        await api.endOverride(id);
+      } catch (err) {
+        console.error("[console] endTakeover failed", err);
+      }
     },
 
     // ── Scenes (Phase 3d) ───────────────────────────────────────────────────────
