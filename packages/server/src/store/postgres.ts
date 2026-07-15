@@ -23,6 +23,7 @@ import {
   DisplayBackend,
   EnrollmentStatus,
   Geometry,
+  MachineTags,
   HostIdentity,
   OperatorRole,
   Output,
@@ -72,6 +73,7 @@ interface MachineRow {
   last_seen: Date | null;
   shell_enabled: boolean | null;
   shell_armed_at: Date | null;
+  tags: unknown;
   hardware: unknown;
   enrolled_token_id: string | null;
   enrolled_token_name: string | null;
@@ -292,6 +294,9 @@ export class PostgresStore implements Store {
     await sql`ALTER TABLE machines ADD COLUMN IF NOT EXISTS credential_hash text`;
     await sql`ALTER TABLE machines ADD COLUMN IF NOT EXISTS shell_enabled boolean NOT NULL DEFAULT false`;
     await sql`ALTER TABLE machines ADD COLUMN IF NOT EXISTS shell_armed_at timestamptz`;
+    // POL-103 — operator tags. jsonb, not a join table: a tag set is small, always read whole, and
+    // only ever replaced whole; a `machine_tags` table would buy nothing but a second write path.
+    await sql`ALTER TABLE machines ADD COLUMN IF NOT EXISTS tags jsonb NOT NULL DEFAULT '[]'::jsonb`;
     // POL-104: what the box IS (MACs / DMI serial / arch), which token it enrolled on, and whether it
     // matched a pre-registration. All NULL on rows that pre-date POL-104 — a machine enrolled before
     // this change simply says less on its card; it is never re-gated or re-approved because of it.
@@ -627,7 +632,7 @@ export class PostgresStore implements Store {
       credentialProfileRows,
       zoomPreferenceRows,
     ] = await Promise.all([
-      sql<MachineRow[]>`SELECT id, label, agent_version, backend, outputs, status, credential_hash, last_seen, shell_enabled, shell_armed_at, hardware, enrolled_token_id, enrolled_token_name, pre_registered, mtls_cert_issued_at, mtls_seen_at FROM machines`,
+      sql<MachineRow[]>`SELECT id, label, agent_version, backend, outputs, status, credential_hash, last_seen, shell_enabled, shell_armed_at, tags, hardware, enrolled_token_id, enrolled_token_name, pre_registered, mtls_cert_issued_at, mtls_seen_at FROM machines`,
       sql<ScreenRow[]>`SELECT id, friendly_name, machine_id, connector, cast_enabled FROM screens`,
       sql<ContentRow[]>`SELECT screen_id, canvas, surfaces, source_id FROM screen_content`,
       sql<MetaRow[]>`SELECT revision FROM meta WHERE id = 1`,
@@ -661,6 +666,8 @@ export class PostgresStore implements Store {
         lastSeen: row.last_seen ? row.last_seen.toISOString() : undefined,
         shellEnabled: row.shell_enabled ?? false,
         shellArmedAt: row.shell_armed_at ? row.shell_armed_at.toISOString() : undefined,
+        // POL-103 — legacy rows (NULL) and anything unrecognised load as untagged.
+        tags: MachineTags.safeParse(row.tags).data ?? [],
         hardware: hardware?.success ? hardware.data : undefined,
         enrolledTokenId: row.enrolled_token_id ?? undefined,
         enrolledTokenName: row.enrolled_token_name ?? undefined,
@@ -794,7 +801,7 @@ export class PostgresStore implements Store {
   async upsertMachine(machine: PersistedMachine): Promise<void> {
     const sql = this.sql;
     await sql`
-      INSERT INTO machines (id, label, agent_version, backend, outputs, status, credential_hash, last_seen, shell_enabled, shell_armed_at, hardware, enrolled_token_id, enrolled_token_name, pre_registered, mtls_cert_issued_at, mtls_seen_at)
+      INSERT INTO machines (id, label, agent_version, backend, outputs, status, credential_hash, last_seen, shell_enabled, shell_armed_at, tags, hardware, enrolled_token_id, enrolled_token_name, pre_registered, mtls_cert_issued_at, mtls_seen_at)
       VALUES (
         ${machine.id},
         ${machine.label},
@@ -806,6 +813,7 @@ export class PostgresStore implements Store {
         ${machine.lastSeen ? new Date(machine.lastSeen) : null},
         ${machine.shellEnabled ?? false},
         ${machine.shellArmedAt ? new Date(machine.shellArmedAt) : null},
+        ${sql.json(machine.tags ?? [])},
         ${machine.hardware ? sql.json(machine.hardware) : null},
         ${machine.enrolledTokenId ?? null},
         ${machine.enrolledTokenName ?? null},
@@ -823,6 +831,7 @@ export class PostgresStore implements Store {
         last_seen       = EXCLUDED.last_seen,
         shell_enabled   = EXCLUDED.shell_enabled,
         shell_armed_at  = EXCLUDED.shell_armed_at,
+        tags            = EXCLUDED.tags,
         -- POL-104: never blank out what we already know. A pre-POL-104 agent (or an agent that could
         -- not read its own DMI) sends no hardware; a row that HAS hardware must not lose it because
         -- one hello arrived without any, and the token a machine enrolled on is written ONCE, at
@@ -834,6 +843,11 @@ export class PostgresStore implements Store {
         mtls_cert_issued_at = EXCLUDED.mtls_cert_issued_at,
         mtls_seen_at    = EXCLUDED.mtls_seen_at
     `;
+  }
+
+  async setMachineTags(id: string, tags: string[]): Promise<void> {
+    const sql = this.sql;
+    await sql`UPDATE machines SET tags = ${sql.json(tags)} WHERE id = ${id}`;
   }
 
   async setMachineStatus(id: string, status: EnrollmentStatus): Promise<void> {

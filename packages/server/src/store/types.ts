@@ -47,6 +47,8 @@ export interface PersistedMachine {
   shellEnabled?: boolean;
   /** POL-59 — ISO time the shell was armed / last used, for the auto-disarm TTL sweep. */
   shellArmedAt?: string;
+  /** POL-103 — operator tags ("atrium", "floor:2"). Undefined on legacy rows → no tags. */
+  tags?: string[];
   /** POL-104 — the box's physical identity as it last reported it (MACs / DMI serial / arch). Kept on
    *  the ROW, not just in presence, so a pending card is informative while the box is offline. */
   hardware?: HostIdentity;
@@ -442,6 +444,8 @@ export interface Store {
   setMachineStatus(id: string, status: EnrollmentStatus): Promise<void>;
   /** Arm/disarm a machine for the remote shell (POL-59), stamping the arm time. No-op if absent. */
   setMachineShellEnabled(id: string, enabled: boolean, armedAt: string | null): Promise<void>;
+  /** POL-103 — replace a machine's whole tag set (add + remove are the same call). No-op if absent. */
+  setMachineTags(id: string, tags: string[]): Promise<void>;
   /**
    * Permanently forget a machine: delete its row AND cascade its screens, their content, and their
    * placements (defensive — the control plane also removes each in memory + dissolves walls first, so
