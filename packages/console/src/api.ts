@@ -8,6 +8,7 @@
  */
 import {
   BulkApproveBody,
+  BulkContentBody,
   BulkIdentBody,
   BulkRebootBody,
   BulkShellBody,
@@ -24,7 +25,9 @@ import {
   ImportPreRegistrationsBody,
   RenameMachineBody,
   InspectBody,
+  MoveTargetsBody,
   PlaceScreenBody,
+  UnplaceScreensBody,
   PreRegistration,
   RenameMuralBody,
   RenameScreenBody,
@@ -216,6 +219,34 @@ export function placeScreen(screenId: string, body: PlaceScreenBody): Promise<un
 /** DELETE /api/v1/screens/:screenId/placement — return the screen to the unplaced tray. */
 export function unplaceScreen(screenId: string): Promise<unknown> {
   return send("DELETE", `/screens/${encodeURIComponent(screenId)}/placement`);
+}
+
+/** POST /api/v1/screens/unplace { screenIds } — return a whole selection to the tray in one call. */
+export function unplaceScreens(screenIds: string[]): Promise<unknown> {
+  return send("POST", `/screens/unplace`, UnplaceScreensBody.parse({ screenIds }));
+}
+
+/**
+ * POST /api/v1/murals/:muralId/move { screenIds, wallIds, dx, dy } — translate a canvas selection
+ * atomically (POL-100): a dragged combined surface moves all its members together, a keyboard nudge
+ * moves everything selected. The server refuses (409) any move that would break up a wall.
+ */
+export function moveTargets(
+  muralId: string,
+  targets: { screenIds?: string[]; wallIds?: string[] },
+  dx: number,
+  dy: number,
+): Promise<unknown> {
+  return send(
+    "POST",
+    `/murals/${encodeURIComponent(muralId)}/move`,
+    MoveTargetsBody.parse({
+      screenIds: targets.screenIds ?? [],
+      wallIds: targets.wallIds ?? [],
+      dx,
+      dy,
+    }),
+  );
 }
 
 // ── Pre-registration (POL-104) ───────────────────────────────────────────────
@@ -413,6 +444,37 @@ export function setScreenZoom(screenId: string, zoom: number): Promise<unknown> 
   return send("PUT", `/screens/${encodeURIComponent(screenId)}/zoom`, SetZoomBody.parse({ zoom }));
 }
 
+// ── Clearing content + bulk operations (POL-96) ──────────────────────────────
+
+/** DELETE /api/v1/screens/:screenId/content — show nothing (the screen falls back to the splash). */
+export function clearScreenContent(screenId: string): Promise<unknown> {
+  return send("DELETE", `/screens/${encodeURIComponent(screenId)}/content`);
+}
+
+/** DELETE /api/v1/walls/:wallId/content — clear a combined surface; the grouping itself survives. */
+export function clearWallContent(wallId: string): Promise<unknown> {
+  return send("DELETE", `/walls/${encodeURIComponent(wallId)}/content`);
+}
+
+/**
+ * POST /api/v1/content/assign { screenIds, wallIds, content } — assign one source across a whole
+ * selection, or CLEAR it (`content: null`). One call, one broadcast, one activity line.
+ */
+export function bulkContent(
+  targets: { screenIds?: string[]; wallIds?: string[] },
+  content: SetContentBody | null,
+): Promise<unknown> {
+  return send(
+    "POST",
+    `/content/assign`,
+    BulkContentBody.parse({
+      screenIds: targets.screenIds ?? [],
+      wallIds: targets.wallIds ?? [],
+      content,
+    }),
+  );
+}
+
 /** PUT /api/v1/screens/:screenId/playlist-zoom { sourceId, zoom } — zoom ONE framed step of the
  *  playlist this screen is showing (POL-133). Remembered per (screen, step source), like D62. */
 export function setScreenPlaylistZoom(
@@ -429,12 +491,17 @@ export function setScreenPlaylistZoom(
 
 // ── Combined surfaces / video walls (Phase 3b) ───────────────────────────────
 
-/** POST /api/v1/murals/:muralId/walls { muralId, memberScreenIds } — combine ≥2 adjacent screens. */
-export function combineScreens(muralId: string, memberScreenIds: string[]): Promise<unknown> {
+/** POST /api/v1/murals/:muralId/walls { muralId, memberScreenIds, pack? } — combine ≥2 adjacent
+ *  screens. `pack` closes the gaps first (POL-100); without it a gappy selection is refused (400). */
+export function combineScreens(
+  muralId: string,
+  memberScreenIds: string[],
+  pack = false,
+): Promise<unknown> {
   return send(
     "POST",
     `/murals/${encodeURIComponent(muralId)}/walls`,
-    CombineScreensBody.parse({ muralId, memberScreenIds }),
+    CombineScreensBody.parse(pack ? { muralId, memberScreenIds, pack } : { muralId, memberScreenIds }),
   );
 }
 
