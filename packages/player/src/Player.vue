@@ -111,6 +111,14 @@ const pendingMachineId = readPendingMachineId();
 const pendingIdent =
   pendingMachineId !== "" && new URLSearchParams(window.location.search).get("ident") === "1";
 
+/** POL-145 — `&name=<label>` alongside `&ident=1`: the machine's operator-given name, stamped by the
+ *  server only when the box actually HAS one (never a hostname posing as a name — machineHasName).
+ *  When present the flash leads with the name and keeps the id small underneath; only an unnamed box
+ *  flashes the raw id, because then the id IS its only identity. */
+const pendingIdentName = pendingIdent
+  ? (new URLSearchParams(window.location.search).get("name") ?? "").trim()
+  : "";
+
 const screenId = readScreenId();
 const playerToken = readPlayerToken();
 
@@ -590,10 +598,16 @@ function connLabel(state: ConnState): string {
       sub="Pending Approval"
       caption="Approve this machine in Console ▸ Machines"
     />
-    <!-- POL-117 — pre-approval ident: the same flash overlay approved screens get, labelled with the
-         machine id (the one identity a pending box has), so the operator can match panel to card. -->
+    <!-- POL-117 — pre-approval ident: the same flash overlay approved screens get. POL-145 — a NAMED
+         box flashes its name (matching the approved ident, which flashes the screen's name) with the
+         id small underneath as the tie-breaker against the console card's uuid; only an unnamed box
+         flashes the raw id, because then the id is the only identity there is. -->
     <div v-if="pendingIdent" class="ident" style="background-color: #00c2ff">
-      <span class="ident-name pending-ident-name">{{ pendingMachineId }}</span>
+      <div v-if="pendingIdentName" class="pending-ident-stack">
+        <span class="ident-name pending-ident-title">{{ pendingIdentName }}</span>
+        <span class="pending-ident-id">{{ pendingMachineId }}</span>
+      </div>
+      <span v-else class="ident-name pending-ident-name">{{ pendingMachineId }}</span>
     </div>
   </template>
 

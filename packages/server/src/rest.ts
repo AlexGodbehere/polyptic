@@ -40,6 +40,7 @@ import {
   CreateSceneBody,
   IdentBody,
   InspectBody,
+  machineHasName,
   PlaceScreenBody,
   RebootBody,
   ShellArmBody,
@@ -436,15 +437,23 @@ export function registerRestRoutes(
     }
 
     if (machine.status === "pending") {
-      const sendPendingBoard = (ident: boolean): number =>
-        agentHub.send(
+      const sendPendingBoard = (ident: boolean): number => {
+        // POL-145 — a NAMED machine flashes its name (the id rides small underneath); only an
+        // unnamed box falls back to the raw id. The label is re-read at send time so the TTL-off
+        // (and any ident after a rename) always carries the current truth. Same additive URL-param
+        // path as `ident=1`, so deployed agents need no change — they just re-place the URL.
+        const current = control.getMachine(machine.id) ?? machine;
+        const name =
+          ident && machineHasName(current) ? `&name=${encodeURIComponent(current.label.trim())}` : "";
+        return agentHub.send(
           machine.id,
           ServerToAgentPending.parse({
             t: "server/pending",
             machineId: machine.id,
-            pendingUrl: pendingUrlFor(machine.id) + (ident ? "&ident=1" : ""),
+            pendingUrl: pendingUrlFor(machine.id) + (ident ? `&ident=1${name}` : ""),
           }),
         );
+      };
       const delivered = sendPendingBoard(body.data.on);
       if (body.data.on && body.data.ttlMs) {
         setTimeout(() => {
