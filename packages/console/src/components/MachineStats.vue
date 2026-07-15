@@ -67,13 +67,15 @@ const factsRowShown = computed(
 /** …and the band itself collapses when a box reported vitals but nothing we can draw. */
 const bandShown = computed(() => meters.value.length > 0 || factsRowShown.value);
 
-// The small icons for the facts row: inline strokes on currentColor, so they follow the theme for
-// free. Feather-style geometry on a 24-unit grid, drawn at 12px.
+// The small icons for the facts row: inline strokes on currentColor — accent-coloured per the
+// chosen design's facts row. Feather-style geometry on a 24-unit grid, drawn at 12px.
 const ICON_PATHS: Record<string, string[]> = {
   clock: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z", "M12 7v5l3 2"],
   gauge: ["M3 12h4l3-8 4 16 3-8h4"],
   thermometer: ["M14 14.76V5a2 2 0 0 0-4 0v9.76a4 4 0 1 0 4 0z"],
   browser: ["M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z", "M3 9h18"],
+  // The image id's glyph — the design marks the running build with a stack of layers.
+  layers: ["M12 2 2 7l10 5 10-5-10-5z", "M2 17l10 5 10-5", "M2 12l10 5 10-5"],
 };
 
 // The overload banner's state is HELD, not derived: hysteresis needs to know what it said last time
@@ -148,12 +150,21 @@ watch(
             Software rendering
           </span>
 
-          <span
-            v-if="imageId !== undefined"
-            class="image-id"
-            title="The OS image this box is running"
-            >{{ imageId }}</span
-          >
+          <span v-if="imageId !== undefined" class="image-id" title="The OS image this box is running">
+            <svg
+              class="fact-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path v-for="(d, i) in ICON_PATHS.layers" :key="i" :d="d" />
+            </svg>
+            <span class="image-id-text">{{ imageId }}</span>
+          </span>
         </div>
       </div>
 
@@ -195,7 +206,7 @@ watch(
   flex-direction: column;
   gap: 9px;
   margin-top: 11px;
-  padding: 10px 13px;
+  padding: 8px 13px;
   background: var(--muted-bg);
   border-radius: 8px;
 }
@@ -286,15 +297,20 @@ watch(
   width: 12px;
   height: 12px;
   flex: 0 0 auto;
-  color: var(--muted);
+  color: var(--accent);
 }
 .image-id {
   margin-left: auto;
-  font-size: 10.5px;
-  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  color: var(--muted2);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   white-space: nowrap;
   cursor: default;
+}
+.image-id-text {
+  font-size: 10.5px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--muted);
 }
 
 .chip {
