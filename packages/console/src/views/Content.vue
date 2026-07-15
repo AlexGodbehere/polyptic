@@ -348,7 +348,7 @@ const DOCUMENT_MIMES = [
   "application/vnd.oasis.opendocument.text",
 ];
 
-/** Whether THIS server can convert documents at all (it advertises it — see D115). With no converter
+/** Whether THIS server can convert documents at all (it advertises it — see D124). With no converter
  *  the picker doesn't offer documents, because the server would (rightly) refuse the upload. */
 const canConvertDocuments = computed(() => store.capabilities.documents);
 
@@ -547,7 +547,9 @@ function mediaFacts(s: ContentSource): string {
             video wall.
           </p>
         </div>
-        <div class="head-actions">
+        <!-- POL-107: authoring the library is an OPERATOR verb. A viewer reads it and sees no
+             Upload / New page / Add / Edit / Delete — and every one of those routes 403s for it. -->
+        <div v-if="store.canAuthor" class="head-actions">
           <button class="add-btn ghost compact" @click="openUpload">⤓ Upload</button>
           <button
             class="add-btn ghost compact"
@@ -595,22 +597,24 @@ function mediaFacts(s: ContentSource): string {
             </div>
           </div>
           <span class="kind-badge">{{ kindLabel(c.kind) }}</span>
-          <!-- POL-114 — a deck has exactly ONE authored setting: how long each page holds the screen. -->
-          <label v-if="c.kind === 'deck' && c.deck" class="dwell" title="Seconds each page is shown">
-            <input
-              class="dwell-input"
-              type="number"
-              min="1"
-              max="3600"
-              :value="c.deck.dwellSeconds"
-              @change="setDwell(c, Number(($event.target as HTMLInputElement).value))"
-            />
-            <span class="dwell-unit">s / page</span>
-          </label>
-          <button v-if="c.kind === 'page'" class="edit-btn" @click="openStudio(c)">Edit in Studio</button>
-          <button v-else-if="c.kind === 'deck'" class="edit-btn" @click="openEdit(c)">Rename</button>
-          <button v-else class="edit-btn" @click="openEdit(c)">Edit</button>
-          <button class="del-btn" title="Delete source" @click="remove(c)">✕</button>
+          <template v-if="store.canAuthor">
+            <!-- POL-114 — a deck has exactly ONE authored setting: how long each page holds the screen. -->
+            <label v-if="c.kind === 'deck' && c.deck" class="dwell" title="Seconds each page is shown">
+              <input
+                class="dwell-input"
+                type="number"
+                min="1"
+                max="3600"
+                :value="c.deck.dwellSeconds"
+                @change="setDwell(c, Number(($event.target as HTMLInputElement).value))"
+              />
+              <span class="dwell-unit">s / page</span>
+            </label>
+            <button v-if="c.kind === 'page'" class="edit-btn" @click="openStudio(c)">Edit in Studio</button>
+            <button v-else-if="c.kind === 'deck'" class="edit-btn" @click="openEdit(c)">Rename</button>
+            <button v-else class="edit-btn" @click="openEdit(c)">Edit</button>
+            <button class="del-btn" title="Delete source" @click="remove(c)">✕</button>
+          </template>
         </div>
       </div>
 
@@ -637,7 +641,9 @@ function mediaFacts(s: ContentSource): string {
             profile loads already authenticated.
           </p>
         </div>
-        <div class="head-actions">
+        <!-- Credential profiles hold content secrets: creating/editing/testing/deleting one is
+             ADMIN-only (the server refuses the mutations for anyone else); the redacted list is not. -->
+        <div v-if="store.isAdmin" class="head-actions">
           <button class="add-btn ghost compact" @click="openAddProfile">+ Add profile</button>
         </div>
       </header>
@@ -662,11 +668,13 @@ function mediaFacts(s: ContentSource): string {
             {{ p.tokenStatus === "ok" ? "●" : p.tokenStatus === "pending" ? "○" : "⚠" }}
             {{ statusLabel(p) }}
           </span>
-          <button class="edit-btn" :disabled="testState[p.id] === 'running'" @click="runTest(p)">
-            {{ testState[p.id] === "running" ? "Testing…" : "Test" }}
-          </button>
-          <button class="edit-btn" @click="openEditProfile(p)">Edit</button>
-          <button class="del-btn" title="Delete profile" @click="removeProfile(p)">✕</button>
+          <template v-if="store.isAdmin">
+            <button class="edit-btn" :disabled="testState[p.id] === 'running'" @click="runTest(p)">
+              {{ testState[p.id] === "running" ? "Testing…" : "Test" }}
+            </button>
+            <button class="edit-btn" @click="openEditProfile(p)">Edit</button>
+            <button class="del-btn" title="Delete profile" @click="removeProfile(p)">✕</button>
+          </template>
         </div>
       </div>
 
@@ -677,7 +685,7 @@ function mediaFacts(s: ContentSource): string {
           Showing dashboards that need a sign-in? Register a client at your identity provider, add
           its details here once, and any number of screens share the session.
         </span>
-        <div class="empty-actions">
+        <div v-if="store.isAdmin" class="empty-actions">
           <button class="add-btn ghost" @click="openAddProfile">+ Add credential profile</button>
         </div>
       </div>
