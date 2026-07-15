@@ -41,6 +41,7 @@ import type {
   Placement,
   PreRegistration,
   Scene,
+  SceneDiff,
   Schedule,
   SchedulerSettings,
   ScreenView,
@@ -192,9 +193,10 @@ export interface ConsoleState {
    *  admin/state.activity. The field is OPTIONAL on the wire (back-compat), so it defaults to []
    *  when a server omits it. */
   activity: ActivityEvent[];
-  /** The scene most recently applied this session. The admin/state snapshot does not surface the
-   *  server's DesiredState.activeSceneId, so we track it client-side: set optimistically on apply,
-   *  cleared when its scene is deleted. */
+  /** The scene the WALL IS ON, mirrored from admin/state (POL-95). Server-authoritative: the control
+   *  plane persists it, sets it on apply and clears it the moment a manual change diverges the wall,
+   *  so a reload and a second operator always agree. The console never sets it itself — it used to
+   *  (optimistically, on apply), which is exactly why the badge could lie. */
   activeSceneId: string | null;
   activeMuralId: string | null;
   selectedScreenIds: string[];
@@ -559,7 +561,7 @@ export const useConsoleStore = defineStore("console", {
       return (id: string) => this.scenes.find((sc) => sc.id === id);
     },
 
-    /** The scene most recently applied this session (if it still exists), else undefined. */
+    /** The scene the wall is currently on, per the SERVER (POL-95), if it still exists. */
     activeScene(state): Scene | undefined {
       return state.activeSceneId
         ? state.scenes.find((sc) => sc.id === state.activeSceneId)
@@ -920,6 +922,9 @@ export const useConsoleStore = defineStore("console", {
         // POL-94 — usage + health per source; optional on the wire (older servers omit it).
         this.sourceStatus = msg.sourceStatus ?? [];
         this.scenes = msg.scenes;
+        // POL-95 — the ACTIVE scene comes from the server's desired state. Optional on the wire
+        // (an older server omits it) → no badge rather than a guessed one.
+        this.activeSceneId = msg.activeSceneId ?? null;
         // POL-89 — the scene scheduler. Optional on the wire (back-compat): an older server simply
         // has no scheduler, and the Scenes view says so rather than painting an empty week.
         this.dayparts = msg.dayparts ?? [];
@@ -933,11 +938,6 @@ export const useConsoleStore = defineStore("console", {
         if (msg.settings) this.settings = msg.settings;
         // POL-101 — the panel-hours timezone; same back-compat rule as settings above.
         if (msg.panelPower) this.panelPower = msg.panelPower;
-
-        // Forget an active-scene marker whose scene the server no longer knows (e.g. deleted).
-        if (this.activeSceneId && !this.scenes.some((sc) => sc.id === this.activeSceneId)) {
-          this.activeSceneId = null;
-        }
 
         // Disarm a click-to-assign pick whose source the server no longer knows (e.g. deleted).
         if (this.pickedSourceId && !this.contentSources.some((s) => s.id === this.pickedSourceId)) {
@@ -1994,9 +1994,7 @@ export const useConsoleStore = defineStore("console", {
       const trimmed = name.trim();
       if (!trimmed || !muralId) return false;
       try {
-        const scene = await api.createScene({ name: trimmed, muralId });
-        // Optimistically mark the freshly-saved scene active until the broadcast lands.
-        if (scene && typeof scene.id === "string") this.activeSceneId = scene.id;
+        await api.createScene({ name: trimmed, muralId });
         return true;
       } catch (err) {
         console.error("[console] saveScene failed", err);
@@ -2013,7 +2011,8 @@ export const useConsoleStore = defineStore("console", {
     async applyScene(id: string): Promise<void> {
       const scene = this.scenes.find((sc) => sc.id === id);
       if (!scene) return;
-      this.activeSceneId = id; // optimistic
+      // NOT set optimistically (POL-95): the Active badge is the server's answer, and it arrives on
+      // the same admin/state broadcast as the re-laid wall — one round trip, no reload, no guess.
       // Switch the canvas to the scene's mural so the operator watches it re-lay live.
       if (this.murals.some((m) => m.id === scene.muralId)) this.activeMuralId = scene.muralId;
       try {
@@ -2039,6 +2038,20 @@ export const useConsoleStore = defineStore("console", {
       const trimmed = name.trim();
       if (!trimmed) return;
       await this.updateScene(id, { name: trimmed });
+    },
+
+    /**
+     * The APPLY PREVIEW for a scene (POL-95): what applying it would change on the live wall — content,
+     * placement, combine/split, what gets cleared — computed by the server. Null when the server can't
+     * diff it (unknown scene / mural), so the caller simply shows nothing rather than a wrong plan.
+     */
+    async fetchSceneDiff(id: string): Promise<SceneDiff | null> {
+      try {
+        return await api.sceneDiff(id);
+      } catch (err) {
+        console.error("[console] sceneDiff failed", err);
+        return null;
+      }
     },
 
     /** Delete a saved scene. The server also drops any schedule bound to it. */

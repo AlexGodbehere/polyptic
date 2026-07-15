@@ -33,6 +33,7 @@ import {
   PlaylistSurface,
   PageSurface,
   Scene,
+  SceneDiff,
   Schedule,
   SchedulerSettings,
   VideoSurface,
@@ -81,6 +82,9 @@ import type {
   PowerCapabilities,
   PreRegistration,
   SceneContent,
+  SceneDiffChange,
+  SceneDiffContent,
+  SceneDiffEntry,
   Screen,
   ScreenSlice,
   SourceUsage,
@@ -511,6 +515,10 @@ export class ControlPlane {
   /** Phase 3d — saved wall snapshots (scenes), keyed by scene id. */
   private readonly scenes = new Map<string, Scene>();
   private sceneCounter = 0;
+  /** POL-95 — set while `applyScene` is composing the lower-level primitives. The divergence guard
+   *  must not fire on the apply's OWN place/combine/content calls: the apply is what MAKES the wall
+   *  the scene. */
+  private applyingScene = false;
 
   /** POL-89 — the scene scheduler: the daypart library, the schedules bound to it, and the one
    *  deployment-wide settings row. The server's ticker and the console's week strip both resolve
@@ -826,6 +834,14 @@ export class ControlPlane {
       }
     }
     this.sceneCounter = maxScene;
+
+    // POL-95 — the ACTIVE scene is server-authoritative and persisted: a control-plane restart must
+    // not lose which scene the wall is on (a console reconnecting after one would otherwise show no
+    // badge at all). A pointer at a scene that no longer exists degrades to "none".
+    this.state.activeSceneId =
+      persisted.activeSceneId && this.scenes.has(persisted.activeSceneId)
+        ? persisted.activeSceneId
+        : null;
 
     // ── Scene scheduler (POL-89) ──────────────────────────────────────────────
     for (const pd of persisted.dayparts) {
@@ -1560,6 +1576,7 @@ export class ControlPlane {
     }
 
     this.emit("warn", `${machine.label} removed`);
+    await this.reconcileActiveScene(); // POL-95 — losing a box's screens can diverge the wall
     return { slices: [...touched.values()] };
   }
 
@@ -1638,6 +1655,7 @@ export class ControlPlane {
       sourceId: null,
     });
     await this.store.setRevision(this.state.revision);
+    await this.reconcileActiveScene(); // POL-95 — a manual content change can diverge the wall
     return next;
   }
 
@@ -1671,6 +1689,7 @@ export class ControlPlane {
       sourceId: null,
     });
     await this.store.setRevision(this.state.revision);
+    await this.reconcileActiveScene(); // POL-95
     return next;
   }
 
@@ -1827,6 +1846,7 @@ export class ControlPlane {
       }
       await this.store.setRevision(this.state.revision);
     }
+    await this.reconcileActiveScene(); // POL-95 — a deleted mural takes its scene's wall with it
     return { slices };
   }
 
@@ -1860,6 +1880,7 @@ export class ControlPlane {
     };
     this.placements.set(screenId, placement);
     await this.store.upsertPlacement(placement);
+    await this.reconcileActiveScene(); // POL-95 — a manual move/place can diverge the wall
     return placement;
   }
 
@@ -1875,7 +1896,10 @@ export class ControlPlane {
     await this.store.deletePlacement(screenId);
 
     const wall = this.getWallForScreen(screenId);
-    if (wall === undefined) return { slices: [] };
+    if (wall === undefined) {
+      await this.reconcileActiveScene(); // POL-95
+      return { slices: [] };
+    }
 
     this.videoWalls.delete(wall.id);
     this.wallSourceIds.delete(wall.id);
@@ -1891,6 +1915,7 @@ export class ControlPlane {
       });
     }
     await this.store.setRevision(this.state.revision);
+    await this.reconcileActiveScene(); // POL-95
     return { slices };
   }
 
@@ -1952,6 +1977,7 @@ export class ControlPlane {
     await this.store.setRevision(this.state.revision);
 
     this.emit("warn", `${screen.friendlyName} removed`);
+    await this.reconcileActiveScene(); // POL-95 — losing a screen can diverge the wall from its scene
     return { slices: [...touched.values()] };
   }
 
@@ -2810,6 +2836,7 @@ export class ControlPlane {
     await this.store.setRevision(this.state.revision);
 
     this.emit("good", `Combined ${ids.length} panels into ${wall.name ?? id}`);
+    await this.reconcileActiveScene(); // POL-95 — grouping is part of what a scene captures
     return { ok: true, wall, slices };
   }
 
@@ -2878,6 +2905,7 @@ export class ControlPlane {
     await this.store.setRevision(this.state.revision);
 
     this.emit("info", `Split ${wall.name ?? wall.id}`);
+    await this.reconcileActiveScene(); // POL-95 — grouping is part of what a scene captures
     return { wall, slices };
   }
 
@@ -2932,6 +2960,7 @@ export class ControlPlane {
       "good",
       `${wall.name ?? wall.id} → ${this.resolvedContentName(resolved.spec, resolved.sourceId)}`,
     );
+    await this.reconcileActiveScene(); // POL-95 — a manual content change can diverge the wall
     return { ok: true, slices };
   }
 
@@ -2990,6 +3019,7 @@ export class ControlPlane {
       "good",
       `${screen.friendlyName} → ${this.resolvedContentName(resolved.spec, resolved.sourceId)}`,
     );
+    await this.reconcileActiveScene(); // POL-95 — a manual content change can diverge the wall
     return { ok: true, slice: next };
   }
 
@@ -4237,6 +4267,46 @@ export class ControlPlane {
     return null;
   }
 
+  // ── The ACTIVE scene, server-authoritative (POL-95) ──────────────────────────
+  //
+  // `DesiredState.activeSceneId` is the control plane's answer to "which scene is the wall on?" — it
+  // is persisted, broadcast in `admin/state`, and CLEARED the moment a manual change makes the live
+  // wall stop being that scene. Consoles never guess it; they are told. (Before POL-95 the badge was
+  // set optimistically in the console's own store, so a reload or a second operator saw a wrong or
+  // absent badge — a control plane that is the brain cannot let a client invent its state.)
+
+  /** Set (or clear) the active scene, write-through. No-op when it already holds that value. */
+  private async setActiveScene(sceneId: string | null): Promise<void> {
+    if (this.state.activeSceneId === sceneId) return;
+    this.state.activeSceneId = sceneId;
+    await this.store.setActiveSceneId(sceneId);
+  }
+
+  /**
+   * Re-check the Active badge after any MANUAL change to the wall. The badge claims "the wall IS this
+   * scene", so we judge it the only way that can't lie: re-diff the live wall against the scene and
+   * clear the badge unless nothing would change. (Every mutator that can move the wall calls this;
+   * the apply's own primitives are fenced off by `applyingScene`.)
+   */
+  private async reconcileActiveScene(): Promise<void> {
+    if (this.applyingScene) return;
+    const activeId = this.state.activeSceneId;
+    if (activeId === null) return;
+
+    const scene = this.scenes.get(activeId);
+    if (scene === undefined) {
+      await this.setActiveScene(null);
+      return;
+    }
+    // A null diff means the scene's mural has been deleted out from under it — the wall it described
+    // no longer exists, so the badge cannot stand either.
+    const diff = this.diffScene(activeId);
+    if (diff !== null && diff.identical) return;
+
+    await this.setActiveScene(null);
+    this.emit("info", `The wall no longer matches scene ${scene.name}`);
+  }
+
   /** Turn a captured SceneContent into a ContentAssignment to feed setScreenContent/setWallContent. */
   private assignmentFor(content: SceneContent): ContentAssignment | null {
     if (!content) return null;
@@ -4311,12 +4381,15 @@ export class ControlPlane {
     if (!this.murals.has(muralId)) return null;
 
     // Compose the lower-level primitives WITHOUT each of them emitting its own activity line — the
-    // whole apply gets one summary line below.
+    // whole apply gets one summary line below — and WITHOUT the POL-95 divergence guard firing on the
+    // apply's own place/combine/content calls (the apply is what makes the wall the scene).
     this.suppressEmit = true;
+    this.applyingScene = true;
     try {
       return await this.applySceneInner(scene, muralId);
     } finally {
       this.suppressEmit = false;
+      this.applyingScene = false;
     }
   }
 
@@ -4389,8 +4462,9 @@ export class ControlPlane {
       }
     }
 
-    // 5. Mark the scene active (in-memory desired-state; the console mirrors this on its side).
-    this.state.activeSceneId = scene.id;
+    // 5. Mark the scene active — SERVER-AUTHORITATIVE (POL-95): persisted here, broadcast in
+    //    admin/state, cleared by the divergence guard. Every console is told; none guesses.
+    await this.setActiveScene(scene.id);
 
     // One summary line for the whole apply. Pushed straight to the log (the per-op guard is on).
     this.activity?.push("good", `Applied scene ${scene.name}`);
@@ -4423,7 +4497,7 @@ export class ControlPlane {
   async deleteScene(id: string): Promise<boolean> {
     if (!this.scenes.has(id)) return false;
     this.scenes.delete(id);
-    if (this.state.activeSceneId === id) this.state.activeSceneId = null;
+    if (this.state.activeSceneId === id) await this.setActiveScene(null);
     await this.store.deleteScene(id);
 
     for (const schedule of [...this.schedules.values()].filter((s) => s.sceneId === id)) {
@@ -4435,6 +4509,227 @@ export class ControlPlane {
       await this.store.setSchedulerSettings(this.toPersistedSchedulerSettings());
     }
     return true;
+  }
+
+  // ── Scene apply-preview: the diff (POL-95) ───────────────────────────────────
+  //
+  // Applying a scene to a 12-screen mural used to be a blind leap — the wall just jumped. `diffScene`
+  // is the read-out: it compares the SNAPSHOT against the LIVE wall and returns what apply would do
+  // (which screens change content, which move, which walls combine or split, what gets cleared), in
+  // exactly the terms `applyScene` reconciles in. It is READ-ONLY, and also the judge the divergence
+  // guard uses ("does the wall still equal the scene?"), so the preview and the badge can never
+  // disagree. Whatever apply would SKIP (a captured screen that's gone, a source since deleted, a wall
+  // that can no longer be re-formed) is skipped here too — and named in `warnings`.
+
+  /** A stable key for a set of wall members (order-independent), so a scene wall and a live wall with
+   *  the same membership match up regardless of the (fresh) wall id an apply would mint. */
+  private static wallKey(memberScreenIds: readonly string[]): string {
+    return `wall:${[...memberScreenIds].sort().join("+")}`;
+  }
+
+  /** Label a CURRENT assignment for display (library source → its name; ad-hoc → the url). */
+  private labelContent(content: SceneContent): SceneDiffContent {
+    if (!content) return null;
+    if (content.sourceId !== undefined) {
+      const source = this.contentSources.get(content.sourceId);
+      // A live assignment always resolves; a dangling one is treated as nothing on air.
+      if (!source) return null;
+      return { sourceId: source.id, label: source.name };
+    }
+    if (content.url !== undefined) return { url: content.url, label: content.url };
+    return null;
+  }
+
+  /** Label what the scene would PUT on a target. A captured source that has since been deleted resolves
+   *  to nothing — that is exactly what apply does (it leaves the target empty) — plus a warning. */
+  private labelSceneContent(
+    content: SceneContent,
+    targetName: string,
+    warnings: string[],
+  ): SceneDiffContent {
+    if (content?.sourceId !== undefined && !this.contentSources.has(content.sourceId)) {
+      warnings.push(`${targetName}: the saved content source has been deleted — it will be left empty.`);
+      return null;
+    }
+    return this.labelContent(content);
+  }
+
+  /** Two diff sides are the same content when they name the same source, or the same ad-hoc url. */
+  private static sameContent(a: SceneDiffContent, b: SceneDiffContent): boolean {
+    if (a === null || b === null) return a === b;
+    return a.sourceId === b.sourceId && a.url === b.url;
+  }
+
+  /** The content a screen shows RIGHT NOW — via its wall if it is a member, else its own assignment. */
+  private currentScreenContent(screenId: string): SceneDiffContent {
+    const wall = this.getWallForScreen(screenId);
+    if (wall) return this.labelContent(this.deriveWallContent(wall));
+    return this.labelContent(this.deriveScreenContent(screenId));
+  }
+
+  /**
+   * The changeset applying scene `sceneId` would produce on its mural. Null if the scene — or its
+   * mural — is unknown. `identical` means the wall already IS the scene (apply would change nothing).
+   */
+  diffScene(sceneId: string): SceneDiff | null {
+    const scene = this.scenes.get(sceneId);
+    if (scene === undefined) return null;
+    const muralId = scene.muralId;
+    if (!this.murals.has(muralId)) return null;
+
+    const warnings: string[] = [];
+    const entries: SceneDiffEntry[] = [];
+    let unchanged = 0;
+
+    const nameOf = (screenId: string): string =>
+      this.getScreen(screenId)?.friendlyName ?? screenId;
+
+    // What apply will actually place: every captured placement whose screen still exists.
+    const wantedPlacements = scene.placements.filter((p) => {
+      if (this.getScreen(p.screenId)) return true;
+      warnings.push(`A screen the scene captured no longer exists — it will be skipped.`);
+      return false;
+    });
+    const wantedIds = new Set(wantedPlacements.map((p) => p.screenId));
+
+    // The walls apply will re-form: ≥2 surviving, placed members (mirrors applySceneInner step 3).
+    const sceneWalls = scene.walls
+      .map((w) => ({ members: w.memberScreenIds.filter((id) => wantedIds.has(id)), content: w.content }))
+      .filter((w) => {
+        if (w.members.length >= 2) return true;
+        warnings.push(
+          `A video wall in the scene can no longer be re-formed (its screens are gone) — its screens will show their own content.`,
+        );
+        return false;
+      });
+    const sceneWallMembers = new Set(sceneWalls.flatMap((w) => w.members));
+
+    const currentWalls = [...this.videoWalls.values()].filter((w) => w.muralId === muralId);
+    const currentWallByKey = new Map(
+      currentWalls.map((w) => [ControlPlane.wallKey(w.memberScreenIds), w] as const),
+    );
+
+    // ── 1. Screens: placement (place / move) + content for the non-walled ones ──
+    for (const p of wantedPlacements) {
+      const changes: SceneDiffChange[] = [];
+      const current = this.placements.get(p.screenId);
+      const placedHere = current !== undefined && current.muralId === muralId;
+      if (!placedHere) changes.push("place");
+      else if (current.x !== p.x || current.y !== p.y || current.w !== p.w || current.h !== p.h) {
+        changes.push("move");
+      }
+
+      // A screen the scene puts in a wall takes the WALL's content — that entry carries it.
+      const inSceneWall = sceneWallMembers.has(p.screenId);
+      const from = this.currentScreenContent(p.screenId);
+      let to: SceneDiffContent = from;
+      if (!inSceneWall) {
+        const captured = scene.screens.find((s) => s.screenId === p.screenId)?.content ?? null;
+        to = this.labelSceneContent(captured, nameOf(p.screenId), warnings);
+        if (!ControlPlane.sameContent(from, to)) changes.push(to === null ? "cleared" : "content");
+      }
+
+      if (changes.length === 0) {
+        unchanged += 1;
+        continue;
+      }
+      entries.push({
+        target: "screen",
+        id: p.screenId,
+        name: nameOf(p.screenId),
+        screenIds: [p.screenId],
+        changes,
+        from,
+        to: inSceneWall ? from : to,
+      });
+    }
+
+    // ── 2. Screens the scene does NOT include: unplaced (and cleared if they show anything) ────────
+    for (const current of this.placements.values()) {
+      if (current.muralId !== muralId) continue;
+      if (wantedIds.has(current.screenId)) continue;
+      const from = this.currentScreenContent(current.screenId);
+      const changes: SceneDiffChange[] = ["unplace"];
+      if (from !== null) changes.push("cleared");
+      entries.push({
+        target: "screen",
+        id: current.screenId,
+        name: nameOf(current.screenId),
+        screenIds: [current.screenId],
+        changes,
+        from,
+        to: null,
+      });
+    }
+
+    // ── 3. The scene's video walls: combine (when not already one) + their content ─────────────────
+    const matchedWallKeys = new Set<string>();
+    for (const w of sceneWalls) {
+      const key = ControlPlane.wallKey(w.members);
+      const live = currentWallByKey.get(key);
+      if (live) matchedWallKeys.add(key);
+
+      const name = live?.name ?? `Video wall (${w.members.length} screens)`;
+      const from = live
+        ? this.labelContent(this.deriveWallContent(live))
+        : this.currentScreenContent(w.members[0]!); // what the first member shows today
+      const to = this.labelSceneContent(w.content, name, warnings);
+
+      const changes: SceneDiffChange[] = [];
+      if (!live) changes.push("combine");
+      if (!ControlPlane.sameContent(from, to)) changes.push(to === null ? "cleared" : "content");
+
+      if (changes.length === 0) {
+        unchanged += 1;
+        continue;
+      }
+      entries.push({
+        target: "wall",
+        id: key,
+        name,
+        screenIds: [...w.members],
+        changes,
+        from,
+        to,
+      });
+    }
+
+    // ── 4. Live walls the scene does not keep: split back into individual screens ──────────────────
+    for (const live of currentWalls) {
+      const key = ControlPlane.wallKey(live.memberScreenIds);
+      if (matchedWallKeys.has(key)) continue;
+      entries.push({
+        target: "wall",
+        id: key,
+        name: live.name ?? `Video wall (${live.memberScreenIds.length} screens)`,
+        screenIds: [...live.memberScreenIds],
+        changes: ["split"],
+        from: this.labelContent(this.deriveWallContent(live)),
+        to: null, // each member then takes whatever the scene gives it (its own entry above)
+      });
+    }
+
+    const count = (change: SceneDiffChange): number =>
+      entries.filter((e) => e.changes.includes(change)).length;
+
+    return SceneDiff.parse({
+      sceneId: scene.id,
+      sceneName: scene.name,
+      muralId,
+      identical: entries.length === 0,
+      entries,
+      summary: {
+        contentChanges: count("content"),
+        cleared: count("cleared"),
+        moves: count("move"),
+        placed: count("place"),
+        unplaced: count("unplace"),
+        combines: count("combine"),
+        splits: count("split"),
+        unchanged,
+      },
+      warnings: [...new Set(warnings)],
+    });
   }
 
   // ── The scene scheduler (POL-89) ──────────────────────────────────────────────
