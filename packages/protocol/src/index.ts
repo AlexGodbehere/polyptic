@@ -631,6 +631,12 @@ export const AgentStatus = z.object({
        *  instead of needing an edge-triggered ack that a dropped frame would strand. Optional =
        *  back-compat with agents that predate casting. */
       casting: z.boolean().optional(),
+      /** POL-136 — the PIN a sender must type RIGHT NOW to pair with this connector's receiver.
+       *  The receiver prints its per-pairing PIN to stdout only (it never draws a window at pairing
+       *  time — the D111 premise this corrects), so the agent, which owns that stdout, learns it and
+       *  level-reports it here for the server to surface on the panel via the player overlay.
+       *  Present only while a pairing is in progress; absent = no pairing (or a pre-POL-136 agent). */
+      castPin: z.string().min(1).max(16).optional(),
     }),
   ),
   /** POL-92 — host vitals, sampled each heartbeat. Optional: an older agent (or a backend with no
@@ -1070,10 +1076,21 @@ export const ServerToPlayerSettings = z.object({
   settings: DisplaySettings,
 });
 
+/** POL-136 — AirPlay pairing PIN overlay: show (or clear, with null) the PIN a sender must type on
+ *  the phone right now. Ephemeral like `server/ident-pulse` — never part of the stored slice — and
+ *  replayed to a player that (re)connects mid-pairing, straight after its first render. The player
+ *  draws it fullscreen and big: at pairing time no receiver window exists on the box (the receiver
+ *  only opens one once mirroring starts), so the player IS what's on the glass. */
+export const ServerToPlayerCastPin = z.object({
+  t: z.literal("server/cast-pin"),
+  pin: z.string().min(1).max(16).nullable(),
+});
+
 export const ServerToPlayerMessage = z.discriminatedUnion("t", [
   ServerToPlayerRender,
   ServerToPlayerIdent,
   ServerToPlayerSettings,
+  ServerToPlayerCastPin,
 ]);
 export type ServerToPlayerMessage = z.infer<typeof ServerToPlayerMessage>;
 

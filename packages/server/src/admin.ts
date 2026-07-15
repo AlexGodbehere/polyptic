@@ -69,8 +69,12 @@ export class Presence {
   /** screenIds whose panel currently shows the browser's Web Inspector (POL-50). */
   private readonly inspecting = new Set<string>();
   /** POL-119 — screenIds with a LIVE cast (AirPlay) session: the box's receiver owns a visible
-   *  window (mirror or PIN prompt). Level-set from `agent/status.screens[].casting`. */
+   *  window (the mirror). Level-set from `agent/status.screens[].casting`. */
   private readonly casting = new Set<string>();
+  /** POL-136 — screenId → the PIN a pairing sender must type RIGHT NOW, per the agent's status
+   *  report (the receiver prints it to stdout; the agent learns it there). Live-only, like the rest
+   *  of Presence: a PIN describes an in-flight pairing, and survives nothing. */
+  private readonly castPins = new Map<string, string>();
   /** screenId → why the box last refused to show it (POL-50). */
   private readonly inspectErrors = new Map<string, string>();
   /** machineId → when the box ACCEPTED an operator reboot (POL-68). Live-only; cleared when the
@@ -153,6 +157,22 @@ export class Presence {
     return this.casting.has(screenId);
   }
 
+  /** POL-136 — record (or clear, with null) the PIN a sender must type to pair with this screen's
+   *  receiver, per the agent's level report. Returns true when the value CHANGED, so the caller
+   *  pushes the player overlay / feed line only on real edges, not every heartbeat. */
+  setScreenCastPin(screenId: string, pin: string | null): boolean {
+    const was = this.castPins.get(screenId) ?? null;
+    if (pin === null) this.castPins.delete(screenId);
+    else this.castPins.set(screenId, pin);
+    return was !== pin;
+  }
+
+  /** The PIN currently pairing against this screen, or null — replayed to a player that (re)connects
+   *  mid-pairing, right after its first render. */
+  screenCastPin(screenId: string): string | null {
+    return this.castPins.get(screenId) ?? null;
+  }
+
   /**
    * Record (or clear, with `null`) why the box refused to show its inspector. A refusal leaves
    * `inspecting` false — i.e. UNCHANGED — so this is the only thing that distinguishes "the wall said
@@ -202,6 +222,8 @@ export class Presence {
       this.inspectErrors.delete(id);
       // POL-119 — a dropped machine's receiver windows are gone with it; no session survives.
       this.casting.delete(id);
+      // POL-136 — and neither does an in-flight pairing (its receiver died with the box).
+      this.castPins.delete(id);
     }
   }
 
