@@ -8,7 +8,7 @@
  * invariant — combine and wall-move both re-check it, so no code path can leave an invalid wall) and
  * the console (which warns BEFORE the operator commits, and offers to pack the gaps out).
  *
- * THE ADJACENCY RULE (D95)
+ * THE ADJACENCY RULE (D125)
  *   Two members are IN CONTACT when their rectangles touch along an edge with a positive overlap, or
  *   when they intersect. A gap (beyond `tolerance`) is not contact, and neither is touching at a
  *   corner alone — a corner join leaves the wall's union box half empty.

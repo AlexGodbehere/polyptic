@@ -14,6 +14,7 @@ import { PROTOCOL_VERSION, ServerToAdminMessage, parseMessage } from "@polyptic/
 import type {
   ActivityEvent,
   AuthUser,
+  BulkOpResponse,
   ChangePasswordBody,
   ContentKind,
   ContentSource,
@@ -21,8 +22,10 @@ import type {
   CreateCredentialProfileBody,
   CreateEnrollmentTokenBody,
   CreatePreRegistrationBody,
+  CreateScheduleBody,
   CredentialProfileTestResult,
   CredentialProfileView,
+  Daypart,
   DisplaySettings,
   EnrollmentInfo,
   EnrollmentTokenView,
@@ -34,16 +37,30 @@ import type {
   Placement,
   PreRegistration,
   Scene,
+  Schedule,
+  SchedulerSettings,
   ScreenView,
   UpdateContentSourceBody,
   UpdateCredentialProfileBody,
+  UpdateDaypartBody,
   UpdateSceneBody,
+  UpdateScheduleBody,
+  UpdateSchedulerSettingsBody,
   VideoWall,
   ImageUpdateInfo,
 } from "@polyptic/protocol";
 
 import * as api from "../api";
 import * as auth from "../auth";
+
+/** A server 4xx explains itself in `{error: "<sentence>"}`; ApiError.message is only method+status. */
+function errorSentence(err: unknown, fallback: string): string {
+  const detail =
+    err instanceof api.ApiError && typeof (err.payload as { error?: unknown })?.error === "string"
+      ? (err.payload as { error: string }).error
+      : null;
+  return detail ?? fallback;
+}
 
 /** Assigning content takes EITHER a library source by id OR an ad-hoc URL — exactly one (the
  *  contract's SetContentBody refinement). The ad-hoc URL path is the Phase-3b behaviour. */
@@ -80,6 +97,13 @@ let stopped = false;
 // When a Combine round-trips, the server assigns the real wall id; we remember the optimistic
 // member set so the next authoritative broadcast can re-point `selectedWallId` at the real wall.
 let pendingWallMembers: string[] | null = null;
+
+/** The server's own sentence for a failed call ("daypart still used by 2 schedules"), when it sent
+ *  one — `ApiError.message` is only method/path/status, which is useless to an operator. */
+function errorText(err: api.ApiError): string {
+  const payload = err.payload as { error?: unknown } | undefined;
+  return typeof payload?.error === "string" ? payload.error : err.message;
+}
 
 /** Two membership lists describe the same wall iff they hold the same screen ids (order-insensitive). */
 function sameMembers(a: readonly string[], b: readonly string[]): boolean {
@@ -145,6 +169,13 @@ export interface ConsoleState {
   credentialProfiles: CredentialProfileView[];
   /** Saved wall snapshots (Phase 3d), mirrored from admin/state. */
   scenes: Scene[];
+  /** The scene scheduler (POL-89), mirrored from admin/state: the daypart library, the schedules
+   *  bound to it, and the deployment's settings row (master switch + timezone + default scene).
+   *  Optional on the wire (back-compat) → [] / null against an older server. The Scenes view feeds
+   *  exactly these into the protocol's shared resolver to paint the week strip. */
+  dayparts: Daypart[];
+  schedules: Schedule[];
+  scheduler: SchedulerSettings | null;
   /** The Live Activity feed (D25) — bounded, newest-first human event log, mirrored from
    *  admin/state.activity. The field is OPTIONAL on the wire (back-compat), so it defaults to []
    *  when a server omits it. */
@@ -189,6 +220,9 @@ export const useConsoleStore = defineStore("console", {
     contentSources: [],
     credentialProfiles: [],
     scenes: [],
+    dayparts: [],
+    schedules: [],
+    scheduler: null,
     activity: [],
     activeSceneId: null,
     activeMuralId: null,
@@ -839,6 +873,11 @@ export const useConsoleStore = defineStore("console", {
         // POL-24 — credential profiles are optional on the wire (older servers omit them).
         this.credentialProfiles = msg.credentialProfiles ?? [];
         this.scenes = msg.scenes;
+        // POL-89 — the scene scheduler. Optional on the wire (back-compat): an older server simply
+        // has no scheduler, and the Scenes view says so rather than painting an empty week.
+        this.dayparts = msg.dayparts ?? [];
+        this.schedules = msg.schedules ?? [];
+        if (msg.scheduler) this.scheduler = msg.scheduler;
         // The Live Activity feed is optional on the wire (older servers omit it); default to [].
         // The server sends it newest-first and pre-bounded, so we mirror it as-is.
         this.activity = msg.activity ?? [];
@@ -901,6 +940,54 @@ export const useConsoleStore = defineStore("console", {
         this.openSocket();
       }, delay);
       backoffMs = Math.min(backoffMs * 2, RECONNECT_MAX_MS);
+    },
+
+    // ── Tags + bulk operations (POL-103) ────────────────────────────────────────
+
+    /**
+     * Replace a machine's whole tag set. Optimistic (the chips redraw at once); the authoritative
+     * admin/state broadcast reconciles — including the server's normalization (lowercase, de-duped).
+     */
+    async setMachineTags(id: string, tags: string[]): Promise<string | null> {
+      const machine = this.machines.find((m) => m.id === id);
+      const previous = machine ? [...(machine.tags ?? [])] : [];
+      if (machine) machine.tags = tags;
+      try {
+        await api.setMachineTags(id, tags);
+        return null;
+      } catch (err) {
+        if (machine) machine.tags = previous; // revert
+        console.error("[console] setMachineTags failed", err);
+        return errorSentence(err, "Could not save those tags.");
+      }
+    },
+
+    /**
+     * Fan a verb out over a target (a tag selector, or the operator's checkbox selection) and hand
+     * back the server's per-machine result. Partial success is NORMAL — three offline boxes are
+     * reported, not thrown — so the caller summarizes rather than treating it as a failure.
+     */
+    async bulkAction(
+      action: "reboot" | "arm" | "disarm" | "ident" | "approve",
+      target: api.BulkTarget,
+    ): Promise<BulkOpResponse | string> {
+      try {
+        switch (action) {
+          case "reboot":
+            return await api.bulkReboot(target);
+          case "arm":
+            return await api.bulkShell(target, true);
+          case "disarm":
+            return await api.bulkShell(target, false);
+          case "ident":
+            return await api.bulkIdent(target);
+          case "approve":
+            return await api.bulkApprove(target);
+        }
+      } catch (err) {
+        console.error(`[console] bulk ${action} failed`, err);
+        return errorSentence(err, `The ${action} could not be sent to those machines.`);
+      }
     },
 
     // ── Machines / enrollment (Phase 2b) ────────────────────────────────────────
@@ -1776,20 +1863,10 @@ export const useConsoleStore = defineStore("console", {
       }
     },
 
-    /**
-     * Update a saved scene: rename it and/or set its illustrative schedule time (`scheduleAt` is
-     * "HH:MM", or null to clear). The schedule is STORED, NOT FIRED — it's illustrative only (D24);
-     * nothing in the console or server activates a scene at that time.
-     */
+    /** Update a saved scene (rename). WHEN it plays is a `Schedule` — see the scheduler actions. */
     async updateScene(id: string, body: UpdateSceneBody): Promise<void> {
       const scene = this.scenes.find((sc) => sc.id === id);
-      if (scene) {
-        // optimistic patch
-        if (body.name !== undefined) scene.name = body.name;
-        if (body.scheduleAt !== undefined) {
-          scene.scheduleAt = body.scheduleAt === null ? undefined : body.scheduleAt;
-        }
-      }
+      if (scene && body.name !== undefined) scene.name = body.name; // optimistic
       try {
         await api.updateScene(id, body);
       } catch (err) {
@@ -1804,20 +1881,99 @@ export const useConsoleStore = defineStore("console", {
       await this.updateScene(id, { name: trimmed });
     },
 
-    /** Convenience: set (or clear, with "") a scene's illustrative schedule time. */
-    async scheduleScene(id: string, scheduleAt: string): Promise<void> {
-      const trimmed = scheduleAt.trim();
-      await this.updateScene(id, { scheduleAt: trimmed === "" ? null : trimmed });
-    },
-
-    /** Delete a saved scene. */
+    /** Delete a saved scene. The server also drops any schedule bound to it. */
     async deleteScene(id: string): Promise<void> {
       this.scenes = this.scenes.filter((sc) => sc.id !== id); // optimistic
+      this.schedules = this.schedules.filter((s) => s.sceneId !== id);
       if (this.activeSceneId === id) this.activeSceneId = null;
       try {
         await api.deleteScene(id);
       } catch (err) {
         console.error("[console] deleteScene failed", err);
+      }
+    },
+
+    // ── The scene scheduler (POL-89) ────────────────────────────────────────────
+    //
+    // Thin write-throughs: the authoritative admin/state broadcast (which carries dayparts,
+    // schedules and the settings row) lands within a beat and overwrites whatever we did locally.
+    // Every failure returns a string the view shows verbatim — a 409 on a daypart still in use, a
+    // rejected timezone — because silently swallowing them is how a decoy control happens.
+
+    async createDaypart(name: string, start: string, end: string): Promise<string | null> {
+      try {
+        await api.createDaypart({ name: name.trim(), start, end });
+        return null;
+      } catch (err) {
+        console.error("[console] createDaypart failed", err);
+        return err instanceof api.ApiError ? errorText(err) : "could not add the daypart";
+      }
+    },
+
+    async updateDaypart(id: string, patch: UpdateDaypartBody): Promise<string | null> {
+      try {
+        await api.updateDaypart(id, patch);
+        return null;
+      } catch (err) {
+        console.error("[console] updateDaypart failed", err);
+        return err instanceof api.ApiError ? errorText(err) : "could not update the daypart";
+      }
+    },
+
+    async deleteDaypart(id: string): Promise<string | null> {
+      try {
+        await api.deleteDaypart(id);
+        return null;
+      } catch (err) {
+        console.error("[console] deleteDaypart failed", err);
+        return err instanceof api.ApiError ? errorText(err) : "could not delete the daypart";
+      }
+    },
+
+    async createSchedule(body: CreateScheduleBody): Promise<string | null> {
+      try {
+        await api.createSchedule(body);
+        return null;
+      } catch (err) {
+        console.error("[console] createSchedule failed", err);
+        return err instanceof api.ApiError ? errorText(err) : "could not add the schedule";
+      }
+    },
+
+    async updateSchedule(id: string, patch: UpdateScheduleBody): Promise<string | null> {
+      const local = this.schedules.find((s) => s.id === id);
+      if (local) Object.assign(local, patch); // optimistic — the broadcast is authoritative
+      try {
+        await api.updateSchedule(id, patch);
+        return null;
+      } catch (err) {
+        console.error("[console] updateSchedule failed", err);
+        return err instanceof api.ApiError ? errorText(err) : "could not update the schedule";
+      }
+    },
+
+    async deleteSchedule(id: string): Promise<string | null> {
+      this.schedules = this.schedules.filter((s) => s.id !== id); // optimistic
+      try {
+        await api.deleteSchedule(id);
+        return null;
+      } catch (err) {
+        console.error("[console] deleteSchedule failed", err);
+        return err instanceof api.ApiError ? errorText(err) : "could not delete the schedule";
+      }
+    },
+
+    /** The master switch, THE deployment timezone, and the default scene (the always-on floor). */
+    async updateSchedulerSettings(patch: UpdateSchedulerSettingsBody): Promise<string | null> {
+      const previous = this.scheduler;
+      if (this.scheduler) this.scheduler = { ...this.scheduler, ...patch }; // optimistic
+      try {
+        this.scheduler = await api.updateSchedulerSettings(patch);
+        return null;
+      } catch (err) {
+        this.scheduler = previous;
+        console.error("[console] updateSchedulerSettings failed", err);
+        return err instanceof api.ApiError ? errorText(err) : "could not save the scheduler settings";
       }
     },
 

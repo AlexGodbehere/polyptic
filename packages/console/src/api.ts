@@ -7,14 +7,20 @@
  * Phase 3 murals & placement and Phase 3b combined surfaces (walls + content).
  */
 import {
+  BulkApproveBody,
   BulkContentBody,
+  BulkIdentBody,
+  BulkRebootBody,
+  BulkShellBody,
   CastArmBody,
   CombineScreensBody,
   CreateContentSourceBody,
   CreateCredentialProfileBody,
+  CreateDaypartBody,
   CreateMuralBody,
   CreatePreRegistrationBody,
   CreateSceneBody,
+  CreateScheduleBody,
   IdentBody,
   ImportPreRegistrationsBody,
   RenameMachineBody,
@@ -27,18 +33,26 @@ import {
   RenameScreenBody,
   RenameVideoWallBody,
   SetContentBody,
+  SetMachineTagsBody,
   SetZoomBody,
   SetPlaylistEntryZoomBody,
   UpdateContentSourceBody,
   UpdateCredentialProfileBody,
+  UpdateDaypartBody,
   UpdateSceneBody,
+  UpdateScheduleBody,
+  UpdateSchedulerSettingsBody,
 } from "@polyptic/protocol";
 import type {
+  BulkOpResponse,
   ContentSource,
   CreatePreRegistrationBody as CreatePreRegistrationBodyT,
   CredentialProfileTestResult,
   CredentialProfileView,
+  Daypart,
   Scene,
+  Schedule,
+  SchedulerSettings,
   VideoWall,
 } from "@polyptic/protocol";
 
@@ -321,6 +335,44 @@ export function rebootMachine(machineId: string): Promise<unknown> {
 /** Arm or disarm a box for the remote shell (POL-59). */
 export function setMachineShell(machineId: string, enabled: boolean): Promise<unknown> {
   return send("POST", `/machines/${encodeURIComponent(machineId)}/shell`, { enabled });
+}
+
+// ── Tags + selector-targeted bulk operations (POL-103) ──────────────────────
+
+/** PUT /api/v1/machines/:machineId/tags — replace the machine's whole tag set (add == remove). */
+export function setMachineTags(machineId: string, tags: string[]): Promise<{ tags: string[] }> {
+  return send(
+    "PUT",
+    `/machines/${encodeURIComponent(machineId)}/tags`,
+    SetMachineTagsBody.parse({ tags }),
+  );
+}
+
+/** What a bulk verb targets: a tag selector (`tag=atrium`) or the checkbox selection. Never both. */
+export type BulkTarget = { selector: string } | { machineIds: string[] };
+
+/**
+ * The bulk verbs (POL-103). Each answers a per-machine result list — an offline box is an OUTCOME,
+ * never a failed call — so the caller can tell the operator exactly what landed and what did not.
+ */
+export function bulkReboot(target: BulkTarget, reason?: string): Promise<BulkOpResponse> {
+  return send("POST", "/machines/bulk/reboot", BulkRebootBody.parse({ ...target, reason }));
+}
+
+export function bulkShell(target: BulkTarget, enabled: boolean): Promise<BulkOpResponse> {
+  return send("POST", "/machines/bulk/shell", BulkShellBody.parse({ ...target, enabled }));
+}
+
+export function bulkIdent(target: BulkTarget): Promise<BulkOpResponse> {
+  return send(
+    "POST",
+    "/machines/bulk/ident",
+    BulkIdentBody.parse({ ...target, on: true, ttlMs: 3000 }),
+  );
+}
+
+export function bulkApprove(target: BulkTarget): Promise<BulkOpResponse> {
+  return send("POST", "/machines/bulk/approve", BulkApproveBody.parse(target));
 }
 
 /**
@@ -671,10 +723,7 @@ export function applyScene(sceneId: string): Promise<unknown> {
   return send("POST", `/scenes/${encodeURIComponent(sceneId)}/apply`);
 }
 
-/**
- * PATCH /api/v1/scenes/:sceneId { name?, scheduleAt? } — rename a scene and/or set its illustrative
- * schedule time (HH:MM, or null to clear). The time is stored, not fired (illustrative only).
- */
+/** PATCH /api/v1/scenes/:sceneId { name? } — rename a saved scene. */
 export async function updateScene(sceneId: string, body: UpdateSceneBody): Promise<Scene> {
   const res = await send<{ scene: Scene }>("PATCH", `/scenes/${encodeURIComponent(sceneId)}`, UpdateSceneBody.parse(body));
   return res.scene;
@@ -683,4 +732,62 @@ export async function updateScene(sceneId: string, body: UpdateSceneBody): Promi
 /** DELETE /api/v1/scenes/:sceneId — delete a saved scene. */
 export function deleteScene(sceneId: string): Promise<unknown> {
   return send("DELETE", `/scenes/${encodeURIComponent(sceneId)}`);
+}
+
+// ── The scene scheduler (POL-89) ──────────────────────────────────────────────
+//
+// Dayparts (named windows of the day), schedules (a scene in a daypart, on a recurrence, at a
+// priority) and the deployment's one settings row. The console never resolves these itself — it
+// feeds them to the SHARED resolver in @polyptic/protocol, the same one the server's ticker uses.
+
+/** POST /api/v1/dayparts — add a named window of the day ("Opening hours", 08:00–18:00). */
+export async function createDaypart(body: CreateDaypartBody): Promise<Daypart> {
+  const res = await send<{ daypart: Daypart }>("POST", "/dayparts", CreateDaypartBody.parse(body));
+  return res.daypart;
+}
+
+/** PATCH /api/v1/dayparts/:id — rename a daypart and/or move its window. */
+export async function updateDaypart(id: string, body: UpdateDaypartBody): Promise<Daypart> {
+  const res = await send<{ daypart: Daypart }>(
+    "PATCH",
+    `/dayparts/${encodeURIComponent(id)}`,
+    UpdateDaypartBody.parse(body),
+  );
+  return res.daypart;
+}
+
+/** DELETE /api/v1/dayparts/:id — 409 while any schedule is still bound to it. */
+export function deleteDaypart(id: string): Promise<unknown> {
+  return send("DELETE", `/dayparts/${encodeURIComponent(id)}`);
+}
+
+/** POST /api/v1/schedules — bind a scene to a daypart on a recurrence, at a priority. */
+export async function createSchedule(body: CreateScheduleBody): Promise<Schedule> {
+  const res = await send<{ schedule: Schedule }>("POST", "/schedules", CreateScheduleBody.parse(body));
+  return res.schedule;
+}
+
+/** PATCH /api/v1/schedules/:id — edit a schedule (days, priority, daypart, date range, on/off). */
+export async function updateSchedule(id: string, body: UpdateScheduleBody): Promise<Schedule> {
+  const res = await send<{ schedule: Schedule }>(
+    "PATCH",
+    `/schedules/${encodeURIComponent(id)}`,
+    UpdateScheduleBody.parse(body),
+  );
+  return res.schedule;
+}
+
+/** DELETE /api/v1/schedules/:id — unschedule a scene. */
+export function deleteSchedule(id: string): Promise<unknown> {
+  return send("DELETE", `/schedules/${encodeURIComponent(id)}`);
+}
+
+/** PUT /api/v1/settings/scheduler — the master switch, THE timezone, and the default scene. */
+export async function updateSchedulerSettings(body: UpdateSchedulerSettingsBody): Promise<SchedulerSettings> {
+  const res = await send<{ scheduler: SchedulerSettings }>(
+    "PUT",
+    "/settings/scheduler",
+    UpdateSchedulerSettingsBody.parse(body),
+  );
+  return res.scheduler;
 }

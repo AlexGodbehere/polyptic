@@ -1,5 +1,5 @@
 /**
- * The adjacency rule + auto-pack (POL-96/POL-100, D95) — the pure geometry both the server (which
+ * The adjacency rule + auto-pack (POL-96/POL-100, D125) — the pure geometry both the server (which
  * enforces "a wall is one contiguous region") and the console (which warns before the operator
  * commits, and offers to pack) reason with. If these are wrong, a video wall spans content across
  * canvas that no screen is showing.
