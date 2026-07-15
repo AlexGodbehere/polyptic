@@ -26,6 +26,9 @@ import {
   RenameMachineBody,
   InspectBody,
   MoveTargetsBody,
+  PanelHoursBody,
+  PanelPowerBody,
+  PanelPowerConfig,
   PlaceScreenBody,
   UnplaceScreensBody,
   PreRegistration,
@@ -39,6 +42,7 @@ import {
   UpdateContentSourceBody,
   UpdateCredentialProfileBody,
   UpdateDaypartBody,
+  UpdatePanelPowerBody,
   UpdateSceneBody,
   UpdateScheduleBody,
   UpdateSchedulerSettingsBody,
@@ -50,6 +54,7 @@ import type {
   CredentialProfileTestResult,
   CredentialProfileView,
   Daypart,
+  PanelHours,
   Scene,
   Schedule,
   SchedulerSettings,
@@ -414,6 +419,36 @@ export function inspectScreen(screenId: string, body: InspectBody): Promise<unkn
  *  (POL-119). Persistent, no TTL; disabling kills the receiver and any live session immediately. */
 export function setScreenCast(screenId: string, enabled: boolean): Promise<unknown> {
   return send("POST", `/screens/${encodeURIComponent(screenId)}/cast`, CastArmBody.parse({ enabled }));
+}
+
+/**
+ * POST /api/v1/screens/:screenId/power { on } — wake or sleep ONE panel (POL-101). Answers 202: the
+ * request is DELIVERED, not applied — the screen's `asleep` flag (or `powerError`) arrives later on an
+ * admin/state broadcast, once the box acks. Rejects with an ApiError on 409 (machine offline).
+ */
+export function setScreenPower(screenId: string, body: PanelPowerBody): Promise<unknown> {
+  return send("POST", `/screens/${encodeURIComponent(screenId)}/power`, PanelPowerBody.parse(body));
+}
+
+/** POST /api/v1/machines/:machineId/power { on } — wake/sleep EVERY panel a box drives (POL-101). */
+export function setMachinePower(machineId: string, body: PanelPowerBody): Promise<unknown> {
+  return send("POST", `/machines/${encodeURIComponent(machineId)}/power`, PanelPowerBody.parse(body));
+}
+
+/** PUT /api/v1/screens/:screenId/panel-hours { hours | null } — set/clear a screen's daily on/off
+ *  window (POL-101). `null` clears it: the screen then runs 24/7 and the scheduler never touches it. */
+export function setScreenPanelHours(screenId: string, hours: PanelHours | null): Promise<unknown> {
+  return send(
+    "PUT",
+    `/screens/${encodeURIComponent(screenId)}/panel-hours`,
+    PanelHoursBody.parse({ hours }),
+  );
+}
+
+/** PUT /api/v1/settings/panel-power { timezone } — the deployment's panel-hours timezone (POL-101). */
+export async function setPanelPowerTimezone(timezone: string): Promise<PanelPowerConfig> {
+  const res = await send("PUT", "/settings/panel-power", UpdatePanelPowerBody.parse({ timezone }));
+  return PanelPowerConfig.parse(res);
 }
 
 /**
