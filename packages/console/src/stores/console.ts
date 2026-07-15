@@ -19,6 +19,7 @@ import type {
   ChangePasswordBody,
   ContentKind,
   ContentSource,
+  ContentSourceStatus,
   CreateContentSourceBody,
   CreateCredentialProfileBody,
   CreateEnrollmentTokenBody,
@@ -28,6 +29,7 @@ import type {
   CredentialProfileView,
   Daypart,
   DisplaySettings,
+  DocumentJob,
   EnrollmentInfo,
   EnrollmentTokenView,
   LoginBody,
@@ -40,9 +42,11 @@ import type {
   Placement,
   PreRegistration,
   Scene,
+  SceneDiff,
   Schedule,
   SchedulerSettings,
   ScreenView,
+  SourceHealthState,
   UpdateContentSourceBody,
   UpdateCredentialProfileBody,
   UpdateDaypartBody,
@@ -173,8 +177,19 @@ export interface ConsoleState {
    *  admin/state.credentialProfiles (optional on the wire → [] against an older server). Never
    *  carries a client secret. */
   credentialProfiles: CredentialProfileView[];
+  /** POL-94 — per-source usage (where each library source is referenced) + live content health (what
+   *  the players' probes report), mirrored from admin/state.sourceStatus. Optional on the wire →
+   *  [] against an older server, which the library reads as "unknown, no usage". */
+  sourceStatus: ContentSourceStatus[];
   /** Saved wall snapshots (Phase 3d), mirrored from admin/state. */
   scenes: Scene[];
+  /** POL-114 — document conversions in flight (newest first), mirrored from admin/state. This is how
+   *  an upload of a 60-slide deck reports progress: the server pushes the job on the same broadcast
+   *  everything else arrives on, so the modal watches pages land instead of showing a dead spinner. */
+  documentJobs: DocumentJob[];
+  /** POL-114 — what the SERVER can do. `documents: false` = no converter installed, so the console
+   *  must not offer document upload at all (the server would refuse it). Optional on the wire. */
+  capabilities: { documents: boolean };
   /** The scene scheduler (POL-89), mirrored from admin/state: the daypart library, the schedules
    *  bound to it, and the deployment's settings row (master switch + timezone + default scene).
    *  Optional on the wire (back-compat) → [] / null against an older server. The Scenes view feeds
@@ -186,9 +201,10 @@ export interface ConsoleState {
    *  admin/state.activity. The field is OPTIONAL on the wire (back-compat), so it defaults to []
    *  when a server omits it. */
   activity: ActivityEvent[];
-  /** The scene most recently applied this session. The admin/state snapshot does not surface the
-   *  server's DesiredState.activeSceneId, so we track it client-side: set optimistically on apply,
-   *  cleared when its scene is deleted. */
+  /** The scene the WALL IS ON, mirrored from admin/state (POL-95). Server-authoritative: the control
+   *  plane persists it, sets it on apply and clears it the moment a manual change diverges the wall,
+   *  so a reload and a second operator always agree. The console never sets it itself — it used to
+   *  (optimistically, on apply), which is exactly why the badge could lie. */
   activeSceneId: string | null;
   activeMuralId: string | null;
   selectedScreenIds: string[];
@@ -226,6 +242,9 @@ export const useConsoleStore = defineStore("console", {
     videoWalls: [],
     contentSources: [],
     credentialProfiles: [],
+    documentJobs: [],
+    capabilities: { documents: false },
+    sourceStatus: [],
     scenes: [],
     dayparts: [],
     schedules: [],
@@ -478,6 +497,7 @@ export const useConsoleStore = defineStore("console", {
         video: [],
         playlist: [],
         page: [],
+        deck: [],
       };
       for (const s of state.contentSources) buckets[s.kind].push(s);
       return buckets;
@@ -494,6 +514,42 @@ export const useConsoleStore = defineStore("console", {
 
     profileById(): (id: string) => CredentialProfileView | undefined {
       return (id: string) => this.credentialProfiles.find((p) => p.id === id);
+    },
+
+    /** POL-114 — one document conversion, by id (what the upload modal watches while it converts). */
+    documentJob(): (id: string) => DocumentJob | undefined {
+      return (id: string) => this.documentJobs.find((j) => j.id === id);
+    },
+
+    // ── Library usage + health (POL-94) ──────────────────────────────────────
+
+    /** A source's usage + health, or undefined against a server that doesn't report it. */
+    statusForSource(state): (id: string) => ContentSourceStatus | undefined {
+      return (id: string) => state.sourceStatus.find((s) => s.sourceId === id);
+    },
+
+    /** The live health badge for a source: what the screens showing it report. `unknown` when nobody
+     *  is showing it, the screens showing it are offline, or the server is older than POL-94. */
+    healthForSource(): (id: string) => SourceHealthState {
+      return (id: string) => this.statusForSource(id)?.health ?? "unknown";
+    },
+
+    /**
+     * "Used on 2 screens · 1 wall · in 1 playlist" — the library row's usage line, and the sentence a
+     * delete confirmation is built from. Empty string when the source is referenced nowhere.
+     */
+    usageSummary(): (id: string) => string {
+      return (id: string) => {
+        const usage = this.statusForSource(id)?.usage;
+        if (!usage) return "";
+        const parts: string[] = [];
+        const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+        if (usage.screenIds.length) parts.push(plural(usage.screenIds.length, "screen", "screens"));
+        if (usage.wallIds.length) parts.push(plural(usage.wallIds.length, "video wall", "video walls"));
+        if (usage.playlistIds.length) parts.push(plural(usage.playlistIds.length, "playlist", "playlists"));
+        if (usage.pageIds.length) parts.push(plural(usage.pageIds.length, "page", "pages"));
+        return parts.length ? `Used on ${parts.join(" · ")}` : "";
+      };
     },
 
     /** The library source currently armed for click-to-assign on the canvas, if any. */
@@ -521,7 +577,7 @@ export const useConsoleStore = defineStore("console", {
       return (id: string) => this.scenes.find((sc) => sc.id === id);
     },
 
-    /** The scene most recently applied this session (if it still exists), else undefined. */
+    /** The scene the wall is currently on, per the SERVER (POL-95), if it still exists. */
     activeScene(state): Scene | undefined {
       return state.activeSceneId
         ? state.scenes.find((sc) => sc.id === state.activeSceneId)
@@ -879,7 +935,15 @@ export const useConsoleStore = defineStore("console", {
         this.contentSources = msg.contentSources;
         // POL-24 — credential profiles are optional on the wire (older servers omit them).
         this.credentialProfiles = msg.credentialProfiles ?? [];
+        // POL-94 — usage + health per source; optional on the wire (older servers omit it).
+        this.sourceStatus = msg.sourceStatus ?? [];
         this.scenes = msg.scenes;
+        // POL-114 — document conversions + what this server can convert. Both optional on the wire.
+        this.documentJobs = msg.documentJobs ?? [];
+        if (msg.capabilities) this.capabilities = msg.capabilities;
+        // POL-95 — the ACTIVE scene comes from the server's desired state. Optional on the wire
+        // (an older server omits it) → no badge rather than a guessed one.
+        this.activeSceneId = msg.activeSceneId ?? null;
         // POL-89 — the scene scheduler. Optional on the wire (back-compat): an older server simply
         // has no scheduler, and the Scenes view says so rather than painting an empty week.
         this.dayparts = msg.dayparts ?? [];
@@ -893,11 +957,6 @@ export const useConsoleStore = defineStore("console", {
         if (msg.settings) this.settings = msg.settings;
         // POL-101 — the panel-hours timezone; same back-compat rule as settings above.
         if (msg.panelPower) this.panelPower = msg.panelPower;
-
-        // Forget an active-scene marker whose scene the server no longer knows (e.g. deleted).
-        if (this.activeSceneId && !this.scenes.some((sc) => sc.id === this.activeSceneId)) {
-          this.activeSceneId = null;
-        }
 
         // Disarm a click-to-assign pick whose source the server no longer knows (e.g. deleted).
         if (this.pickedSourceId && !this.contentSources.some((s) => s.id === this.pickedSourceId)) {
@@ -1784,7 +1843,12 @@ export const useConsoleStore = defineStore("console", {
      */
     async updateSource(id: string, body: UpdateContentSourceBody): Promise<boolean> {
       const existing = this.contentSources.find((s) => s.id === id);
-      if (existing) Object.assign(existing, body); // optimistic
+      // POL-114 — `dwellSeconds` is not a field OF a source (it lives inside the server-derived
+      // `deck`), so it must not be optimistically pasted onto the row: the broadcast brings it back
+      // in its proper place a moment later.
+      const { dwellSeconds, ...local } = body;
+      if (existing) Object.assign(existing, local); // optimistic
+      if (existing?.deck && dwellSeconds !== undefined) existing.deck = { ...existing.deck, dwellSeconds };
       try {
         await api.updateContentSource(id, body);
         return true;
@@ -1878,11 +1942,14 @@ export const useConsoleStore = defineStore("console", {
       file: File,
       name?: string,
       onProgress?: (fraction: number) => void,
-    ): Promise<{ ok: boolean; error?: string; warning?: string }> {
+    ): Promise<{ ok: boolean; error?: string; warning?: string; jobId?: string }> {
       try {
         // POL-109 — an accepted upload can still carry a caveat (an unprobeable file on a server with
         // no media toolchain). The caller shows it as a note, not as a failure.
         const result = await api.uploadMedia(file, name, onProgress);
+        // POL-114 — a DOCUMENT comes back as a conversion job, not a source. The caller watches it in
+        // `documentJobs` (pushed live on admin/state) and closes when it goes ready.
+        if ("job" in result) return { ok: true, jobId: result.job.id };
         return result.warning ? { ok: true, warning: result.warning } : { ok: true };
       } catch (err) {
         console.error("[console] uploadSource failed", err);
@@ -1954,9 +2021,7 @@ export const useConsoleStore = defineStore("console", {
       const trimmed = name.trim();
       if (!trimmed || !muralId) return false;
       try {
-        const scene = await api.createScene({ name: trimmed, muralId });
-        // Optimistically mark the freshly-saved scene active until the broadcast lands.
-        if (scene && typeof scene.id === "string") this.activeSceneId = scene.id;
+        await api.createScene({ name: trimmed, muralId });
         return true;
       } catch (err) {
         console.error("[console] saveScene failed", err);
@@ -1973,7 +2038,8 @@ export const useConsoleStore = defineStore("console", {
     async applyScene(id: string): Promise<void> {
       const scene = this.scenes.find((sc) => sc.id === id);
       if (!scene) return;
-      this.activeSceneId = id; // optimistic
+      // NOT set optimistically (POL-95): the Active badge is the server's answer, and it arrives on
+      // the same admin/state broadcast as the re-laid wall — one round trip, no reload, no guess.
       // Switch the canvas to the scene's mural so the operator watches it re-lay live.
       if (this.murals.some((m) => m.id === scene.muralId)) this.activeMuralId = scene.muralId;
       try {
@@ -1999,6 +2065,20 @@ export const useConsoleStore = defineStore("console", {
       const trimmed = name.trim();
       if (!trimmed) return;
       await this.updateScene(id, { name: trimmed });
+    },
+
+    /**
+     * The APPLY PREVIEW for a scene (POL-95): what applying it would change on the live wall — content,
+     * placement, combine/split, what gets cleared — computed by the server. Null when the server can't
+     * diff it (unknown scene / mural), so the caller simply shows nothing rather than a wrong plan.
+     */
+    async fetchSceneDiff(id: string): Promise<SceneDiff | null> {
+      try {
+        return await api.sceneDiff(id);
+      } catch (err) {
+        console.error("[console] sceneDiff failed", err);
+        return null;
+      }
     },
 
     /** Delete a saved scene. The server also drops any schedule bound to it. */

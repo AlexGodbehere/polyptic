@@ -33,6 +33,7 @@ import {
   PlaylistSurface,
   PageSurface,
   Scene,
+  SceneDiff,
   Schedule,
   SchedulerSettings,
   VideoSurface,
@@ -58,6 +59,7 @@ import type {
   PlaylistItem,
   CreateCredentialProfileBody,
   CredentialProfileView,
+  Deck,
   DesiredState,
   DisplayBackend,
   DisplaySettings,
@@ -81,8 +83,12 @@ import type {
   PowerCapabilities,
   PreRegistration,
   SceneContent,
+  SceneDiffChange,
+  SceneDiffContent,
+  SceneDiffEntry,
   Screen,
   ScreenSlice,
+  SourceUsage,
   Surface,
   UpdateContentSourceBody,
   UpdateCredentialProfileBody,
@@ -411,8 +417,10 @@ export interface ContentAssignment {
  *  page (POL-42) has no url either — it carries the authored definition (embeds inside it resolve
  *  at send time). */
 type ResolvedSpec =
+  // POL-114 — a `deck` never appears here: it RESOLVES to a playlist of its converted page images, so
+  // no surface builder (and no player) ever sees the kind. That is the whole point of the deck.
   | {
-      kind: Exclude<ContentKind, "page">;
+      kind: Exclude<ContentKind, "page" | "deck">;
       url: string;
       entries?: PlaylistEntry[];
       startedAt?: string;
@@ -434,6 +442,9 @@ function specUrl(spec: ResolvedSpec): string {
  *  (and on a server with no probing toolchain) → sources simply carry no metadata, exactly as before. */
 export interface MediaMetadataProvider {
   metadataForUrl(url: string): MediaMetadata | undefined;
+  /** POL-114 — the converted page images behind a `deck` source's url. Optional so a fake provider in
+   *  a unit test (and any older implementation) still satisfies the seam: no decks, no decoration. */
+  deckForUrl?(url: string): Deck | undefined;
 }
 
 /** POL-42 — the live data the poller holds for pages: last-good feed items + cached weather. The
@@ -510,6 +521,10 @@ export class ControlPlane {
   /** Phase 3d — saved wall snapshots (scenes), keyed by scene id. */
   private readonly scenes = new Map<string, Scene>();
   private sceneCounter = 0;
+  /** POL-95 — set while `applyScene` is composing the lower-level primitives. The divergence guard
+   *  must not fire on the apply's OWN place/combine/content calls: the apply is what MAKES the wall
+   *  the scene. */
+  private applyingScene = false;
 
   /** POL-89 — the scene scheduler: the daypart library, the schedules bound to it, and the one
    *  deployment-wide settings row. The server's ticker and the console's week strip both resolve
@@ -825,6 +840,14 @@ export class ControlPlane {
       }
     }
     this.sceneCounter = maxScene;
+
+    // POL-95 — the ACTIVE scene is server-authoritative and persisted: a control-plane restart must
+    // not lose which scene the wall is on (a console reconnecting after one would otherwise show no
+    // badge at all). A pointer at a scene that no longer exists degrades to "none".
+    this.state.activeSceneId =
+      persisted.activeSceneId && this.scenes.has(persisted.activeSceneId)
+        ? persisted.activeSceneId
+        : null;
 
     // ── Scene scheduler (POL-89) ──────────────────────────────────────────────
     for (const pd of persisted.dayparts) {
@@ -1559,6 +1582,7 @@ export class ControlPlane {
     }
 
     this.emit("warn", `${machine.label} removed`);
+    await this.reconcileActiveScene(); // POL-95 — losing a box's screens can diverge the wall
     return { slices: [...touched.values()] };
   }
 
@@ -1637,6 +1661,7 @@ export class ControlPlane {
       sourceId: null,
     });
     await this.store.setRevision(this.state.revision);
+    await this.reconcileActiveScene(); // POL-95 — a manual content change can diverge the wall
     return next;
   }
 
@@ -1670,6 +1695,7 @@ export class ControlPlane {
       sourceId: null,
     });
     await this.store.setRevision(this.state.revision);
+    await this.reconcileActiveScene(); // POL-95
     return next;
   }
 
@@ -1826,6 +1852,7 @@ export class ControlPlane {
       }
       await this.store.setRevision(this.state.revision);
     }
+    await this.reconcileActiveScene(); // POL-95 — a deleted mural takes its scene's wall with it
     return { slices };
   }
 
@@ -1859,6 +1886,7 @@ export class ControlPlane {
     };
     this.placements.set(screenId, placement);
     await this.store.upsertPlacement(placement);
+    await this.reconcileActiveScene(); // POL-95 — a manual move/place can diverge the wall
     return placement;
   }
 
@@ -1874,7 +1902,10 @@ export class ControlPlane {
     await this.store.deletePlacement(screenId);
 
     const wall = this.getWallForScreen(screenId);
-    if (wall === undefined) return { slices: [] };
+    if (wall === undefined) {
+      await this.reconcileActiveScene(); // POL-95
+      return { slices: [] };
+    }
 
     this.videoWalls.delete(wall.id);
     this.wallSourceIds.delete(wall.id);
@@ -1890,6 +1921,7 @@ export class ControlPlane {
       });
     }
     await this.store.setRevision(this.state.revision);
+    await this.reconcileActiveScene(); // POL-95
     return { slices };
   }
 
@@ -1951,6 +1983,7 @@ export class ControlPlane {
     await this.store.setRevision(this.state.revision);
 
     this.emit("warn", `${screen.friendlyName} removed`);
+    await this.reconcileActiveScene(); // POL-95 — losing a screen can diverge the wall from its scene
     return { slices: [...touched.values()] };
   }
 
@@ -2590,6 +2623,19 @@ export class ControlPlane {
         definition: source.definition ?? { aspect: "16:9", bg: "#0b0b0e", elements: [] },
       };
     }
+    // POL-114 — a DECK renders as what it is: a rotation of the page images the server converted it
+    // into. It resolves to a PLAYLIST spec, so the player, the offline cache and video-wall spanning
+    // all handle it with machinery that already exists — a document never reaches the glass.
+    if (source.kind === "deck") {
+      const deck = this.deckFor(source.url);
+      const entries: PlaylistEntry[] = (deck?.pageUrls ?? []).map((url) => ({
+        kind: "image" as const,
+        url,
+        durationSeconds: deck?.dwellSeconds ?? DEFAULT_PLAYLIST_ITEM_SECONDS,
+        sourceId: source.id,
+      }));
+      return { kind: "playlist", url: "", entries, startedAt: new Date().toISOString() };
+    }
     if (source.kind !== "playlist") {
       return {
         kind: source.kind,
@@ -2603,7 +2649,10 @@ export class ControlPlane {
     const entries: PlaylistEntry[] = [];
     for (const item of source.items ?? []) {
       const step = this.contentSources.get(item.sourceId);
-      if (!step || step.kind === "playlist" || step.kind === "page" || !step.url) continue;
+      // A deck is itself a rotation — a playlist cannot nest one (same rule, same reason, as a
+      // playlist inside a playlist). Authoring-time validation refuses it; this is the belt.
+      if (!step || step.kind === "playlist" || step.kind === "page" || step.kind === "deck") continue;
+      if (!step.url) continue;
       // POL-109 — a video step carries its ingest poster, so each step of a rotation pre-paints its
       // own first frame rather than flashing black on every advance.
       const poster = step.kind === "video" ? this.mediaFor(step.url)?.posterUrl : undefined;
@@ -2809,6 +2858,7 @@ export class ControlPlane {
     await this.store.setRevision(this.state.revision);
 
     this.emit("good", `Combined ${ids.length} panels into ${wall.name ?? id}`);
+    await this.reconcileActiveScene(); // POL-95 — grouping is part of what a scene captures
     return { ok: true, wall, slices };
   }
 
@@ -2877,6 +2927,7 @@ export class ControlPlane {
     await this.store.setRevision(this.state.revision);
 
     this.emit("info", `Split ${wall.name ?? wall.id}`);
+    await this.reconcileActiveScene(); // POL-95 — grouping is part of what a scene captures
     return { wall, slices };
   }
 
@@ -2931,6 +2982,7 @@ export class ControlPlane {
       "good",
       `${wall.name ?? wall.id} → ${this.resolvedContentName(resolved.spec, resolved.sourceId)}`,
     );
+    await this.reconcileActiveScene(); // POL-95 — a manual content change can diverge the wall
     return { ok: true, slices };
   }
 
@@ -2989,6 +3041,7 @@ export class ControlPlane {
       "good",
       `${screen.friendlyName} → ${this.resolvedContentName(resolved.spec, resolved.sourceId)}`,
     );
+    await this.reconcileActiveScene(); // POL-95 — a manual content change can diverge the wall
     return { ok: true, slice: next };
   }
 
@@ -3267,6 +3320,12 @@ export class ControlPlane {
     return this.mediaProvider.metadataForUrl(url);
   }
 
+  /** POL-114 — the converted page images for a deck source's url, if the document pipeline made any. */
+  private deckFor(url: string | undefined): Deck | undefined {
+    if (!url || !this.mediaProvider?.deckForUrl) return undefined;
+    return this.mediaProvider.deckForUrl(url);
+  }
+
   /**
    * POL-109 — hang the ingest facts (duration/dimensions/codec/poster) on a library source on the way
    * OUT. Derived, never stored: the media catalogue (which travels with the media volume) is the one
@@ -3274,6 +3333,12 @@ export class ControlPlane {
    * image/video sources have any — a linked URL was never probed and honestly says nothing.
    */
   private decorateSource(source: ContentSource): ContentSource {
+    // POL-114 — a deck's pages are the conversion's output, held in the media catalogue: derived on
+    // the way out, exactly like `media`, so the DB knows nothing about page images.
+    if (source.kind === "deck") {
+      const deck = this.deckFor(source.url);
+      return deck ? { ...source, deck } : source;
+    }
     if (source.kind !== "image" && source.kind !== "video") return source;
     const media = this.mediaFor(source.url);
     return media ? { ...source, media } : source;
@@ -3286,6 +3351,59 @@ export class ControlPlane {
   getContentSource(id: string): ContentSource | undefined {
     const source = this.contentSources.get(id);
     return source ? this.decorateSource(source) : undefined;
+  }
+
+  /**
+   * POL-94 — the usage fold: for every library source, everything in desired state that references
+   * it. One pass over the four places a reference can hide (a screen's assignment, a wall's
+   * assignment, a playlist's steps, a page's embedded/image elements), so the console can answer
+   * "where is this used?" and a delete can name exactly what it will break instead of the vague
+   * "any screen currently showing it will be cleared".
+   *
+   * A wall counts as ONE wall, not as its member screens: an operator assigns content to the wall,
+   * and telling them "used on 4 screens" for a 2×2 they think of as one surface is a lie of shape.
+   * A source referenced only by an unassigned playlist/page is still "used" — deleting it silently
+   * shortens that rotation, which is exactly the surprise this fold exists to prevent.
+   */
+  getContentSourceUsage(): SourceUsage[] {
+    const usage = new Map<string, SourceUsage>();
+    for (const id of this.contentSources.keys()) {
+      usage.set(id, { sourceId: id, screenIds: [], wallIds: [], playlistIds: [], pageIds: [] });
+    }
+
+    for (const [screenId, sid] of this.screenSourceIds) {
+      usage.get(sid)?.screenIds.push(screenId);
+    }
+    for (const [wallId, sid] of this.wallSourceIds) {
+      // A wall whose members were split/removed keeps no entry — skip a dangling assignment.
+      if (this.videoWalls.has(wallId)) usage.get(sid)?.wallIds.push(wallId);
+    }
+    for (const source of this.contentSources.values()) {
+      if (source.kind === "playlist") {
+        // A playlist may reference the same source twice (two slots in the rotation) — the LIBRARY
+        // usage list is a set of referencing playlists, not a count of steps.
+        for (const stepId of new Set((source.items ?? []).map((i) => i.sourceId))) {
+          usage.get(stepId)?.playlistIds.push(source.id);
+        }
+      } else if (source.kind === "page" && source.definition) {
+        const referenced = new Set<string>();
+        for (const el of source.definition.elements) {
+          if ((el.kind === "embed" || el.kind === "image") && el.props.sourceId) {
+            referenced.add(el.props.sourceId);
+          }
+        }
+        for (const sid of referenced) usage.get(sid)?.pageIds.push(source.id);
+      }
+    }
+
+    return [...usage.values()];
+  }
+
+  /** The library source a screen is currently rendering — its own assignment, or (if it is a wall
+   *  member) the wall's. This is what a surface is stamped with at send time (POL-94). */
+  private assignedSourceIdFor(screenId: string): string | undefined {
+    const wall = this.getWallForScreen(screenId);
+    return wall ? this.wallSourceIds.get(wall.id) : this.screenSourceIds.get(screenId);
   }
 
   private nextSourceId(): string {
@@ -3326,7 +3444,9 @@ export class ControlPlane {
     for (const item of items) {
       const step = this.contentSources.get(item.sourceId);
       if (!step) return { ok: false, error: "unknown-item-source", itemSourceId: item.sourceId };
-      if (step.kind === "playlist")
+      // POL-114 — a deck IS a rotation (of its converted pages), so it nests exactly as badly as a
+      // playlist does. Same error, because it is the same mistake.
+      if (step.kind === "playlist" || step.kind === "deck")
         return { ok: false, error: "nested-playlist", itemSourceId: item.sourceId };
       if (step.kind !== "video" && item.durationSeconds === undefined)
         return { ok: false, error: "item-needs-duration", itemSourceId: item.sourceId };
@@ -3531,6 +3651,29 @@ export class ControlPlane {
     const pageSlices = this.slicesShowingPagesEmbedding(id).filter((s) => !seen.has(s.screenId));
 
     return { ok: true, source, slices: [...slices, ...pageSlices] };
+  }
+
+  /**
+   * POL-114 — re-resolve everything showing a source whose SERVER-SIDE facts changed underneath it,
+   * without any change to the source row. A deck's pages and its dwell live in the media catalogue
+   * (they are the conversion's output, not the operator's typing), so a dwell edit — or a finished
+   * conversion — has to reach the glass through here rather than through `updateContentSource`.
+   */
+  async refreshSource(id: string): Promise<ScreenSlice[]> {
+    if (!this.contentSources.has(id)) return [];
+    const slices = this.reresolveAssignments(id);
+    if (slices.length === 0) return [];
+    this.bumpRevision();
+    for (const slice of slices) {
+      await this.store.upsertContent({
+        screenId: slice.screenId,
+        canvas: slice.canvas,
+        surfaces: slice.surfaces,
+        sourceId: id,
+      });
+    }
+    await this.store.setRevision(this.state.revision);
+    return slices;
   }
 
   /**
@@ -3984,6 +4127,17 @@ export class ControlPlane {
   decorateSliceForSend(slice: ScreenSlice): ScreenSlice {
     if (slice.surfaces.length === 0) return slice;
 
+    // POL-94 — stamp the library source this screen is showing onto its surfaces, so the player's
+    // reachability reports can be attributed back to a library entry. Send-time only: an ad-hoc URL
+    // has no source and is left unstamped (there is nothing in the library to report health for).
+    const assignedSourceId = this.assignedSourceIdFor(slice.screenId);
+    if (assignedSourceId !== undefined) {
+      slice = {
+        ...slice,
+        surfaces: slice.surfaces.map((surface) => ({ ...surface, sourceId: assignedSourceId })),
+      };
+    }
+
     // POL-42 — page surfaces get their live half stamped in: resolved (credential-stamped) embeds,
     // resolved image sources, and the poller's last-good feed/weather data. Independent of the
     // framed-content token stamp below, which needs the slice's own source to carry a profile.
@@ -4073,7 +4227,10 @@ export class ControlPlane {
   ): PageEmbedResolution | undefined {
     if (sourceId) {
       const source = this.contentSources.get(sourceId);
-      if (!source || source.kind === "page" || source.kind === "playlist" || !source.url) return undefined;
+      // POL-114 — a deck is a rotation, not a single addressable page: it cannot be embedded either.
+      if (!source || source.kind === "page" || source.kind === "playlist" || source.kind === "deck")
+        return undefined;
+      if (!source.url) return undefined;
       let url = source.url;
       if (source.credentialProfileId && this.tokenProvider) {
         const profile = this.credentialProfiles.get(source.credentialProfileId);
@@ -4172,6 +4329,46 @@ export class ControlPlane {
     return null;
   }
 
+  // ── The ACTIVE scene, server-authoritative (POL-95) ──────────────────────────
+  //
+  // `DesiredState.activeSceneId` is the control plane's answer to "which scene is the wall on?" — it
+  // is persisted, broadcast in `admin/state`, and CLEARED the moment a manual change makes the live
+  // wall stop being that scene. Consoles never guess it; they are told. (Before POL-95 the badge was
+  // set optimistically in the console's own store, so a reload or a second operator saw a wrong or
+  // absent badge — a control plane that is the brain cannot let a client invent its state.)
+
+  /** Set (or clear) the active scene, write-through. No-op when it already holds that value. */
+  private async setActiveScene(sceneId: string | null): Promise<void> {
+    if (this.state.activeSceneId === sceneId) return;
+    this.state.activeSceneId = sceneId;
+    await this.store.setActiveSceneId(sceneId);
+  }
+
+  /**
+   * Re-check the Active badge after any MANUAL change to the wall. The badge claims "the wall IS this
+   * scene", so we judge it the only way that can't lie: re-diff the live wall against the scene and
+   * clear the badge unless nothing would change. (Every mutator that can move the wall calls this;
+   * the apply's own primitives are fenced off by `applyingScene`.)
+   */
+  private async reconcileActiveScene(): Promise<void> {
+    if (this.applyingScene) return;
+    const activeId = this.state.activeSceneId;
+    if (activeId === null) return;
+
+    const scene = this.scenes.get(activeId);
+    if (scene === undefined) {
+      await this.setActiveScene(null);
+      return;
+    }
+    // A null diff means the scene's mural has been deleted out from under it — the wall it described
+    // no longer exists, so the badge cannot stand either.
+    const diff = this.diffScene(activeId);
+    if (diff !== null && diff.identical) return;
+
+    await this.setActiveScene(null);
+    this.emit("info", `The wall no longer matches scene ${scene.name}`);
+  }
+
   /** Turn a captured SceneContent into a ContentAssignment to feed setScreenContent/setWallContent. */
   private assignmentFor(content: SceneContent): ContentAssignment | null {
     if (!content) return null;
@@ -4246,12 +4443,15 @@ export class ControlPlane {
     if (!this.murals.has(muralId)) return null;
 
     // Compose the lower-level primitives WITHOUT each of them emitting its own activity line — the
-    // whole apply gets one summary line below.
+    // whole apply gets one summary line below — and WITHOUT the POL-95 divergence guard firing on the
+    // apply's own place/combine/content calls (the apply is what makes the wall the scene).
     this.suppressEmit = true;
+    this.applyingScene = true;
     try {
       return await this.applySceneInner(scene, muralId);
     } finally {
       this.suppressEmit = false;
+      this.applyingScene = false;
     }
   }
 
@@ -4324,8 +4524,9 @@ export class ControlPlane {
       }
     }
 
-    // 5. Mark the scene active (in-memory desired-state; the console mirrors this on its side).
-    this.state.activeSceneId = scene.id;
+    // 5. Mark the scene active — SERVER-AUTHORITATIVE (POL-95): persisted here, broadcast in
+    //    admin/state, cleared by the divergence guard. Every console is told; none guesses.
+    await this.setActiveScene(scene.id);
 
     // One summary line for the whole apply. Pushed straight to the log (the per-op guard is on).
     this.activity?.push("good", `Applied scene ${scene.name}`);
@@ -4358,7 +4559,7 @@ export class ControlPlane {
   async deleteScene(id: string): Promise<boolean> {
     if (!this.scenes.has(id)) return false;
     this.scenes.delete(id);
-    if (this.state.activeSceneId === id) this.state.activeSceneId = null;
+    if (this.state.activeSceneId === id) await this.setActiveScene(null);
     await this.store.deleteScene(id);
 
     for (const schedule of [...this.schedules.values()].filter((s) => s.sceneId === id)) {
@@ -4370,6 +4571,227 @@ export class ControlPlane {
       await this.store.setSchedulerSettings(this.toPersistedSchedulerSettings());
     }
     return true;
+  }
+
+  // ── Scene apply-preview: the diff (POL-95) ───────────────────────────────────
+  //
+  // Applying a scene to a 12-screen mural used to be a blind leap — the wall just jumped. `diffScene`
+  // is the read-out: it compares the SNAPSHOT against the LIVE wall and returns what apply would do
+  // (which screens change content, which move, which walls combine or split, what gets cleared), in
+  // exactly the terms `applyScene` reconciles in. It is READ-ONLY, and also the judge the divergence
+  // guard uses ("does the wall still equal the scene?"), so the preview and the badge can never
+  // disagree. Whatever apply would SKIP (a captured screen that's gone, a source since deleted, a wall
+  // that can no longer be re-formed) is skipped here too — and named in `warnings`.
+
+  /** A stable key for a set of wall members (order-independent), so a scene wall and a live wall with
+   *  the same membership match up regardless of the (fresh) wall id an apply would mint. */
+  private static wallKey(memberScreenIds: readonly string[]): string {
+    return `wall:${[...memberScreenIds].sort().join("+")}`;
+  }
+
+  /** Label a CURRENT assignment for display (library source → its name; ad-hoc → the url). */
+  private labelContent(content: SceneContent): SceneDiffContent {
+    if (!content) return null;
+    if (content.sourceId !== undefined) {
+      const source = this.contentSources.get(content.sourceId);
+      // A live assignment always resolves; a dangling one is treated as nothing on air.
+      if (!source) return null;
+      return { sourceId: source.id, label: source.name };
+    }
+    if (content.url !== undefined) return { url: content.url, label: content.url };
+    return null;
+  }
+
+  /** Label what the scene would PUT on a target. A captured source that has since been deleted resolves
+   *  to nothing — that is exactly what apply does (it leaves the target empty) — plus a warning. */
+  private labelSceneContent(
+    content: SceneContent,
+    targetName: string,
+    warnings: string[],
+  ): SceneDiffContent {
+    if (content?.sourceId !== undefined && !this.contentSources.has(content.sourceId)) {
+      warnings.push(`${targetName}: the saved content source has been deleted — it will be left empty.`);
+      return null;
+    }
+    return this.labelContent(content);
+  }
+
+  /** Two diff sides are the same content when they name the same source, or the same ad-hoc url. */
+  private static sameContent(a: SceneDiffContent, b: SceneDiffContent): boolean {
+    if (a === null || b === null) return a === b;
+    return a.sourceId === b.sourceId && a.url === b.url;
+  }
+
+  /** The content a screen shows RIGHT NOW — via its wall if it is a member, else its own assignment. */
+  private currentScreenContent(screenId: string): SceneDiffContent {
+    const wall = this.getWallForScreen(screenId);
+    if (wall) return this.labelContent(this.deriveWallContent(wall));
+    return this.labelContent(this.deriveScreenContent(screenId));
+  }
+
+  /**
+   * The changeset applying scene `sceneId` would produce on its mural. Null if the scene — or its
+   * mural — is unknown. `identical` means the wall already IS the scene (apply would change nothing).
+   */
+  diffScene(sceneId: string): SceneDiff | null {
+    const scene = this.scenes.get(sceneId);
+    if (scene === undefined) return null;
+    const muralId = scene.muralId;
+    if (!this.murals.has(muralId)) return null;
+
+    const warnings: string[] = [];
+    const entries: SceneDiffEntry[] = [];
+    let unchanged = 0;
+
+    const nameOf = (screenId: string): string =>
+      this.getScreen(screenId)?.friendlyName ?? screenId;
+
+    // What apply will actually place: every captured placement whose screen still exists.
+    const wantedPlacements = scene.placements.filter((p) => {
+      if (this.getScreen(p.screenId)) return true;
+      warnings.push(`A screen the scene captured no longer exists — it will be skipped.`);
+      return false;
+    });
+    const wantedIds = new Set(wantedPlacements.map((p) => p.screenId));
+
+    // The walls apply will re-form: ≥2 surviving, placed members (mirrors applySceneInner step 3).
+    const sceneWalls = scene.walls
+      .map((w) => ({ members: w.memberScreenIds.filter((id) => wantedIds.has(id)), content: w.content }))
+      .filter((w) => {
+        if (w.members.length >= 2) return true;
+        warnings.push(
+          `A video wall in the scene can no longer be re-formed (its screens are gone) — its screens will show their own content.`,
+        );
+        return false;
+      });
+    const sceneWallMembers = new Set(sceneWalls.flatMap((w) => w.members));
+
+    const currentWalls = [...this.videoWalls.values()].filter((w) => w.muralId === muralId);
+    const currentWallByKey = new Map(
+      currentWalls.map((w) => [ControlPlane.wallKey(w.memberScreenIds), w] as const),
+    );
+
+    // ── 1. Screens: placement (place / move) + content for the non-walled ones ──
+    for (const p of wantedPlacements) {
+      const changes: SceneDiffChange[] = [];
+      const current = this.placements.get(p.screenId);
+      const placedHere = current !== undefined && current.muralId === muralId;
+      if (!placedHere) changes.push("place");
+      else if (current.x !== p.x || current.y !== p.y || current.w !== p.w || current.h !== p.h) {
+        changes.push("move");
+      }
+
+      // A screen the scene puts in a wall takes the WALL's content — that entry carries it.
+      const inSceneWall = sceneWallMembers.has(p.screenId);
+      const from = this.currentScreenContent(p.screenId);
+      let to: SceneDiffContent = from;
+      if (!inSceneWall) {
+        const captured = scene.screens.find((s) => s.screenId === p.screenId)?.content ?? null;
+        to = this.labelSceneContent(captured, nameOf(p.screenId), warnings);
+        if (!ControlPlane.sameContent(from, to)) changes.push(to === null ? "cleared" : "content");
+      }
+
+      if (changes.length === 0) {
+        unchanged += 1;
+        continue;
+      }
+      entries.push({
+        target: "screen",
+        id: p.screenId,
+        name: nameOf(p.screenId),
+        screenIds: [p.screenId],
+        changes,
+        from,
+        to: inSceneWall ? from : to,
+      });
+    }
+
+    // ── 2. Screens the scene does NOT include: unplaced (and cleared if they show anything) ────────
+    for (const current of this.placements.values()) {
+      if (current.muralId !== muralId) continue;
+      if (wantedIds.has(current.screenId)) continue;
+      const from = this.currentScreenContent(current.screenId);
+      const changes: SceneDiffChange[] = ["unplace"];
+      if (from !== null) changes.push("cleared");
+      entries.push({
+        target: "screen",
+        id: current.screenId,
+        name: nameOf(current.screenId),
+        screenIds: [current.screenId],
+        changes,
+        from,
+        to: null,
+      });
+    }
+
+    // ── 3. The scene's video walls: combine (when not already one) + their content ─────────────────
+    const matchedWallKeys = new Set<string>();
+    for (const w of sceneWalls) {
+      const key = ControlPlane.wallKey(w.members);
+      const live = currentWallByKey.get(key);
+      if (live) matchedWallKeys.add(key);
+
+      const name = live?.name ?? `Video wall (${w.members.length} screens)`;
+      const from = live
+        ? this.labelContent(this.deriveWallContent(live))
+        : this.currentScreenContent(w.members[0]!); // what the first member shows today
+      const to = this.labelSceneContent(w.content, name, warnings);
+
+      const changes: SceneDiffChange[] = [];
+      if (!live) changes.push("combine");
+      if (!ControlPlane.sameContent(from, to)) changes.push(to === null ? "cleared" : "content");
+
+      if (changes.length === 0) {
+        unchanged += 1;
+        continue;
+      }
+      entries.push({
+        target: "wall",
+        id: key,
+        name,
+        screenIds: [...w.members],
+        changes,
+        from,
+        to,
+      });
+    }
+
+    // ── 4. Live walls the scene does not keep: split back into individual screens ──────────────────
+    for (const live of currentWalls) {
+      const key = ControlPlane.wallKey(live.memberScreenIds);
+      if (matchedWallKeys.has(key)) continue;
+      entries.push({
+        target: "wall",
+        id: key,
+        name: live.name ?? `Video wall (${live.memberScreenIds.length} screens)`,
+        screenIds: [...live.memberScreenIds],
+        changes: ["split"],
+        from: this.labelContent(this.deriveWallContent(live)),
+        to: null, // each member then takes whatever the scene gives it (its own entry above)
+      });
+    }
+
+    const count = (change: SceneDiffChange): number =>
+      entries.filter((e) => e.changes.includes(change)).length;
+
+    return SceneDiff.parse({
+      sceneId: scene.id,
+      sceneName: scene.name,
+      muralId,
+      identical: entries.length === 0,
+      entries,
+      summary: {
+        contentChanges: count("content"),
+        cleared: count("cleared"),
+        moves: count("move"),
+        placed: count("place"),
+        unplaced: count("unplace"),
+        combines: count("combine"),
+        splits: count("split"),
+        unchanged,
+      },
+      warnings: [...new Set(warnings)],
+    });
   }
 
   // ── The scene scheduler (POL-89) ──────────────────────────────────────────────

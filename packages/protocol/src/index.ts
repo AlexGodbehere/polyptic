@@ -304,6 +304,13 @@ export type Screen = z.infer<typeof Screen>;
 const SurfaceBase = z.object({
   id: z.string(),
   region: Geometry, // position within the screen
+  /** POL-94 — the library source this surface is rendering, stamped at SEND time (never stored, same
+   *  pattern as the POL-24 token stamp and the POL-29 friendly name). It is what lets a player's
+   *  reachability report (`player/surface-health`) be attributed back to a library entry, so the
+   *  console can show per-source health. Absent for ad-hoc URLs (nothing in the library to attribute
+   *  to) and against an older server — the player simply reports without it, and the server ignores
+   *  the report. */
+  sourceId: z.string().optional(),
   /** Video-wall spanning (Phase 3b): when set, this surface shows the sub-rectangle at
    *  (offsetX,offsetY) of a contentW×contentH content. The player sizes the content to
    *  contentW×contentH and translates it by -(offsetX,offsetY) so this screen renders only its
@@ -1331,7 +1338,41 @@ export const PlayerDiag = z.object({
 });
 export type PlayerDiag = z.infer<typeof PlayerDiag>;
 
-export const PlayerMessage = z.discriminatedUnion("t", [PlayerHello, PlayerAck, PlayerDiag]);
+/** What a player's own reachability probe (POL-86's SurfaceProber) last concluded about a surface's
+ *  URL. `reachable` = the probe resolved, so the box CAN fetch it; `unreachable` = the probe rejected
+ *  (DNS, route, refused, timed out) or the element itself reported a failed load. Nothing more is
+ *  claimed — see SourceHealthState for what this deliberately cannot know. */
+export const SurfaceHealthState = z.enum(["reachable", "unreachable"]);
+export type SurfaceHealthState = z.infer<typeof SurfaceHealthState>;
+
+/** POL-94 — a player telling the control plane what the glass knows: this surface's URL just became
+ *  reachable, or just stopped being reachable. Sent ONLY on a state CHANGE (and re-sent once per
+ *  socket open, because the server forgets a screen's reports when it drops), so a fleet of walls
+ *  costs the control plane a handful of frames a day, not a poll per surface. The `url` is REDACTED
+ *  by the player (origin + path; a send-time credential token never leaves the box in a report). */
+export const PlayerSurfaceHealth = z.object({
+  t: z.literal("player/surface-health"),
+  screenId: z.string(),
+  /** The surface within this screen's slice (its id, stable across a re-render). */
+  surfaceId: z.string().max(120),
+  /** The library source the surface was rendering (send-time stamp). Absent for an ad-hoc URL — the
+   *  server then has nothing to attribute the report to and drops it. */
+  sourceId: z.string().max(120).optional(),
+  url: z.string().max(2000),
+  state: SurfaceHealthState,
+  /** Player-side ISO-8601 timestamp — the box's own clock, like `player/diag`. */
+  at: z.string().max(40),
+  /** Why, in the player's words ("failed to fetch", "element failed to load"). Never a URL. */
+  detail: z.string().max(200).optional(),
+});
+export type PlayerSurfaceHealth = z.infer<typeof PlayerSurfaceHealth>;
+
+export const PlayerMessage = z.discriminatedUnion("t", [
+  PlayerHello,
+  PlayerAck,
+  PlayerDiag,
+  PlayerSurfaceHealth,
+]);
 export type PlayerMessage = z.infer<typeof PlayerMessage>;
 
 /** Pushed whenever this screen's slice changes. The player applies it via DOM diff — no reload. */
@@ -1411,7 +1452,7 @@ export const ScreenView = Screen.extend({
     .object({
       name: z.string(),
       // Mirrors ContentKind (declared below); inlined because this schema evaluates first.
-      kind: z.enum(["web", "dashboard", "image", "video", "playlist", "page"]),
+      kind: z.enum(["web", "dashboard", "image", "video", "playlist", "page", "deck"]),
       /** POL-57 — the page zoom currently applied, present only for framed (web/dashboard) content.
        *  Absent for media, which has no zoom, so the console knows when to offer the control. */
       zoom: Zoom.optional(),
@@ -1574,8 +1615,11 @@ export type VideoWall = z.infer<typeof VideoWall>;
 
 /** The kind of a content source — mirrors the renderable Surface types. `playlist` (POL-34) is the
  *  composite kind: a carousel over the other renderables. `page` (POL-42) is an authored composition
- *  created in the console's Studio; it has a `definition`, not a `url`. */
-export const ContentKind = z.enum(["web", "dashboard", "image", "video", "playlist", "page"]);
+ *  created in the console's Studio; it has a `definition`, not a `url`. `deck` (POL-114) is an
+ *  uploaded DOCUMENT (PDF/slides) that the server pre-converted to page images: its `url` addresses
+ *  the original document and its pages are server-derived (`deck`) — it RENDERS as a playlist of
+ *  images, so the player needs no new surface for it. */
+export const ContentKind = z.enum(["web", "dashboard", "image", "video", "playlist", "page", "deck"]);
 export type ContentKind = z.infer<typeof ContentKind>;
 
 /** One AUTHORED step of a playlist source (POL-34): a reference to another library source plus how
@@ -1678,6 +1722,72 @@ export const MediaMetadata = z.object({
 });
 export type MediaMetadata = z.infer<typeof MediaMetadata>;
 
+// ── Documents → decks (POL-114) ──────────────────────────────────────────────
+// A wall NEVER renders a document live: no PDF viewer, no Office iframe, no plugin (DESIGN.md commits
+// to this — a document viewer on a kiosk is a scrollbar, a toolbar and a "trial expired" dialog away
+// from a broken wall). An uploaded PDF/PPTX is CONVERTED SERVER-SIDE, once, into a sequence of page
+// IMAGES; the source that lands in the library is a `deck`, and the server resolves it to a PLAYLIST
+// of those images at assignment time. So the player, the offline media cache, the video-wall span and
+// the <150 ms diff path all work UNCHANGED — a deck is an image rotation, which the wall already does.
+//
+// The converting toolchain is named ONLY inside the server's `DocumentConverter` adapter; the contract
+// says nothing about it. A server with no converter cannot make a deck AT ALL (there is no content to
+// show without conversion) — it refuses the upload and advertises `capabilities.documents = false`, so
+// the console can say so BEFORE an operator uploads 60 MB.
+
+/** What the server converted an uploaded document into. `pageUrls`/`pageCount`/`posterUrl` are
+ *  SERVER-DERIVED at read time from the media catalogue (like `ContentSource.media`); `dwellSeconds`
+ *  is the one AUTHORED field — how long each page holds the screen. */
+export const Deck = z.object({
+  /** How many page images the conversion produced. */
+  pageCount: z.number().int().nonnegative(),
+  /** Absolute URLs of the page images, in page order (`…/media/<id>/page/<n>`). */
+  pageUrls: z.array(z.string().url()),
+  /** Seconds each page holds the screen before the deck advances. Operator-editable. */
+  dwellSeconds: z.number().int().min(1).max(3600),
+  /** Page 1 — the library thumbnail for the deck. */
+  posterUrl: z.string().url().optional(),
+  /** The uploaded document's own format, as a short label ("pdf", "pptx") — for the library row. */
+  format: z.string().max(32).optional(),
+});
+export type Deck = z.infer<typeof Deck>;
+
+/** The lifecycle of one document conversion. A 60-slide deck is NOT a request/response — the upload
+ *  route answers 202 with a job, and the job is pushed live in `admin/state` (the same <150 ms
+ *  broadcast the console already listens to), so an operator watches pages appear instead of a
+ *  spinner. `converting` = the document is being turned into a page-image source; `rendering` = pages
+ *  are landing (`pagesDone` climbs). */
+export const DocumentJobStatus = z.enum(["converting", "rendering", "ready", "failed"]);
+export type DocumentJobStatus = z.infer<typeof DocumentJobStatus>;
+
+export const DocumentJob = z.object({
+  id: z.string(),
+  /** The display name the deck will take (the operator's, or the file's). */
+  name: z.string().max(120),
+  status: DocumentJobStatus,
+  /** Pages written so far — real progress, counted off the converter's output. */
+  pagesDone: z.number().int().nonnegative(),
+  /** Total pages, once the conversion knows (absent while it is still working it out). */
+  pageCount: z.number().int().nonnegative().optional(),
+  /** The deck source that was created — set exactly when `status: "ready"`. */
+  sourceId: z.string().optional(),
+  /** The operator-facing failure sentence — set exactly when `status: "failed"`. */
+  error: z.string().max(400).optional(),
+  startedAt: z.string(),
+  updatedAt: z.string(),
+});
+export type DocumentJob = z.infer<typeof DocumentJob>;
+
+/** POST /api/v1/media with a DOCUMENT answers 202 with the job to watch (never a finished source —
+ *  conversion is slow, and blocking an HTTP request on it is how you meet a proxy's read timeout). */
+export const DocumentJobAccepted = z.object({ ok: z.literal(true), job: DocumentJob });
+export type DocumentJobAccepted = z.infer<typeof DocumentJobAccepted>;
+
+/** What this server can actually do, advertised in `admin/state` so the console never offers an
+ *  affordance the server would refuse. `documents` = a document converter is installed and enabled. */
+export const ServerCapabilities = z.object({ documents: z.boolean() });
+export type ServerCapabilities = z.infer<typeof ServerCapabilities>;
+
 /** A reusable, named entry in the content LIBRARY. A screen or video wall is assigned a source by id;
  *  the server resolves it to the surface(s) it renders. 3c carries linkable URLs; Phase 7 adds uploaded
  *  media served from a disk volume (an upload becomes a source whose url points at the media route).
@@ -1703,6 +1813,9 @@ export const ContentSource = z
      *  pattern as POL-24's token stamping) — it is never stored on the source row and never accepted
      *  from a client. Absent on a linked (by-URL) image/video: the server never probed it. */
     media: MediaMetadata.optional(),
+    /** POL-114 — deck kind only: the converted page images + the authored per-page dwell. Like
+     *  `media`, everything but `dwellSeconds` is derived at read time from the media catalogue. */
+    deck: Deck.optional(),
     /** POL-18 — the server's framing-probe verdict (web/dashboard kinds; server-managed, re-probed
      *  when the url changes). Absent = never probed (legacy rows / non-frameable kinds). */
     framing: FramingVerdict.optional(),
@@ -1710,6 +1823,8 @@ export const ContentSource = z
     placementMode: PlacementMode.optional(),
   })
   .superRefine((s, ctx) => {
+    if (s.kind !== "deck" && s.deck !== undefined)
+      ctx.addIssue({ code: "custom", message: "a deck is only valid on a deck source" });
     if (s.kind === "playlist") {
       if (s.url !== undefined) ctx.addIssue({ code: "custom", message: "a playlist has no url" });
       if (s.items === undefined) ctx.addIssue({ code: "custom", message: "a playlist needs items" });
@@ -1726,6 +1841,61 @@ export const ContentSource = z
       ctx.addIssue({ code: "custom", message: "a definition is only valid on a page" });
   });
 export type ContentSource = z.infer<typeof ContentSource>;
+
+// ── Library status: usage + health (POL-94) ──────────────────────────────────
+//
+// The library was a flat list: no way to see WHERE a source is used, and no signal about whether it
+// is actually loading on the glass. Two folds fix that, both computed server-side and shipped with
+// the admin snapshot — one over DESIRED STATE (usage), one over what the PLAYERS report (health).
+
+/** Everything in the registry that references one library source. Ids (not just counts) so the
+ *  console can say exactly what a delete will break and link through to it. */
+export const SourceUsage = z.object({
+  sourceId: z.string(),
+  /** Screens directly assigned this source. */
+  screenIds: z.array(z.string()),
+  /** Video walls spanning it (each has ≥2 member screens — counted as ONE wall, not N screens). */
+  wallIds: z.array(z.string()),
+  /** Playlists with a step referencing it. */
+  playlistIds: z.array(z.string()),
+  /** Pages whose definition embeds it (an `embed` or `image` element). */
+  pageIds: z.array(z.string()),
+});
+export type SourceUsage = z.infer<typeof SourceUsage>;
+
+/**
+ * The console's health badge for a library source, folded from its players' `player/surface-health`
+ * reports. HONEST LIMITS, because a badge that overclaims is worse than none:
+ *
+ *   reachable    at least one screen showing it last PROVED it fetchable, and none has since failed.
+ *                It does NOT mean the content rendered correctly: an HTTP 500, an expired session's
+ *                login page and a blank dashboard are all "reachable" — they are the content owner's
+ *                page, fetched fine. Cross-origin framed content is behind the SOP wall; the browser
+ *                will not tell us what it rendered, and Polyptic will not pretend otherwise.
+ *   unreachable  a screen showing it could not fetch the URL at all (DNS, route, refused, timeout) or
+ *                the media element reported a failed load. This is the one that matters: it is the
+ *                broken-image icon / sad face the wall must never show.
+ *   unknown      nobody is showing it (an unassigned source is never probed — a library of 200 URLs
+ *                must not become 200 outbound requests), or the screens showing it are offline, or the
+ *                players are older than this protocol.
+ */
+export const SourceHealthState = z.enum(["reachable", "unreachable", "unknown"]);
+export type SourceHealthState = z.infer<typeof SourceHealthState>;
+
+/** A library source's usage fold + its live health fold, denormalized for the console. */
+export const ContentSourceStatus = z.object({
+  sourceId: z.string(),
+  usage: SourceUsage,
+  health: SourceHealthState,
+  /** When the newest report backing `health` was written, on the reporting box's clock. Absent when
+   *  health is `unknown` (nothing has ever reported). */
+  lastSeenAt: z.string().max(40).optional(),
+  /** The screens currently reporting this source as unreachable (drives "broken on Lobby 2"). */
+  unreachableScreenIds: z.array(z.string()).default([]),
+  /** The newest failure's reason, in the player's words. Absent when nothing is failing. */
+  detail: z.string().max(200).optional(),
+});
+export type ContentSourceStatus = z.infer<typeof ContentSourceStatus>;
 
 // ── Scenes (Phase 3d) ────────────────────────────────────────────────────────
 // A Scene is a named SNAPSHOT of a mural's whole wall — its layout (placements), grouping (video
@@ -1767,6 +1937,81 @@ export const Scene = z.object({
   // scene plays is a `Schedule` — a scene bound to a daypart on a recurrence, at a priority.
 });
 export type Scene = z.infer<typeof Scene>;
+
+// ── Scene apply-preview (POL-95) ─────────────────────────────────────────────
+// Applying a scene is a leap: on a 12-screen mural the wall visibly jumps and nothing said what was
+// about to happen. The server — the only thing that knows BOTH the saved snapshot and the live wall —
+// computes the changeset (`GET /api/v1/scenes/:id/diff`) and the console renders it as a glanceable
+// card on Apply. Terraform-plan / kubectl-diff mental model: show the plan, then reconcile. The
+// preview is READ-ONLY and never a gate — apply stays one click.
+
+/** What applying the scene does to ONE target (a screen or a video wall). A target can carry several:
+ *  a screen may move AND change content; a wall may be combined AND given content. */
+export const SceneDiffChange = z.enum([
+  "content", // the content on it changes (from → to)
+  "cleared", // it is showing something and the scene has it empty
+  "move", // it stays on the mural but its placement geometry changes
+  "place", // it is not on the mural now; the scene places it
+  "unplace", // it is on the mural now; the scene does not include it (its content is cleared)
+  "combine", // these screens are combined into a video wall (they are not one now)
+  "split", // this video wall is broken back into individual screens
+]);
+export type SceneDiffChange = z.infer<typeof SceneDiffChange>;
+
+/** One side of a content change, pre-resolved for display: the assignment plus a human label (a
+ *  library source's name, or the ad-hoc url). `null` = nothing on air. */
+export const SceneDiffContent = z
+  .object({
+    sourceId: z.string().optional(),
+    url: z.string().optional(),
+    label: z.string(),
+  })
+  .nullable();
+export type SceneDiffContent = z.infer<typeof SceneDiffContent>;
+
+/** One changed target. Unchanged targets are NOT listed (they are counted in `summary.unchanged`) —
+ *  the card is a read-out of what MOVES, not an inventory of the wall. */
+export const SceneDiffEntry = z.object({
+  target: z.enum(["screen", "wall"]),
+  /** The screen id, or — for a wall — a stable key derived from its sorted member ids. */
+  id: z.string(),
+  /** Friendly name: the screen's, or "Video wall (N screens)". */
+  name: z.string(),
+  /** The screens this entry covers (1 for a screen, N for a wall). */
+  screenIds: z.array(z.string()).min(1),
+  changes: z.array(SceneDiffChange).min(1),
+  from: SceneDiffContent, // what is on it NOW
+  to: SceneDiffContent, // what the scene puts on it
+});
+export type SceneDiffEntry = z.infer<typeof SceneDiffEntry>;
+
+/** The counts behind the one-line read-out ("3 screens change content, 1 screen moves, 1 wall splits"). */
+export const SceneDiffSummary = z.object({
+  contentChanges: z.number().int().nonnegative(),
+  cleared: z.number().int().nonnegative(),
+  moves: z.number().int().nonnegative(),
+  placed: z.number().int().nonnegative(),
+  unplaced: z.number().int().nonnegative(),
+  combines: z.number().int().nonnegative(),
+  splits: z.number().int().nonnegative(),
+  /** Targets the apply leaves exactly as they are. */
+  unchanged: z.number().int().nonnegative(),
+});
+export type SceneDiffSummary = z.infer<typeof SceneDiffSummary>;
+
+export const SceneDiff = z.object({
+  sceneId: z.string(),
+  sceneName: z.string(),
+  muralId: z.string(),
+  /** True when applying would change nothing on the wall (the scene IS the live wall). */
+  identical: z.boolean(),
+  entries: z.array(SceneDiffEntry),
+  summary: SceneDiffSummary,
+  /** Plain-English caveats the apply cannot fix: a captured screen that no longer exists, a captured
+   *  library source that has been deleted (that target will land EMPTY). */
+  warnings: z.array(z.string()),
+});
+export type SceneDiff = z.infer<typeof SceneDiff>;
 
 export const AdminHello = z.object({
   t: z.literal("admin/hello"),
@@ -1908,10 +2153,24 @@ export const ServerToAdminState = z.object({
   videoWalls: z.array(VideoWall), // Phase 3b — combined surfaces
   contentSources: z.array(ContentSource), // Phase 3c — the content library
   scenes: z.array(Scene), // Phase 3d — saved wall snapshots
+  /** POL-95 — the scene the wall is CURRENTLY on, straight from the server's desired state (null once
+   *  a manual change diverges the wall from it). Authoritative: every console — a reload, a second
+   *  operator — agrees on the Active badge because it is told, never because it guessed. Optional on
+   *  the wire = back-compat with an older server (the console then simply shows no badge). */
+  activeSceneId: z.string().nullable().optional(),
   activity: z.array(ActivityEvent).optional(), // Live Activity feed (newest first); optional = back-compat
   panelPower: PanelPowerConfig.optional(), // POL-101 — the deployment's panel-hours timezone
   settings: DisplaySettings.optional(), // POL-6 — fleet-wide display settings (badge toggle); optional = back-compat
   credentialProfiles: z.array(CredentialProfileView).optional(), // POL-24 — content auth profiles; optional = back-compat
+  /** POL-114 — document conversions in flight (and the recently finished ones). This IS the progress
+   *  channel: the console watches the job it started on the state broadcast it is already listening
+   *  to, so a 60-slide deck shows pages landing instead of an unmoving spinner. */
+  documentJobs: z.array(DocumentJob).optional(),
+  /** POL-114 — what this server can do (document conversion needs a toolchain that may be absent). */
+  capabilities: ServerCapabilities.optional(),
+  /** POL-94 — per-source usage + live health, one entry per library source. Optional = back-compat
+   *  (an older console ignores it; a newer console against an older server shows "unknown"). */
+  sourceStatus: z.array(ContentSourceStatus).optional(),
   // POL-89 — the scene scheduler. The console feeds these three straight into the shared resolver to
   // paint its "what plays when" week strip, so the strip cannot disagree with the server's ticker.
   dayparts: z.array(Daypart).optional(), // optional = back-compat
@@ -2198,6 +2457,10 @@ export const CreateContentSourceBody = z
       ctx.addIssue({ code: "custom", message: "items are only valid on a playlist" });
     if (b.kind !== "page" && b.definition !== undefined)
       ctx.addIssue({ code: "custom", message: "a definition is only valid on a page" });
+    // POL-114 — a deck is MINTED by the document pipeline (upload → convert → pages), never declared:
+    // a deck without converted pages is a library row that cannot render. The route refuses it too.
+    if (b.kind === "deck")
+      ctx.addIssue({ code: "custom", message: "a deck is created by uploading a document" });
   });
 export type CreateContentSourceBody = z.infer<typeof CreateContentSourceBody>;
 
@@ -2212,6 +2475,9 @@ export const UpdateContentSourceBody = z.object({
   items: z.array(PlaylistItem).min(1).max(100).optional(),
   /** POL-42 — replace a page source's composition (the Studio's Save). */
   definition: PageDefinition.optional(),
+  /** POL-114 — deck kind only: how long each converted page holds the screen. The ONLY authored part
+   *  of a deck (its pages are the conversion's output, not an operator's to edit). */
+  dwellSeconds: z.number().int().min(1).max(3600).optional(),
   /** POL-18 — change the placement override. `framing` is server-managed and NOT settable here. */
   placementMode: PlacementMode.optional(),
 });
