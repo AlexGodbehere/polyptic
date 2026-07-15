@@ -231,6 +231,19 @@ export function meaningfulHostname(hostname: string | undefined | null): string 
   return h;
 }
 
+/**
+ * POL-145 — does this machine have a real, human-meaningful name? True when the label diverged from
+ * the id (the unnamed sentinel) AND is not itself a meaningless hostname adopted before POL-117.
+ * Shared by the console (the "Unnamed box" display fallback) and the server (which stamps the name
+ * onto the pending board's ident URL, so the panel flashes what the operator called it — never a
+ * hostname posing as a name, never the raw id when a better identity exists).
+ */
+export function machineHasName(machine: { id: string; label: string }): boolean {
+  const label = machine.label.trim();
+  if (!label || label === machine.id) return false;
+  return meaningfulHostname(label) !== null;
+}
+
 /** A client machine. Plumbing — users address screens, not machines. */
 export const Machine = z.object({
   id: z.string(), // stable; sourced from /etc/machine-id
@@ -1302,7 +1315,12 @@ export const ServerToAgentPending = z.object({
    *  there is no player WS to pulse, and the trust model wants nothing new reachable pre-approval.
    *  The server re-sends `server/pending` with `&ident=1` appended to the URL (and again without it
    *  to clear); the agent's existing "re-place when the URL changed" handling swaps the board, and
-   *  the pending page renders its flash overlay. No new frame, no new agent code, old agents included. */
+   *  the pending page renders its flash overlay. No new frame, no new agent code, old agents included.
+   *
+   *  POL-145 — when the machine HAS a name (`machineHasName`: renamed while pending, or named by
+   *  pre-registration), the ident URL also carries `&name=<label>` and the board flashes THE NAME,
+   *  with the id small underneath; only an unnamed box flashes the raw id. Same additive URL-param
+   *  path, so it still needs no agent change. */
   pendingUrl: z.string().optional(),
 });
 
