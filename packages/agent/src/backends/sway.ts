@@ -24,8 +24,9 @@
  */
 import type { ChildProcess } from "node:child_process";
 import { hostname as osHostname } from "node:os";
-import type { KioskBrowser, WindowPlacement } from "@polyptic/protocol";
+import type { KioskBrowser, PanelPowerMethod, PowerCapabilities, WindowPlacement } from "@polyptic/protocol";
 import type { DisplayBackend } from "./types";
+import { PanelPower, swayDpmsArgs } from "./power";
 import { openInspectorOnFocusedWindow, requireXdotool } from "./inspector";
 import { buildSurfArgs, matchesSurfWindow, prelaunchSurf, resolveSurf } from "./surf";
 import {
@@ -293,6 +294,21 @@ export class SwayBackend implements DisplayBackend {
   private castSession: ((connector: string, active: boolean) => void) | null = null;
   /** POL-136 — the agent's PIN listener: told the PIN a pairing sender must type (null = clear). */
   private castPin: ((connector: string, pin: string | null) => void) | null = null;
+
+  /** POL-101 — DPMS via sway IPC, plus CEC if this box has an adapter. The browser is NOT torn down
+   *  when a panel sleeps, which is what makes the wake instant and content-preserving. */
+  private readonly power = new PanelPower(async (connector, on) => {
+    await requireSwaymsg();
+    const output = await this.resolveConnector(connector);
+    const res = await run("swaymsg", swayDpmsArgs(output, on));
+    if (res.code !== 0) {
+      throw new Error(
+        `swaymsg output ${output} dpms ${on ? "on" : "off"} failed: ` +
+          `${res.stderr.trim() || `exit ${res.code}`}`,
+      );
+    }
+    this.log(`panel ${on ? "woken" : "slept"} on ${output} (dpms ${on ? "on" : "off"})`);
+  });
 
   private log(msg: string): void {
     console.log(`[${ts()}] [sway] ${msg}`);
@@ -794,6 +810,16 @@ export class SwayBackend implements DisplayBackend {
     if (!this.browsers.get(connector)?.running) return null;
     const port = this.devtoolsPorts.get(connector);
     return port === undefined ? null : { port };
+  }
+
+  /** POL-101 — DPMS is always available under sway; CEC only if the box has an adapter (probed once). */
+  powerCapabilities(): Promise<PowerCapabilities> {
+    return this.power.capabilities();
+  }
+
+  /** POL-101 — sleep/wake this output's panel. See ./power.ts for why DPMS and CEC are two rungs. */
+  setPower(connector: string, on: boolean): Promise<PanelPowerMethod[]> {
+    return this.power.apply(connector, on);
   }
 
   // ── casting (POL-119) ─────────────────────────────────────────────────────────
