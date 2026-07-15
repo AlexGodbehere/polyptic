@@ -61,6 +61,12 @@ function mediaSrc(entry: PlaylistEntry): string {
   return resolveMediaSrc(entry.url, props.serverHttpBase);
 }
 
+/** POL-109 — a video step's ingest poster frame, re-homed like any media URL (POL-5). Painted while
+ *  the step buffers, so an advance never shows black before the first decoded frame. */
+function posterSrc(entry: PlaylistEntry): string | undefined {
+  return entry.poster ? resolveMediaSrc(entry.poster, props.serverHttpBase) : undefined;
+}
+
 /** The rotation's audio intent (POL-112): the flag the server sent, never a hardcode. It is applied
  *  to the video element that is on air; the image/frame entries have nothing to sound. */
 const audio = computed(() => surfaceAudio(props.surface));
@@ -169,6 +175,7 @@ onUnmounted(clearTimer);
       :key="`video-${index}`"
       class="surface-media"
       :src="mediaSrc(current)"
+      :poster="posterSrc(current)"
       :style="entryStyle"
       autoplay
       playsinline
