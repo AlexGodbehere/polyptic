@@ -54,6 +54,9 @@ const PLAYER_INDEX_HTML = "<!doctype html><html><head><title>polyptic-player</ti
 // boot-time glob has to pick up for the browser's bare /favicon.ico request to be answered.
 const CONSOLE_FAVICON_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\"><!-- CONSOLE_FAVICON_MARKER --></svg>";
 const PLAYER_FAVICON_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\"><!-- PLAYER_FAVICON_MARKER --></svg>";
+// POL-132 — the player's shell service worker lives at the dist root; its response headers are
+// load-bearing (see the test below).
+const PLAYER_SW_JS = "/* PLAYER_SW_MARKER */\n";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..");
@@ -88,6 +91,7 @@ function fabricateSpaRoots(): void {
   mkdirSync(playerDir, { recursive: true });
   writeFileSync(join(playerDir, "index.html"), PLAYER_INDEX_HTML, "utf8");
   writeFileSync(join(playerDir, "favicon.svg"), PLAYER_FAVICON_SVG, "utf8");
+  writeFileSync(join(playerDir, "sw.js"), PLAYER_SW_JS, "utf8");
 }
 
 function removeSpaRoots(): void {
@@ -219,6 +223,22 @@ describe("phase 8 static SPA serving", () => {
         expect(body).not.toContain("CONSOLE_INDEX_MARKER");
         expect((res.headers.get("content-type") ?? "").toLowerCase()).toContain("html");
       }
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
+    "GET /player/sw.js carries the POL-132 service-worker headers (no-cache + Service-Worker-Allowed)",
+    async () => {
+      const res = await fetch(`${BASE}/player/sw.js`);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("PLAYER_SW_MARKER");
+      // no-cache: the browser's SW update check must always see the DEPLOYED worker — a
+      // heuristically-cached sw.js would pin walls to an old shell build (D107 honesty).
+      expect(res.headers.get("cache-control")).toBe("no-cache");
+      // Allows the worker to claim the no-trailing-slash "/player" scope (wider than its
+      // /player/ directory), so a bare `/player?screen=…` navigation is controlled too.
+      expect(res.headers.get("service-worker-allowed")).toBe("/player");
     },
     TEST_TIMEOUT,
   );
