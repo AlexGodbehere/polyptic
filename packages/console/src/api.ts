@@ -58,6 +58,7 @@ import type {
   CredentialProfileTestResult,
   CredentialProfileView,
   Daypart,
+  DocumentJob,
   PanelHours,
   Scene,
   SceneDiff,
@@ -693,6 +694,12 @@ export function testCredentialProfile(profileId: string): Promise<CredentialProf
 
 // ── Media uploads (Phase 7) ──────────────────────────────────────────────────
 
+/** What an upload came back as: a finished media source (image/video, POL-109), or — for a DOCUMENT
+ *  (POL-114) — a conversion JOB to watch, because a 60-slide deck is not a request/response. */
+export type UploadResult =
+  | { source: ContentSource; warning?: string }
+  | { job: DocumentJob };
+
 /**
  * POST /api/v1/media — upload an image or video file to the server's disk volume. The server saves
  * it under MEDIA_DIR, records it, and mints a ContentSource (kind image|video) whose `url` is an
@@ -717,7 +724,7 @@ export function uploadMedia(
   file: File,
   name?: string,
   onProgress?: (fraction: number) => void,
-): Promise<{ source: ContentSource; warning?: string }> {
+): Promise<UploadResult> {
   const form = new FormData();
   // The server generates the stored id + derives the extension from the validated mime; the original
   // filename is sent only as a fallback display name (never used to build the on-disk path).
@@ -727,7 +734,7 @@ export function uploadMedia(
   if (trimmed) form.append("name", trimmed);
   form.append("file", file, file.name);
 
-  return new Promise<{ source: ContentSource; warning?: string }>((resolve, reject) => {
+  return new Promise<UploadResult>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${BASE}/media`);
     xhr.withCredentials = true;
@@ -749,7 +756,17 @@ export function uploadMedia(
       }
 
       if (xhr.status >= 200 && xhr.status < 300) {
-        const body = payload as { source?: ContentSource; warning?: string } | undefined;
+        const body = payload as
+          | { source?: ContentSource; warning?: string; job?: DocumentJob }
+          | undefined;
+        // POL-114 — a DOCUMENT answers 202 with a conversion JOB, not a finished source: the deck
+        // appears in the library (via admin/state) when the pages have actually been rendered, and
+        // the job's progress rides the same broadcast in the meantime.
+        if (body?.job) {
+          onProgress?.(1);
+          resolve({ job: body.job });
+          return;
+        }
         const source = body?.source;
         if (source) {
           onProgress?.(1);

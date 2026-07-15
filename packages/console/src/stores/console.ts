@@ -30,6 +30,7 @@ import type {
   CredentialProfileView,
   Daypart,
   DisplaySettings,
+  DocumentJob,
   EnrollmentInfo,
   EnrollmentTokenView,
   LoginBody,
@@ -186,6 +187,13 @@ export interface ConsoleState {
   sourceStatus: ContentSourceStatus[];
   /** Saved wall snapshots (Phase 3d), mirrored from admin/state. */
   scenes: Scene[];
+  /** POL-114 — document conversions in flight (newest first), mirrored from admin/state. This is how
+   *  an upload of a 60-slide deck reports progress: the server pushes the job on the same broadcast
+   *  everything else arrives on, so the modal watches pages land instead of showing a dead spinner. */
+  documentJobs: DocumentJob[];
+  /** POL-114 — what the SERVER can do. `documents: false` = no converter installed, so the console
+   *  must not offer document upload at all (the server would refuse it). Optional on the wire. */
+  capabilities: { documents: boolean };
   /** The scene scheduler (POL-89), mirrored from admin/state: the daypart library, the schedules
    *  bound to it, and the deployment's settings row (master switch + timezone + default scene).
    *  Optional on the wire (back-compat) → [] / null against an older server. The Scenes view feeds
@@ -239,6 +247,8 @@ export const useConsoleStore = defineStore("console", {
     videoWalls: [],
     contentSources: [],
     credentialProfiles: [],
+    documentJobs: [],
+    capabilities: { documents: false },
     sourceStatus: [],
     scenes: [],
     dayparts: [],
@@ -493,6 +503,7 @@ export const useConsoleStore = defineStore("console", {
         stream: [],
         playlist: [],
         page: [],
+        deck: [],
       };
       for (const s of state.contentSources) buckets[s.kind].push(s);
       return buckets;
@@ -509,6 +520,11 @@ export const useConsoleStore = defineStore("console", {
 
     profileById(): (id: string) => CredentialProfileView | undefined {
       return (id: string) => this.credentialProfiles.find((p) => p.id === id);
+    },
+
+    /** POL-114 — one document conversion, by id (what the upload modal watches while it converts). */
+    documentJob(): (id: string) => DocumentJob | undefined {
+      return (id: string) => this.documentJobs.find((j) => j.id === id);
     },
 
     // ── Library usage + health (POL-94) ──────────────────────────────────────
@@ -951,6 +967,9 @@ export const useConsoleStore = defineStore("console", {
         // POL-94 — usage + health per source; optional on the wire (older servers omit it).
         this.sourceStatus = msg.sourceStatus ?? [];
         this.scenes = msg.scenes;
+        // POL-114 — document conversions + what this server can convert. Both optional on the wire.
+        this.documentJobs = msg.documentJobs ?? [];
+        if (msg.capabilities) this.capabilities = msg.capabilities;
         // POL-95 — the ACTIVE scene comes from the server's desired state. Optional on the wire
         // (an older server omits it) → no badge rather than a guessed one.
         this.activeSceneId = msg.activeSceneId ?? null;
@@ -1872,7 +1891,12 @@ export const useConsoleStore = defineStore("console", {
      */
     async updateSource(id: string, body: UpdateContentSourceBody): Promise<boolean> {
       const existing = this.contentSources.find((s) => s.id === id);
-      if (existing) Object.assign(existing, body); // optimistic
+      // POL-114 — `dwellSeconds` is not a field OF a source (it lives inside the server-derived
+      // `deck`), so it must not be optimistically pasted onto the row: the broadcast brings it back
+      // in its proper place a moment later.
+      const { dwellSeconds, ...local } = body;
+      if (existing) Object.assign(existing, local); // optimistic
+      if (existing?.deck && dwellSeconds !== undefined) existing.deck = { ...existing.deck, dwellSeconds };
       try {
         await api.updateContentSource(id, body);
         return true;
@@ -1966,11 +1990,14 @@ export const useConsoleStore = defineStore("console", {
       file: File,
       name?: string,
       onProgress?: (fraction: number) => void,
-    ): Promise<{ ok: boolean; error?: string; warning?: string }> {
+    ): Promise<{ ok: boolean; error?: string; warning?: string; jobId?: string }> {
       try {
         // POL-109 — an accepted upload can still carry a caveat (an unprobeable file on a server with
         // no media toolchain). The caller shows it as a note, not as a failure.
         const result = await api.uploadMedia(file, name, onProgress);
+        // POL-114 — a DOCUMENT comes back as a conversion job, not a source. The caller watches it in
+        // `documentJobs` (pushed live on admin/state) and closes when it goes ready.
+        if ("job" in result) return { ok: true, jobId: result.job.id };
         return result.warning ? { ok: true, warning: result.warning } : { ok: true };
       } catch (err) {
         console.error("[console] uploadSource failed", err);

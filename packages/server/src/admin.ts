@@ -18,10 +18,12 @@
 import { ServerToAdminState } from "@polyptic/protocol";
 import type { FastifyBaseLogger } from "fastify";
 import type {
-  MachineVitals,
+  DocumentJob,
   MachineView,
+  MachineVitals,
   PanelPowerMethod,
   ScreenView,
+  ServerCapabilities,
   ServerToAdminMessage,
 } from "@polyptic/protocol";
 import { WebSocket } from "ws";
@@ -381,11 +383,20 @@ export class Presence {
  * counts) merged with live status (machine online from Presence, screen online from the PlayerHub,
  * screen observed revision from Presence). Validated against the contract before it leaves.
  */
+/** POL-114 — what the document pipeline contributes to `admin/state`: the conversions in flight (the
+ *  console's progress channel) and whether this server can convert at all. Optional, so a unit test
+ *  that builds a state snapshot without a pipeline stays a two-line call. */
+export interface DocumentStateSource {
+  jobs: { list(): DocumentJob[] };
+  capabilities: ServerCapabilities;
+}
+
 export function buildAdminState(
   control: ControlPlane,
   playerHub: PlayerHub,
   presence: Presence,
   activity: ActivityLog,
+  documents?: DocumentStateSource,
   /** POL-94 — live per-source health from the players' probes. Optional so the older call sites (and
    *  tests) that only care about machines keep working; absent = every source reads "unknown". */
   health?: SourceHealthTracker,
@@ -497,6 +508,11 @@ export function buildAdminState(
     settings: control.getDisplaySettings(), // POL-6 — fleet-wide display settings (badge toggle)
     panelPower: control.getPanelPowerConfig(), // POL-101 — the panel-hours timezone
     credentialProfiles: control.getCredentialProfileViews(), // POL-24 — content auth (never the secret)
+    // POL-114 — document conversions in flight: THIS is the progress channel (no new socket, no
+    // polling — the console watches the job it started on the broadcast it already receives).
+    ...(documents
+      ? { documentJobs: documents.jobs.list(), capabilities: documents.capabilities }
+      : {}),
     // POL-94 — the library's inventory half: where each source is used (a fold over desired state)
     // and whether the screens showing it can actually fetch it (a fold over the players' probes).
     sourceStatus: health
@@ -524,6 +540,8 @@ interface BroadcasterDeps {
   /** POL-94 — per-source content health, as reported by the players' probes. */
   health?: SourceHealthTracker;
   log: FastifyBaseLogger;
+  /** POL-114 — the document pipeline's contribution (conversions + capability). */
+  documents?: DocumentStateSource;
   /** POL-104 — the live enrolment policy (which token a machine came in on, and whether it is revoked). */
   enrollment?: { list(): { id: string; revokedAt: string | null }[] };
 }
@@ -545,6 +563,7 @@ export class AdminBroadcaster {
       this.deps.playerHub,
       this.deps.presence,
       this.deps.activity,
+      this.deps.documents,
       this.deps.health,
       this.deps.enrollment,
     );
