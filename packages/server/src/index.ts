@@ -23,12 +23,15 @@ import { PlayerAuth } from "./player-auth";
 import { registerAuthRoutes } from "./auth-routes";
 import { CaptureCoordinator, ThumbnailStore } from "./capture";
 import { Enrollment } from "./enroll";
-import { AgentMtls } from "./mtls";
+import { AgentMtls, MtlsPosture, mtlsStartupFailureIsFatal, registerAgentSecurityRoutes, resolveAgentMtlsEnv } from "./mtls";
 import { AgentHub, PlayerHub } from "./hub";
 import { MediaStore, registerMediaServeRoute } from "./media";
 import { DEFAULT_RETAIN_BUILDS, ImageUpdates } from "./image-updates";
+import { CounterRegistry } from "./metrics";
 import { registerOpsRoutes } from "./ops";
 import { computeBaseUrl, provisionBootSummary, provisionConfigFromEnv, registerProvisionRoutes } from "./provision";
+import { initSelfSignedTls, registerHttpsRoutes, requiredSans, resolveTlsEnv } from "./server-tls";
+import type { ServerTlsRuntime, TlsEnvConfig } from "./server-tls";
 import { PageDataService } from "./page-data";
 import { registerRestRoutes } from "./rest";
 import { DevtoolsRelay } from "./devtools-relay";
@@ -42,7 +45,8 @@ import { attachWebSockets } from "./ws";
 import { ServerToPlayerRender } from "@polyptic/protocol";
 
 import type { PersistedBootstrap } from "./store";
-import type { FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyHttpOptions, FastifyReply, FastifyRequest } from "fastify";
+import type { Server as HttpServer } from "node:http";
 
 /** API paths that authenticate themselves (or report their own 401) — excluded from the global gate. */
 const AUTH_PUBLIC_PATHS = new Set([
@@ -74,22 +78,26 @@ const CORS_ORIGIN = (
   .filter((o) => o.length > 0);
 const PLAYER_BASE_URL = process.env.PLAYER_BASE_URL ?? "http://localhost:5173";
 
-// ── mTLS agent identity (POL-25): a dedicated TLS listener for the /agent channel. ──
-// AGENT_MTLS_PORT enables it: enrolment then issues per-machine client certs (CN = machine id,
-// signed by the deployment's own persisted CA) and agents reconnect over wss:// on this port, where
-// a wrong/absent cert fails the TLS HANDSHAKE — rejected before any app code. AGENT_MTLS_REQUIRE=1
-// additionally stops the PLAIN /agent channel from admitting anyone (it only authenticates + issues
-// bundles), which is the enforced end-state; leave it unset while a live fleet picks up its certs.
-const AGENT_MTLS_PORT = Number(process.env.AGENT_MTLS_PORT ?? 0);
-const AGENT_MTLS_REQUIRE = /^(1|true|yes)$/i.test(process.env.AGENT_MTLS_REQUIRE?.trim() ?? "");
+// ── mTLS agent identity (POL-25, ON BY DEFAULT since POL-134). ──
+// The dedicated TLS listener for the /agent channel comes up with ZERO configuration (port 8443):
+// enrolment issues per-machine client certs (CN = machine id, signed by the deployment's own
+// persisted CA) and agents reconnect over wss://, where a wrong/absent cert fails the TLS
+// HANDSHAKE — rejected before any app code. The posture then GRADUATES to require-mTLS by itself
+// once every known machine has been seen on the listener (see MtlsPosture). Escape hatches:
+// `AGENT_MTLS=off` (or AGENT_MTLS_PORT=0) disables the listener; AGENT_MTLS_REQUIRE=1/0 pins the
+// require posture in either direction (no auto-promotion).
+// An unparseable AGENT_MTLS_PORT is explicit configuration with a typo — refuse to boot rather
+// than silently treat it as "off" (same posture as resolveTlsEnv's half-configured pair).
+let agentMtlsEnv: ReturnType<typeof resolveAgentMtlsEnv>;
+try {
+  agentMtlsEnv = resolveAgentMtlsEnv(process.env);
+} catch (err) {
+  console.error(`FATAL: ${(err as Error).message}`);
+  process.exit(1);
+}
 // Full wss:// URL override for deployments where the mTLS endpoint is not same-host:port from the
 // agent's point of view (e.g. a separate LoadBalancer in Kubernetes). Advertised verbatim.
-const AGENT_MTLS_PUBLIC_URL = process.env.AGENT_MTLS_PUBLIC_URL?.trim() || undefined;
-// Extra SANs for the listener's server cert — every hostname/IP agents may dial it by.
-const AGENT_MTLS_SANS = (process.env.AGENT_MTLS_SANS ?? "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter((s) => s.length > 0);
+const AGENT_MTLS_PUBLIC_URL = agentMtlsEnv.publicUrl;
 
 // ── Media (Phase 7): uploads land on a disk VOLUME (MEDIA_DIR) and are served over plain HTTP. ──
 // MEDIA_DIR defaults to ./media in dev (a mounted volume / /var/lib/polyptic/media in prod). The serve
@@ -103,15 +111,51 @@ const MEDIA_PUBLIC_BASE = (
   "http://localhost:8080"
 ).replace(/\/+$/, "");
 
-const fastify = Fastify({
+// ── Durable store: select by STORE env, run migrations. Created BEFORE the Fastify instance since
+// POL-70: the self-signed TLS material persists in it, and Fastify needs the cert at construction. ──
+const { store, kind: storeKind } = createStore();
+await store.migrate();
+
+// ── Native TLS (POL-70/D89): three modes, resolved by server-tls.ts. ──
+//   provided     TLS_CERT_FILE + TLS_KEY_FILE (both, or refuse) — the operator's own certificate.
+//   self-signed  TLS_MODE=self-signed — the server mints + PERSISTS its own CA + leaf (no cert
+//                infrastructure needed; operators trust the CA once via Console ▸ Settings ▸ HTTPS).
+//   off          neither — plain HTTP; a TLS-terminating ingress is the primary production path.
+// Native TLS makes EVERY route https, including the netboot depot, which GRUB (no TLS stack, D47)
+// can then no longer fetch — a netbooting fleet needs the depot on plain HTTP; the boot banner says so.
+let tlsEnv: TlsEnvConfig;
+try {
+  tlsEnv = resolveTlsEnv();
+} catch (err) {
+  console.error(`FATAL: ${(err as Error).message}`);
+  process.exit(1);
+}
+let serverTls: ServerTlsRuntime = { mode: "off", sans: [] };
+let selfSignedChange: "none" | "minted-ca" | "reminted-leaf" = "none";
+if (tlsEnv.mode === "provided") {
+  serverTls = {
+    mode: "provided",
+    material: { cert: await Bun.file(tlsEnv.certFile).text(), key: await Bun.file(tlsEnv.keyFile).text() },
+    sans: [],
+  };
+} else if (tlsEnv.mode === "self-signed") {
+  const init = await initSelfSignedTls(store, requiredSans());
+  selfSignedChange = init.changed;
+  serverTls = init;
+}
+const nativeTls = serverTls.material;
+
+const fastifyOptions = {
   logger: { level: process.env.LOG_LEVEL ?? "info" },
   // shim's UEFI HTTP Boot fetch requests its second stage as <dir>//grubx64.efi (double slash, D47).
   ignoreDuplicateSlashes: true,
-});
-
-// ── Durable store: select by STORE env, run migrations, load persisted state ──
-const { store, kind: storeKind } = createStore();
-await store.migrate();
+  // `https` switches the underlying node server to TLS. Typed via the plain-HTTP overload (the
+  // https generic would ripple https.Server through every FastifyInstance signature in the repo
+  // for what is a runtime-only difference); the raw-server seams (WS upgrades, address()) are
+  // identical on both. The mTLS agent listener (POL-25) already proves node:https under Bun.
+  ...(nativeTls ? { https: nativeTls } : {}),
+};
+const fastify = Fastify(fastifyOptions as unknown as FastifyHttpOptions<HttpServer>);
 
 // ── Live Activity feed (D25): one bounded in-memory ring, shared by the control plane (content /
 // combine / split / rename / scene emits) and the ws presence layer (machine + screen connect/drop). ──
@@ -120,8 +164,8 @@ const activity = new ActivityLog();
 const control = new ControlPlane(store, activity);
 await control.init();
 
-// ── Enrollment policy (Phase 2b/3f): seed the bootstrap from the store; on first boot derive it from
-// POLYPTIC_BOOTSTRAP_TOKEN (set → gated, unset → open). The Settings "regenerate" mutates it later. ──
+// ── Enrollment policy (Phase 2b/3f, POL-104): seed the bootstrap from the store; on first boot derive
+// it from POLYPTIC_BOOTSTRAP_TOKEN (set → gated, unset → open). ──
 let bootstrap: PersistedBootstrap | undefined = await store.getBootstrap();
 if (!bootstrap) {
   const envToken = process.env.POLYPTIC_BOOTSTRAP_TOKEN?.trim();
@@ -131,13 +175,57 @@ if (!bootstrap) {
       : { mode: "open", token: null };
   await store.setBootstrap(bootstrap);
 }
-const enrollment = new Enrollment(bootstrap.token ?? undefined);
+
+// POL-104 — the token SET. Every write goes through the store; `bootstrap` is kept mirroring whichever
+// token is currently baked, so the pre-POL-104 read path (and a downgrade) still finds a live token.
+const enrollment = new Enrollment(undefined, {
+  persist: async (token) => {
+    await store.upsertEnrollmentToken(token);
+    if (token.bake) await store.setBootstrap({ mode: "gated", token: token.secret });
+  },
+  forget: async (id) => store.deleteEnrollmentToken(id),
+});
+
+const persistedTokens = await store.listEnrollmentTokens();
+if (persistedTokens.length > 0) {
+  enrollment.load(
+    persistedTokens.map((t) => ({
+      id: t.id,
+      name: t.name,
+      secret: t.secret,
+      createdAt: t.createdAt,
+      expiresAt: t.expiresAt ?? null,
+      maxEnrollments: t.maxEnrollments ?? null,
+      uses: t.uses,
+      revokedAt: t.revokedAt ?? null,
+      lastUsedAt: t.lastUsedAt ?? null,
+      bake: t.bake,
+      legacy: t.legacy,
+    })),
+  );
+} else if (bootstrap.token) {
+  // THE MIGRATION. A deployment upgrading into POL-104 has exactly one secret — the flat bootstrap
+  // token — and it is BAKED INTO EVERY BOOT MEDIUM ALREADY IN THE FIELD (`/boot/grub.cfg` writes it
+  // into the kernel cmdline; `build-boot-medium.sh` lifts it back out of that menu at bake time). Lift
+  // it into the token table verbatim: same secret, no expiry, no cap, still the token new media bake.
+  // Every stick that enrolled a box yesterday enrols one today; nothing changes until an operator
+  // deliberately rotates or revokes it. A token model change that bricks the sticks already flashed is
+  // not shippable, and this is the line that makes sure it doesn't.
+  enrollment.setToken(bootstrap.token);
+  const legacy = enrollment.list()[0];
+  if (legacy) await store.upsertEnrollmentToken(legacy);
+  fastify.log.info(
+    { event: "enrollment.legacy_lifted", tokenId: legacy?.id },
+    "POL-104: lifted the existing bootstrap token into the enrolment-token table (no expiry, no cap, " +
+      "still the token baked into new media) — every boot medium already flashed keeps enrolling",
+  );
+}
 
 const hub = new PlayerHub();
 const agentHub = new AgentHub();
 const adminHub = new AdminHub();
 const presence = new Presence();
-const broadcaster = new AdminBroadcaster({ control, playerHub: hub, presence, adminHub, activity, log: fastify.log });
+const broadcaster = new AdminBroadcaster({ control, playerHub: hub, presence, adminHub, activity, log: fastify.log, enrollment });
 
 // ── Content auth (POL-24): the OAuth client-credentials token cache. Seeded from the persisted
 // profiles; refreshes in the background at ~75% of each token's lifetime. When a profile's token
@@ -246,17 +334,20 @@ fastify.log.info(
     : "player channel OPEN (AUTH_ENABLED=false) — hellos are not token-checked",
 );
 
-// THE GATE: require a valid session on every /api/v1/** route except the public auth endpoints. The
-// device channels (/agent, /player), health/metrics and the WS upgrades are NOT /api/v1 and untouched.
+// THE GATE: require a valid session on every /api/v1/** route except the public auth endpoints, AND
+// (POL-107) a role that satisfies that route's policy — deny by default, so an unlisted route is
+// admin-only. The device channels (/agent, /player), health/metrics and the WS upgrades are NOT
+// /api/v1 and untouched (the /admin + DevTools upgrades run their own role check in ws.ts).
 fastify.addHook("preHandler", async (request: FastifyRequest, reply: FastifyReply) => {
   if (!auth.enabled) return;
   // Collapse duplicate slashes the SAME way find-my-way does under ignoreDuplicateSlashes (above),
   // or the gate desyncs from the router: `//api/v1/x` would route to the real handler while this
   // raw-url check saw a leading `//`, failed startsWith, and skipped requireAuth entirely (bypass).
+  // The SAME collapsed path is what the role policy matches against, for the same reason.
   const path = (request.url.split("?")[0] ?? request.url).replace(/\/{2,}/g, "/");
   if (!path.startsWith("/api/v1/")) return;
   if (AUTH_PUBLIC_PATHS.has(path)) return;
-  await auth.requireAuth(request, reply);
+  await auth.requireAuth(request, reply, path);
 });
 
 registerAuthRoutes(fastify, auth, enrollment);
@@ -265,14 +356,54 @@ registerAuthRoutes(fastify, auth, enrollment);
 // and handed to REST so disarming a screen closes its live sessions instantly.
 const devtoolsRelay = new DevtoolsRelay(agentHub, control, presence, activity, fastify.log);
 
-// ── mTLS agent channel (POL-25): CA + dedicated TLS listener + the boot self-test. ──
+// ── mTLS agent channel (POL-25/POL-134): CA + dedicated TLS listener + the boot self-test. ──
 // The self-test is load-bearing, not paranoia: Bun ≤ 1.2 implemented `requestCert` as PRESENCE-only
 // (any cert from any CA passed the handshake, measured on 1.2.2). A server that cannot actually
 // verify client certs must refuse to offer mTLS rather than serve a fake gate — so we dial our own
 // listener with a rogue-CA cert and with no cert and demand both handshakes FAIL before going up.
+//
+// POL-134 default-on nuance: when the operator EXPLICITLY configured mTLS, any failure here is
+// FATAL, exactly as before. Under the zero-config default, a listener that cannot come up (port
+// taken, or a runtime that cannot verify client certs) degrades LOUDLY to off instead — the
+// alternative is a shipped default that bricks every dev laptop with something on :8443.
 let agentMtlsChannel: import("./ws").AgentMtlsChannel | undefined;
-if (Number.isFinite(AGENT_MTLS_PORT) && AGENT_MTLS_PORT > 0) {
-  const sanHosts = [...AGENT_MTLS_SANS];
+let agentMtlsPosture: MtlsPosture | undefined;
+let agentMtlsOffDetail: string | undefined = agentMtlsEnv.enabled ? undefined : "disabled (AGENT_MTLS=off)";
+if (agentMtlsEnv.enabled) {
+  // Consult the PERSISTED posture BEFORE deciding how a startup failure is handled: a zero-config
+  // deployment that already graduated to require-mTLS must never quietly re-open plaintext
+  // sessions because one boot couldn't bind :8443 — agents self-heal onto the plain channel after
+  // a few failed dials, so the regression would be invisible except for one log line. Required
+  // (persisted or pinned) ⇒ startup failure is FATAL; a crash loop is loud, a plaintext fleet
+  // is not. AGENT_MTLS_REQUIRE=0 is the explicit consent that makes the degrade acceptable again.
+  const persistedPosture = await store.getAgentMtlsPosture();
+  const mtlsFailed = (reason: string): void => {
+    if (mtlsStartupFailureIsFatal(agentMtlsEnv, persistedPosture)) {
+      const why = agentMtlsEnv.explicit
+        ? "the explicitly configured mTLS agent channel could not start"
+        : "this deployment REQUIRES mTLS (graduated posture) and the mTLS agent channel could not start";
+      fastify.log.error(
+        {
+          event: "mtls.start.failed",
+          reason,
+          explicit: agentMtlsEnv.explicit,
+          required: agentMtlsEnv.requirePin ?? persistedPosture?.required ?? false,
+        },
+        `FATAL: ${why} — ${reason}. Refusing to admit plaintext agent sessions instead of serving a ` +
+          "channel that LOOKS mutually authenticated but is not. Fix the cause, or pin AGENT_MTLS_REQUIRE=0 " +
+          "/ set AGENT_MTLS=off to explicitly accept plain admission.",
+      );
+      process.exit(1);
+    }
+    agentMtlsOffDetail = reason;
+    fastify.log.error(
+      { event: "mtls.default.unavailable", reason },
+      `agent mTLS is ON by default but could not start (${reason}) — continuing WITHOUT it. ` +
+        "The agent channel is running unauthenticated at the transport; fix the cause or set AGENT_MTLS=off to silence this.",
+    );
+  };
+
+  const sanHosts = [...agentMtlsEnv.sans];
   for (const url of [AGENT_MTLS_PUBLIC_URL, process.env.PUBLIC_BASE_URL?.trim()]) {
     if (!url) continue;
     try {
@@ -283,36 +414,58 @@ if (Number.isFinite(AGENT_MTLS_PORT) && AGENT_MTLS_PORT > 0) {
   }
   const mtls = await AgentMtls.init(
     store,
-    { port: AGENT_MTLS_PORT, publicUrl: AGENT_MTLS_PUBLIC_URL, sanHosts },
+    { port: agentMtlsEnv.port, publicUrl: AGENT_MTLS_PUBLIC_URL, sanHosts },
     fastify.log,
   );
   const listener = mtls.createListener();
-  await new Promise<void>((resolve, reject) => {
-    listener.once("error", reject);
-    listener.listen(AGENT_MTLS_PORT, HOST, () => resolve());
+  const listening = await new Promise<string | null>((resolve) => {
+    listener.once("error", (err) => resolve(String((err as NodeJS.ErrnoException).code ?? err)));
+    listener.listen(agentMtlsEnv.port, HOST, () => resolve(null));
   });
-  const selfTestHost = HOST === "0.0.0.0" || HOST === "::" ? "127.0.0.1" : HOST;
-  const verdict = await mtls.selfTest(AGENT_MTLS_PORT, selfTestHost);
-  if (!verdict.safe) {
-    fastify.log.error(
-      { event: "mtls.selftest.failed", reason: verdict.reason },
-      `FATAL: the mTLS listener failed its client-cert verification self-test — ${verdict.reason}. ` +
-        "Refusing to start rather than serve an agent channel that LOOKS mutually authenticated but is not.",
-    );
-    process.exit(1);
+  if (listening !== null) {
+    mtlsFailed(`could not bind :${agentMtlsEnv.port} (${listening})`);
+  } else {
+    const selfTestHost = HOST === "0.0.0.0" || HOST === "::" ? "127.0.0.1" : HOST;
+    const verdict = await mtls.selfTest(agentMtlsEnv.port, selfTestHost);
+    if (!verdict.safe) {
+      listener.close();
+      mtlsFailed(`client-cert verification self-test failed: ${verdict.reason}`);
+    } else {
+      // The require posture: pinned by AGENT_MTLS_REQUIRE, else persisted + self-promoting (POL-134).
+      const posture = await MtlsPosture.load(store, agentMtlsEnv.requirePin);
+      agentMtlsPosture = posture;
+      // Evaluate once at boot: a fleet whose last certless machine was removed while the server was
+      // down graduates here rather than waiting for the next agent event.
+      await posture.evaluate(control, activity, fastify.log);
+      agentMtlsChannel = {
+        server: listener,
+        caPem: mtls.caPem,
+        signCsr: (csrPem, machineId) => mtls.signCsr(csrPem, machineId),
+        advertise: { port: agentMtlsEnv.port, ...(AGENT_MTLS_PUBLIC_URL ? { url: AGENT_MTLS_PUBLIC_URL } : {}) },
+        required: () => posture.required,
+        noteCertIssued: (machineId) => {
+          void control.noteMachineCertIssued(machineId);
+        },
+        noteMtlsHello: (machineId) => {
+          void (async () => {
+            const first = await control.noteMachineMtlsSeen(machineId);
+            if (first) {
+              const label = control.getMachine(machineId)?.label ?? machineId;
+              activity.push("good", `${label} now on mTLS`);
+            }
+            await posture.evaluate(control, activity, fastify.log);
+          })();
+        },
+      };
+      fastify.log.info(
+        { event: "mtls.listening", port: agentMtlsEnv.port, require: posture.required, publicUrl: AGENT_MTLS_PUBLIC_URL },
+        `mTLS agent channel up on :${agentMtlsEnv.port} (self-test passed: no-cert and rogue-CA handshakes rejected)` +
+          (posture.required
+            ? " — REQUIRED: the plain /agent channel only enrols + issues certs"
+            : " — migrating: the plain /agent channel still admits while the fleet picks up certs"),
+      );
+    }
   }
-  agentMtlsChannel = {
-    server: listener,
-    caPem: mtls.caPem,
-    signCsr: (csrPem, machineId) => mtls.signCsr(csrPem, machineId),
-    advertise: { port: AGENT_MTLS_PORT, ...(AGENT_MTLS_PUBLIC_URL ? { url: AGENT_MTLS_PUBLIC_URL } : {}) },
-    require: AGENT_MTLS_REQUIRE,
-  };
-  fastify.log.info(
-    { event: "mtls.listening", port: AGENT_MTLS_PORT, require: AGENT_MTLS_REQUIRE, publicUrl: AGENT_MTLS_PUBLIC_URL },
-    `mTLS agent channel up on :${AGENT_MTLS_PORT} (self-test passed: no-cert and rogue-CA handshakes rejected)` +
-      (AGENT_MTLS_REQUIRE ? " — REQUIRED: the plain /agent channel only enrols + issues certs" : " — roll-out mode: the plain /agent channel still admits"),
-  );
 }
 
 // The WS channels attach first so the remote-shell relay (POL-59) exists before REST — the
@@ -356,23 +509,30 @@ registerRestRoutes(
 );
 // The DevTools HTTP proxy (POL-67): the entry redirect + the frontend-file proxy, GATED under /api/v1.
 registerDevtoolsRoutes(fastify, devtoolsRelay);
+// The HTTPS settings surface (POL-70/D89), GATED under /api/v1: the TLS posture + (in self-signed
+// mode) the CA download the console's trust instructions hang off.
+registerHttpsRoutes(fastify, serverTls);
+// The agent-security settings surface (POL-134), GATED under /api/v1: the mTLS posture in operator
+// words + each machine's cert state, for the Settings card.
+registerAgentSecurityRoutes(fastify, {
+  control,
+  presence,
+  activity,
+  runtime: {
+    ...(agentMtlsPosture && agentMtlsChannel ? { posture: agentMtlsPosture, port: agentMtlsEnv.port } : {}),
+    ...(agentMtlsOffDetail ? { offDetail: agentMtlsOffDetail } : {}),
+  },
+});
 // TOP-LEVEL media serve route (GET /media/:id) — NOT /api/v1, so UNgated: players + the public wall
 // load uploads without a session, exactly like any external content URL (ids are unguessable).
 registerMediaServeRoute(fastify, media);
-// TOP-LEVEL ops endpoints (/healthz, /metrics) — NOT /api/v1, so UNgated for scrapers/liveness.
-registerOpsRoutes(fastify, {
-  control,
-  agentHub,
-  playerHub: hub,
-  thumbnails,
-  storeKind,
-  version: BUILD_VERSION,
-  revision: BUILD_REVISION,
-  startedAt: STARTED_AT,
-});
 // TOP-LEVEL, UNGATED provisioning routes (the netboot depot + GET /dist/agent/:arch) — NOT /api/v1,
 // so a machine with no operator session can boot and enrol entirely from the server.
 const provisionConfig = provisionConfigFromEnv();
+
+// POL-92 — cumulative counters for /metrics (depot artifact fetches). Held here, incremented by the
+// routes that serve the artifacts, rendered by the ops exporter.
+const counters = new CounterRegistry();
 
 // ── Image updates (POL-41): the scheduled rebuild hooks + the published manifest + urgency. The
 // daily refresh comes from IMAGE_REBUILD_CMD (e.g. `deploy/rebuild-image-docker.sh arm64`); the
@@ -389,16 +549,55 @@ const imageUpdates = new ImageUpdates(
   // Builds retained per arch (POL-45). Each retained build costs ~1.5GB of ISO on the depot volume,
   // so the chart exposes this as imageUpdates.retainBuilds and sizes the PVC from it.
   Math.max(1, Number(process.env.IMAGE_RETAIN_BUILDS?.trim() || DEFAULT_RETAIN_BUILDS)),
+  // The first-image build (POL-121) narrates itself into the Live Activity feed: on a fresh install
+  // nothing in the fleet can netboot until it lands, so the operator hears it from the console rather
+  // than from a Job log.
+  (severity, text) => {
+    activity.push(severity, text);
+    broadcaster.broadcast();
+  },
 );
+// Starts the schedule ticker AND, on a depot with no image at all, the one-shot first-image build.
 imageUpdates.start();
 
 // Pass the live enrollment singleton so GET /boot/grub.cfg (POL-33/D47) bakes the CURRENT token, the
 // same one the agent WS accepts, so a regenerate re-keys the netboot flow on the next boot with no drift.
 // The last argument lands a box's bootloader-install verdict (POL-58) in the Live Activity feed: the
 // operator finds out whether the install took from the console, not by rebooting the box to see.
-registerProvisionRoutes(fastify, provisionConfig, enrollment, imageUpdates, (severity, text) => {
-  activity.push(severity, text);
-  broadcaster.broadcast();
+registerProvisionRoutes(
+  fastify,
+  provisionConfig,
+  enrollment,
+  imageUpdates,
+  (severity, text) => {
+    activity.push(severity, text);
+    broadcaster.broadcast();
+  },
+  // POL-92 — every depot artifact a booting box pulls. `rate()` over this is what tells an operator
+  // a roll-out is actually reaching the fleet (and what a stampede looks like when it isn't).
+  (arch, file) =>
+    counters.inc(
+      "polyptic_depot_fetches_total",
+      "Netboot depot artifacts served (kernel, initrd, root image, …).",
+      { arch, file },
+    ),
+);
+
+// TOP-LEVEL ops endpoints (/healthz, /metrics) — NOT /api/v1, so UNgated for scrapers/liveness.
+// Registered here (after the depot) because the fleet metrics read the depot's manifests and the
+// counters the provisioning routes increment (POL-92).
+registerOpsRoutes(fastify, {
+  control,
+  agentHub,
+  playerHub: hub,
+  thumbnails,
+  presence,
+  counters,
+  images: imageUpdates,
+  storeKind,
+  version: BUILD_VERSION,
+  revision: BUILD_REVISION,
+  startedAt: STARTED_AT,
 });
 
 // ── Image-updates operator surface (POL-41), GATED under /api/v1. ──
@@ -499,9 +698,47 @@ fastify.log.info(
     `netboot[iso-amd64=${provisionSummary.imageAmd64} medium=${provisionSummary.bootMedium} ` +
     `signed-loaders=${provisionSummary.signedLoaders}] (Secure Boot: supported)`,
 );
+if (provisionSummary.bootMedium === "lean") {
+  // POL-122: a lean medium is a WIRED-ONLY dongle wearing the universal medium's filename. It boots
+  // no Wi-Fi screen, and nothing downstream can tell the difference by looking at the file. Say so.
+  fastify.log.warn(
+    { event: "provision.boot-medium.lean", bootDistDir: provisionConfig.bootDistDir },
+    "the published boot medium is LEAN (wired netboot only — no local payload, no Wi-Fi): " +
+      "Wi-Fi-only screens cannot boot from it. Re-bake it from a live image (Console ▸ Settings ▸ " +
+      "Image updates ▸ Full rebuild, then re-run the boot-medium Job / helm upgrade).",
+  );
+}
 
 // Start the periodic live-preview capture sweep (no-op when CAPTURE_INTERVAL_MS=0).
 capture.start();
+
+// Native-TLS banner (POL-70/D89) — before the auth banners so the transport story reads first.
+if (nativeTls) {
+  fastify.log.info(
+    { event: "tls.native", mode: serverTls.mode },
+    `serving NATIVE TLS (${serverTls.mode === "self-signed" ? "TLS_MODE=self-signed" : "TLS_CERT_FILE/TLS_KEY_FILE"}): ` +
+      "every route on this listener is https — including the netboot depot, which GRUB (no TLS stack) " +
+      "can NOT fetch. A netbooting fleet needs the boot paths on plain http (ingress split by host, or " +
+      "a plain-HTTP depot deployment).",
+  );
+  if (serverTls.mode === "self-signed" && serverTls.ca) {
+    fastify.log.info(
+      {
+        event: "tls.selfsigned",
+        change: selfSignedChange,
+        sans: serverTls.sans,
+        caFingerprintSha256: serverTls.ca.fingerprintSha256,
+      },
+      (selfSignedChange === "minted-ca"
+        ? "self-signed TLS: minted the deployment CA + server certificate (persisted — reused on every future boot). "
+        : selfSignedChange === "reminted-leaf"
+          ? "self-signed TLS: re-minted the server certificate from the persisted CA (new SANs / nearing expiry — trusted browsers stay green). "
+          : "self-signed TLS: reusing the persisted CA + server certificate. ") +
+        "Browsers warn until the CA is trusted once per device: download it from Console ▸ Settings ▸ HTTPS " +
+        `(fingerprint ${serverTls.ca.fingerprintSha256.slice(0, 23)}…).`,
+    );
+  }
+}
 
 // Auth boot banner: secure by default; make the dev shortcuts loud.
 if (!authConfig.enabled) {
@@ -518,11 +755,27 @@ if (!authConfig.enabled) {
         "COOKIE_SECRET to a long random value in any non-throwaway deployment.",
     );
   }
+  // ── POL-70/D89: HTTPS is the default posture; plain HTTP degrades LOUDLY, never refuses. ──
+  // Zero-click boot (non-negotiable #4) must keep working on a trusted plain-HTTP homelab, but the
+  // POL-59/POL-67 audits both carry the caveat "the tunnel is as trustworthy as the network" —
+  // HTTPS is the prerequisite for hostile networks, so serving auth over plain HTTP gets a banner.
   if (!authConfig.secureCookies) {
     fastify.log.warn(
       { event: "auth.cookie.insecure" },
-      "session cookies are NOT marked `secure` (SECURE_COOKIES unset / NODE_ENV≠production) so they " +
-        "work over http on localhost — PRODUCTION MUST BE SERVED OVER HTTPS with SECURE_COOKIES=true.",
+      "⚠️  AUTH OVER PLAIN HTTP: session cookies are NOT marked `secure` " +
+        (authConfig.publicScheme === "http"
+          ? "(PUBLIC_BASE_URL is http://)"
+          : "(SECURE_COOKIES unset / NODE_ENV≠production / no https PUBLIC_BASE_URL)") +
+        " — operator passwords and sessions ride the wire in CLEARTEXT, and the remote shell/DevTools " +
+        "tunnels are only as trustworthy as the network (POL-59/POL-67 audits). Fine for localhost or " +
+        "a trusted lab LAN; ANY OTHER DEPLOYMENT MUST BE SERVED OVER HTTPS (ingress TLS or " +
+        "TLS_CERT_FILE/TLS_KEY_FILE) — Secure cookies then follow automatically from an https " +
+        "PUBLIC_BASE_URL (POL-70/D89).",
+    );
+  } else if (authConfig.publicScheme === "https") {
+    fastify.log.info(
+      { event: "auth.cookie.secure" },
+      "session cookies are Secure (https PUBLIC_BASE_URL) — the operator surface is HTTPS end to end.",
     );
   }
 }
@@ -571,12 +824,17 @@ try {
       event: "server.listening",
       port: PORT,
       host: HOST,
+      scheme: nativeTls ? "https (native TLS)" : "http",
       ws: ["/agent", "/player", "/admin"],
       corsOrigin: CORS_ORIGIN,
       playerBaseUrl: PLAYER_BASE_URL,
       store: storeKind,
       enrollment: enrollment.open ? "open" : "gated",
-      agentMtls: agentMtlsChannel ? `:${AGENT_MTLS_PORT}${AGENT_MTLS_REQUIRE ? " (required)" : ""}` : "off",
+      // POL-134 — the boot log answers the operator's question in one word: required, migrating,
+      // or off (and when off under the default-on posture, WHY).
+      agentMtls: agentMtlsChannel
+        ? `:${agentMtlsEnv.port} (${agentMtlsPosture?.required ? "required" : "migrating"})`
+        : `off${agentMtlsOffDetail ? ` — ${agentMtlsOffDetail}` : ""}`,
       revision: control.state.revision,
       screens: control.getScreens().length,
       machines: control.getMachines().length,

@@ -35,7 +35,7 @@ The console and player are **Vite SPAs**; their production build (`vite build`) 
 docker run -d --name polyptic-server -p 8080:8080 \
   -e DATABASE_URL=postgres://polyptic:polyptic@your-db:5432/polyptic \
   -e COOKIE_SECRET="$(openssl rand -hex 32)" \
-  -e SECURE_COOKIES=true \
+  -e PUBLIC_BASE_URL=https://polyptic.example.com \
   -e CORS_ORIGIN=https://polyptic.example.com \
   -e POLYPTIC_ADMIN_EMAIL=alex@example.com \
   -e POLYPTIC_ADMIN_PASSWORD='change-me-now' \
@@ -45,7 +45,7 @@ docker run -d --name polyptic-server -p 8080:8080 \
   ghcr.io/<owner>/polyptic-server:0.1.0
 ```
 
-You bring your own Postgres (any reachable Postgres 16; `DATABASE_URL` points at it). Put a TLS-terminating reverse proxy in front so the cookie can be `SECURE_COOKIES=true`.
+You bring your own Postgres (any reachable Postgres 16; `DATABASE_URL` points at it). Put a TLS-terminating reverse proxy in front — the https `PUBLIC_BASE_URL` then flips the session cookie `Secure` automatically (POL-70/D89). No proxy? Set `TLS_CERT_FILE`/`TLS_KEY_FILE` (mounted PEMs) and the server terminates TLS itself.
 
 **2. docker-compose — server + Postgres together**
 
@@ -59,20 +59,20 @@ For a *released* image instead of a local build, set the `server.image` to `ghcr
 
 **3. Helm — on Kubernetes**
 
-The standalone chart in `deploy/helm/polyptic` deploys **only the server** (agents are not in the cluster — they live on the boxes). Bring your own Postgres via `externalDatabase.url`, or flip on the in-cluster Bitnami subchart:
+The chart in `deploy/helm/polyptic` deploys the **server and its database** — agents are not in the cluster, they live on the boxes. **One command, nothing to apply first** (POL-123/D108): `postgresql.enabled` defaults to true and the chart brings up its own Postgres (a first-party StatefulSet, not a subchart), generating the password and wiring `DATABASE_URL` for you.
 
 ```bash
 helm install polyptic deploy/helm/polyptic \
   --set image.repository=ghcr.io/<owner>/polyptic-server \
   --set image.tag=0.1.0 \
-  --set externalDatabase.url=postgres://polyptic:polyptic@my-pg:5432/polyptic \
   --set secrets.cookieSecret="$(openssl rand -hex 32)" \
-  --set config.corsOrigin=https://polyptic.example.com \
   --set ingress.enabled=true --set ingress.host=polyptic.example.com \
   --set ingress.tls.enabled=true
 ```
 
-If you leave `secrets.cookieSecret` empty the chart generates one on first install and preserves it across upgrades. Liveness/readiness hit the **ungated** `/healthz`; Prometheus scrape annotations target the ungated `/metrics`. See `deploy/helm/polyptic/README.md` for the full values reference.
+Point it at a managed Postgres instead with `--set postgresql.enabled=false --set externalDatabase.url=postgres://…`. Setting **both** is refused at template time, as is `config.store=postgres` with **neither** — the combination that used to install happily and then crash-loop the server on `getaddrinfo ENOTFOUND`.
+
+If you leave `secrets.cookieSecret` empty the chart generates one on first install and preserves it across upgrades (the bundled database's password works the same way). Liveness/readiness hit the **ungated** `/healthz`; Prometheus scrape annotations target the ungated `/metrics`. See `deploy/helm/polyptic/README.md` for the full values reference — including how to adopt an existing `polyptic-db` PVC.
 
 ### Server environment reference
 
@@ -84,7 +84,11 @@ Set on `docker run -e …`, the compose `environment:` / `.env`, or Helm `config
 | `STORE` | Registry backend: `postgres` or `memory` | `memory` is a test-only double; never run real with it. |
 | `PORT` | HTTP + WS listen port | Default `8080`. The image `EXPOSE`s 8080. |
 | `COOKIE_SECRET` | Signs the http-only session cookies | **Required** in prod; long random value (`openssl rand -hex 32`). |
-| `SECURE_COOKIES` | Mark session cookies `Secure` (HTTPS-only) | **Set `true` in production over HTTPS.** `NODE_ENV=production` implies it unless overridden. |
+| `PUBLIC_BASE_URL` | The ONE public origin (`scheme://host[:port]`) | **Set it in prod.** `https://` turns Secure cookies on automatically; a declared `http://` turns them off (browsers silently drop Secure cookies over http — login would never persist) with a loud boot banner (POL-70/D89). |
+| `SECURE_COOKIES` | Explicit override for the cookie `Secure` flag | Rarely needed: wins over `PUBLIC_BASE_URL`'s scheme and `NODE_ENV=production`; prefer setting `PUBLIC_BASE_URL`. |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | Native TLS: serve the whole listener over https | PEM paths, **both together** or the server refuses to boot. Prefer a terminating ingress/proxy; note native TLS also makes the netboot depot https, which GRUB cannot fetch (D47). |
+| `TLS_MODE` | `self-signed` → native TLS with a server-minted, store-persisted CA + cert | For hosts with no cert infrastructure. Download + trust the CA once via Console ▸ Settings ▸ HTTPS. Conflicts with the cert-file pair. |
+| `TLS_SANS` | Extra SANs for the self-signed certificate | Comma list; localhost/hostname/`PUBLIC_BASE_URL` host are automatic. |
 | `CORS_ORIGIN` | Comma-separated allowed browser origins | Only needed when a browser hits the API from a *different* origin than the bundled console (e.g. a separately hosted console). Same-origin bundled UI needs nothing here. |
 | `POLYPTIC_ADMIN_EMAIL` / `POLYPTIC_ADMIN_PASSWORD` | Seed the first operator on first boot | Created only if no users exist yet. Set both, or manage operators out-of-band. |
 | `POLYPTIC_BOOTSTRAP_TOKEN` | Shared agent-enrollment secret | Unset → **open mode** (auto-approve, dev only). Set → **gated**: agents show PENDING until approved. Same value on each agent. |
