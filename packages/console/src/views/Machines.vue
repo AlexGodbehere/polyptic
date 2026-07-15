@@ -39,7 +39,7 @@
 -->
 <script setup lang="ts">
 import { ref, computed, reactive, onMounted, onUnmounted } from "vue";
-import type { MachineView } from "@polyptic/protocol";
+import type { MachineView, PreRegistration } from "@polyptic/protocol";
 import { useConsoleStore } from "../stores/console";
 import { formatLastSeen, countLabel } from "../time";
 import ScreenRow from "../components/ScreenRow.vue";
@@ -63,6 +63,9 @@ const now = ref(Date.now());
 let clock: ReturnType<typeof setInterval> | null = null;
 onMounted(() => {
   clock = setInterval(() => (now.value = Date.now()), 1000);
+  // POL-104 — pre-registrations ride REST, not admin/state (they are operator-facing config, not
+  // desired state the fleet reconciles against).
+  void store.fetchPreRegistrations();
 });
 onUnmounted(() => {
   if (clock) clearInterval(clock);
@@ -79,6 +82,78 @@ function lastSeen(m: MachineView): string {
 
 function approve(m: MachineView): void {
   void store.approveMachine(m.id);
+}
+
+// ── POL-104: informative pending cards, bulk approve, pre-registration ─────────
+
+/**
+ * The facts an operator needs to tell THIS pending box from the 49 identical ones next to it: where it
+ * is dialling from, what it is, and which stick it came in on. All reported by the box (descriptive,
+ * never a credential — the enrolment token is what authenticated it). Absent facts are OMITTED, never
+ * rendered as a blank or a zero: an older agent reports less, and a card that says nothing beats one
+ * that says something untrue.
+ */
+function hardwareFacts(m: MachineView): { label: string; value: string; mono?: boolean }[] {
+  const facts: { label: string; value: string; mono?: boolean }[] = [];
+  if (m.ip) facts.push({ label: "IP", value: m.ip, mono: true });
+  const macs = m.hardware?.macs ?? [];
+  if (macs.length) facts.push({ label: macs.length > 1 ? "MACs" : "MAC", value: macs.join(", "), mono: true });
+  if (m.hardware?.dmiSerial) facts.push({ label: "Serial", value: m.hardware.dmiSerial, mono: true });
+  const model = [m.hardware?.dmiVendor, m.hardware?.dmiProduct].filter(Boolean).join(" ");
+  if (model) facts.push({ label: "Model", value: model });
+  if (m.hardware?.arch) facts.push({ label: "Arch", value: m.hardware.arch });
+  if (m.enrolledVia) {
+    facts.push({
+      label: "Enrolled via",
+      value: m.enrolledVia.revoked ? `${m.enrolledVia.name} (revoked)` : m.enrolledVia.name,
+    });
+  }
+  return facts;
+}
+
+const approvingAll = ref(false);
+
+/** Approve every pending machine. Sequential on purpose: each approval creates screens and bumps the
+ *  revision, and a burst of parallel writes buys nothing on a list an operator is watching. */
+async function approveAll(): Promise<void> {
+  if (approvingAll.value) return;
+  const machines = [...pending.value];
+  const yes = window.confirm(
+    `Approve all ${machines.length} pending machines? Their screens land in the Unplaced tray.`,
+  );
+  if (!yes) return;
+  approvingAll.value = true;
+  for (const m of machines) await store.approveMachine(m.id);
+  approvingAll.value = false;
+}
+
+const showImport = ref(false);
+const importCsv = ref("");
+const importAutoApprove = ref(true);
+const importing = ref(false);
+const importErrors = ref<{ line: number; text: string; reason: string }[]>([]);
+
+async function doImport(): Promise<void> {
+  if (importing.value || !importCsv.value.trim()) return;
+  importing.value = true;
+  const result = await store.importPreRegistrations(importCsv.value, importAutoApprove.value);
+  importing.value = false;
+  if (!result) return;
+  importErrors.value = result.errors;
+  // Keep the paste on screen when some lines were bad — the operator has to fix THOSE, not retype all.
+  if (result.errors.length === 0) {
+    importCsv.value = "";
+    showImport.value = false;
+  }
+}
+
+function removePreReg(record: PreRegistration): void {
+  const yes = window.confirm(
+    record.matchedMachineId
+      ? `Remove the pre-registration for "${record.label ?? record.id}"? The machine it already claimed keeps its name and approval.`
+      : `Remove the pre-registration for "${record.label ?? record.id}"?`,
+  );
+  if (yes) void store.removePreRegistration(record.id);
 }
 
 function reject(m: MachineView): void {
@@ -275,6 +350,11 @@ function showToast(message: string): void {
           <div class="section-head">
             Pending approval
             <span class="count-badge warn">{{ pending.length }}</span>
+            <!-- POL-104 — commissioning a rack was N blind clicks. One click, once you can SEE what
+                 you are approving (the facts row below). -->
+            <button v-if="pending.length > 1" class="btn-approve-all" :disabled="approvingAll" @click="approveAll">
+              {{ approvingAll ? "Approving…" : `Approve all ${pending.length}` }}
+            </button>
           </div>
           <div class="stack">
             <div v-for="m in pending" :key="m.id" class="machine pending">
@@ -287,6 +367,10 @@ function showToast(message: string): void {
                          (unlike the approved card's ghost input) — naming is part of approving. -->
                     <MachineName :machine="m" boxed />
                     <span class="machine-hex" :title="m.id">{{ machineIdTail(m.id) }}</span>
+                    <!-- POL-104 — a box that named/approved itself from a pre-registration. -->
+                    <span v-if="m.preRegistered" class="chip chip-accent" title="Matched a pre-registration">
+                      Pre-registered
+                    </span>
                   </div>
                 </div>
                 <!-- POL-107: enrolment is an ADMIN verb (the server 403s these routes for anyone
@@ -310,12 +394,90 @@ function showToast(message: string): void {
                   <button class="btn-approve pending-approve" @click="approve(m)">Approve</button>
                 </div>
               </div>
+
+              <!-- POL-104 — the facts an operator needs to tell THIS box from the 49 next to it.
+                   Everything here is reported by the box and is descriptive, never a credential. -->
+              <dl v-if="hardwareFacts(m).length" class="facts">
+                <div v-for="fact in hardwareFacts(m)" :key="fact.label" class="fact">
+                  <dt>{{ fact.label }}</dt>
+                  <dd :class="{ mono: fact.mono }">{{ fact.value }}</dd>
+                </div>
+              </dl>
+
               <div class="pending-note">
-                Nothing plays on this box until you approve it. Once you do,
-                {{ pendingScreensPhrase(m) }} will show up in the Unplaced tray, ready to place on
+                Nothing plays on this box until you approve it. Its screens show a holding board
+                carrying this same id, so you can walk the room and match a panel to a card. Once you
+                do, {{ pendingScreensPhrase(m) }} will show up in the Unplaced tray, ready to place on
                 the wall.
               </div>
             </div>
+          </div>
+        </section>
+
+        <!-- pre-registration (POL-104) -->
+        <section class="section">
+          <div class="section-head">
+            Pre-registered
+            <span v-if="store.preRegistrations.length" class="count-muted">
+              · {{ store.preRegistrations.length }}
+            </span>
+            <button class="btn-approve-all ghost" @click="showImport = !showImport">
+              {{ showImport ? "Cancel" : "Add boxes" }}
+            </button>
+          </div>
+
+          <div v-if="showImport" class="card prereg-form">
+            <p class="prereg-help">
+              One box per line: <code>label, identifier, tag, tag…</code> — the identifier is a MAC, a chassis serial,
+              or a machine id. A pre-registered box that dials in with a valid enrolment token names itself, takes its
+              tags and (below) approves itself, with no clicks. It is <strong>not</strong> a credential: a box still has
+              to present a valid token to get anywhere.
+            </p>
+            <textarea
+              v-model="importCsv"
+              class="prereg-csv"
+              rows="5"
+              placeholder="Lobby left, aa:bb:cc:dd:ee:01, floor-1, lobby&#10;Lobby right, SN-1234567, floor-1"
+            ></textarea>
+            <label class="prereg-check">
+              <input v-model="importAutoApprove" type="checkbox" />
+              <span>Approve these boxes automatically when they enrol</span>
+            </label>
+            <div class="prereg-actions">
+              <button class="btn-approve" :disabled="importing || !importCsv.trim()" @click="doImport">
+                {{ importing ? "Adding…" : "Add" }}
+              </button>
+            </div>
+            <ul v-if="importErrors.length" class="prereg-errors">
+              <li v-for="e in importErrors" :key="e.line">Line {{ e.line }}: {{ e.reason }} — “{{ e.text }}”</li>
+            </ul>
+          </div>
+
+          <div v-if="store.preRegistrations.length" class="stack">
+            <div v-for="r in store.preRegistrations" :key="r.id" class="machine prereg">
+              <div class="machine-row">
+                <div class="machine-id">
+                  <div class="machine-id-line">
+                    <span class="machine-label">{{ r.label ?? "(unnamed)" }}</span>
+                    <span class="machine-uuid">{{ r.mac ?? r.dmiSerial ?? r.machineId }}</span>
+                    <span v-if="r.matchedMachineId" class="chip chip-ok" :title="`Matched on ${r.matchedOn}`">
+                      Enrolled
+                    </span>
+                    <span v-else-if="r.autoApprove" class="chip chip-accent">Auto-approve</span>
+                    <span v-else class="chip">Manual approval</span>
+                  </div>
+                  <div class="machine-meta">
+                    <template v-if="r.tags.length">{{ r.tags.join(" · ") }} · </template>
+                    <template v-if="r.matchedMachineId">claimed by {{ r.matchedMachineId }}</template>
+                    <template v-else>waiting for the box to boot</template>
+                  </div>
+                </div>
+                <button class="btn-remove" @click="removePreReg(r)">Remove</button>
+              </div>
+            </div>
+          </div>
+          <div v-else class="muted-line">
+            No boxes pre-registered. Paste them in before they ship and commissioning is zero-click.
           </div>
         </section>
 
@@ -1034,6 +1196,125 @@ function showToast(message: string): void {
   padding: 8px 11px;
   border-radius: 8px;
   line-height: 1.5;
+}
+
+/* ── POL-104: pending hardware facts + pre-registration ─────────────────────── */
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--muted-bg);
+}
+.fact {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+.fact dt {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted2);
+}
+.fact dd {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg2);
+  overflow-wrap: anywhere;
+}
+.fact dd.mono {
+  font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+}
+.btn-approve-all {
+  margin-left: auto;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: none;
+  background: var(--primary);
+  color: var(--primary-fg);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-approve-all.ghost {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--fg2);
+  font-weight: 500;
+}
+.btn-approve-all:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.machine.prereg {
+  border-left: 3px solid var(--line);
+}
+.prereg-form {
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.prereg-help {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+.prereg-csv {
+  font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  color: var(--fg2);
+  background: var(--muted-bg);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+.prereg-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.prereg-actions {
+  display: flex;
+  gap: 8px;
+}
+.prereg-errors {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--bad);
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 20px;
+  background: var(--muted-bg);
+  color: var(--muted);
+}
+.chip-accent {
+  color: var(--accent-fg);
+  background: var(--accent-soft);
+}
+.chip-ok {
+  color: var(--ok);
+  background: var(--ok-soft);
 }
 
 /* screens under an approved machine */

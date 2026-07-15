@@ -37,10 +37,13 @@ import {
   CreateContentSourceBody,
   CreateCredentialProfileBody,
   CreateMuralBody,
+  CreatePreRegistrationBody,
   CreateSceneBody,
   IdentBody,
+  ImportPreRegistrationsBody,
   InspectBody,
   PlaceScreenBody,
+  PreRegistration,
   RebootBody,
   ShellArmBody,
   RenameMachineBody,
@@ -68,6 +71,7 @@ import type { FastifyInstance } from "fastify";
 import type { Screen, ScreenSlice } from "@polyptic/protocol";
 
 import { MediaTooLargeError, isFileTooLargeError, kindForMime, readField } from "./media";
+import { parsePreRegistrationCsv } from "./preregistration";
 
 import type { ActivityLog } from "./activity";
 import type { CaptureCoordinator } from "./capture";
@@ -88,6 +92,8 @@ export interface MediaConfig {
 
 const ScreenParams = z.object({ screenId: z.string().min(1) });
 const MachineParams = z.object({ machineId: z.string().min(1) });
+/** POL-104 — a pre-registration record id. */
+const PreRegistrationParams = z.object({ id: z.string().min(1) });
 const MuralParams = z.object({ id: z.string().min(1) });
 const MuralIdParams = z.object({ muralId: z.string().min(1) });
 const WallParams = z.object({ wallId: z.string().min(1) });
@@ -764,6 +770,87 @@ export function registerRestRoutes(
       delivered,
       closed,
     };
+  });
+
+  // ── Pre-registration (POL-104) ───────────────────────────────────────────────
+  //
+  // Boxes an operator declares BEFORE they ever boot, so commissioning a rack is a paste rather than
+  // N blind approvals. A record is NOT a credential and admits nothing: it is consulted only after a
+  // hello has already authenticated against a valid enrolment token, and all it decides is the box's
+  // name, its tags, and whether a human has to click Approve.
+
+  // GET /api/v1/pre-registrations -> { records }
+  fastify.get("/api/v1/pre-registrations", async () => ({
+    records: control.listPreRegistrations().map((r) => PreRegistration.parse(r)),
+  }));
+
+  // POST /api/v1/pre-registrations  CreatePreRegistrationBody -> the new record
+  fastify.post("/api/v1/pre-registrations", async (request, reply) => {
+    const body = CreatePreRegistrationBody.safeParse(request.body ?? {});
+    if (!body.success) {
+      return reply.code(400).send({ error: "invalid body", issues: body.error.issues });
+    }
+    if (!body.data.machineId && !body.data.dmiSerial && !body.data.mac) {
+      // A record with no key can never match anything — refuse it rather than let an operator believe
+      // a box is pre-registered when nothing will ever claim it.
+      return reply.code(400).send({ error: "a pre-registration needs a MAC, a DMI serial or a machine id" });
+    }
+    const record = await control.addPreRegistration(body.data);
+    fastify.log.info(
+      { event: "prereg.create", id: record.id, label: record.label, autoApprove: record.autoApprove },
+      "pre-registration created",
+    );
+    broadcaster.broadcast();
+    return { ok: true, record: PreRegistration.parse(record) };
+  });
+
+  // POST /api/v1/pre-registrations/import  { csv, autoApprove } -> { created, errors }
+  //
+  // A CSV paste, because the operator's source of truth is a delivery note or a spreadsheet of MAC
+  // labels. Bad lines are REPORTED with their line number, never silently dropped: a row that vanishes
+  // in a 50-box paste is a box that never auto-approves and nobody knows why.
+  fastify.post("/api/v1/pre-registrations/import", async (request, reply) => {
+    const body = ImportPreRegistrationsBody.safeParse(request.body ?? {});
+    if (!body.success) {
+      return reply.code(400).send({ error: "invalid body", issues: body.error.issues });
+    }
+    const parsed = parsePreRegistrationCsv(body.data.csv);
+    const created: PreRegistration[] = [];
+    for (const line of parsed.records) {
+      created.push(
+        await control.addPreRegistration({
+          ...(line.label ? { label: line.label } : {}),
+          tags: line.tags,
+          autoApprove: body.data.autoApprove,
+          ...(line.machineId ? { machineId: line.machineId } : {}),
+          ...(line.dmiSerial ? { dmiSerial: line.dmiSerial } : {}),
+          ...(line.mac ? { mac: line.mac } : {}),
+        }),
+      );
+    }
+    fastify.log.info(
+      { event: "prereg.import", created: created.length, errors: parsed.errors.length },
+      "pre-registrations imported",
+    );
+    broadcaster.broadcast();
+    return {
+      ok: true,
+      created: created.map((r) => PreRegistration.parse(r)),
+      errors: parsed.errors,
+    };
+  });
+
+  // DELETE /api/v1/pre-registrations/:id
+  fastify.delete("/api/v1/pre-registrations/:id", async (request, reply) => {
+    const params = PreRegistrationParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+    const ok = await control.removePreRegistration(params.data.id);
+    if (!ok) return reply.code(404).send({ error: `unknown pre-registration: ${params.data.id}` });
+    fastify.log.info({ event: "prereg.delete", id: params.data.id }, "pre-registration deleted");
+    broadcaster.broadcast();
+    return { ok: true };
   });
 
   // ── Removal (POL-14) — permanently forget a machine or a single screen ────────

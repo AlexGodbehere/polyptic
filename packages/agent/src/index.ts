@@ -73,6 +73,7 @@ import { selectKioskBrowser } from "./backends/chrome";
 import { selectBackend } from "./backends/select";
 import type { DisplayBackend } from "./backends/types";
 import { credentialPath, loadCredential, saveCredential } from "./credential";
+import { readHostIdentity } from "./hardware";
 import { DevtoolsManager } from "./devtools";
 import {
   certNeedsRenewal,
@@ -808,6 +809,10 @@ class Agent {
       browser: this.browser,
       outputs: this.outputs,
       hostname: osHostname(),
+      // POL-104 — what this box IS (MACs / DMI serial / arch). Descriptive, never a credential: the
+      // server uses it to match a pre-registration (after the token gate) and to make a pending
+      // approval card readable. Sampled per hello so a re-cabled box re-reports honestly.
+      hardware: readHostIdentity(),
       bootstrapToken: this.bootstrapToken,
       credential: this.credential ?? undefined,
       csrPem,

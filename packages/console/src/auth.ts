@@ -13,6 +13,7 @@
 import {
   AuthUser,
   ChangePasswordBody,
+  CreateEnrollmentTokenBody,
   CreateOperatorBody,
   DisplaySettings,
   EnrollmentInfo,
@@ -21,12 +22,14 @@ import {
   LoginBody,
   ImageUpdateInfo,
   NetbootInfo,
+  RotateEnrollmentTokenBody,
   Operator,
   UpdateImageSettingsBody,
   UpdateOperatorBody,
 } from "@polyptic/protocol";
 import type {
   ChangePasswordBody as ChangePasswordBodyT,
+  CreateEnrollmentTokenBody as CreateEnrollmentTokenBodyT,
   CreateOperatorBody as CreateOperatorBodyT,
   DisplaySettings as DisplaySettingsT,
   LoginBody as LoginBodyT,
@@ -142,9 +145,58 @@ export async function getEnrollment(): Promise<EnrollmentInfo> {
   return unwrapEnrollment(raw);
 }
 
-/** POST /api/v1/settings/enrollment/regenerate → mint a fresh gated token, returning the new info. */
+/** POST /api/v1/settings/enrollment/regenerate → rotate the baked token (24 h grace on the old one). */
 export async function regenerateEnrollment(): Promise<EnrollmentInfo> {
   const raw = await send<unknown>("POST", `${BASE_SETTINGS}/enrollment/regenerate`);
+  return unwrapEnrollment(raw);
+}
+
+// ── Enrolment tokens (POL-104) ───────────────────────────────────────────────
+
+/** POST /api/v1/settings/enrollment/tokens — cut a batch token (optionally expiring and/or capped). */
+export async function createEnrollmentToken(body: CreateEnrollmentTokenBodyT): Promise<EnrollmentInfo> {
+  const raw = await send<unknown>(
+    "POST",
+    `${BASE_SETTINGS}/enrollment/tokens`,
+    CreateEnrollmentTokenBody.parse(body),
+  );
+  return unwrapEnrollment(raw);
+}
+
+/** POST …/tokens/:id/rotate — cut a successor; the OLD secret keeps enrolling for `graceHours`. */
+export async function rotateEnrollmentToken(id: string, graceHours: number): Promise<EnrollmentInfo> {
+  const raw = await send<unknown>(
+    "POST",
+    `${BASE_SETTINGS}/enrollment/tokens/${encodeURIComponent(id)}/rotate`,
+    RotateEnrollmentTokenBody.parse({ graceHours }),
+  );
+  return unwrapEnrollment(raw);
+}
+
+/** POST …/tokens/:id/revoke — block NEW enrolments. Machines already enrolled on it keep running. */
+export async function revokeEnrollmentToken(id: string): Promise<EnrollmentInfo> {
+  const raw = await send<unknown>(
+    "POST",
+    `${BASE_SETTINGS}/enrollment/tokens/${encodeURIComponent(id)}/revoke`,
+  );
+  return unwrapEnrollment(raw);
+}
+
+/** POST …/tokens/:id/bake — make this the token that new boot media carry. */
+export async function bakeEnrollmentToken(id: string): Promise<EnrollmentInfo> {
+  const raw = await send<unknown>(
+    "POST",
+    `${BASE_SETTINGS}/enrollment/tokens/${encodeURIComponent(id)}/bake`,
+  );
+  return unwrapEnrollment(raw);
+}
+
+/** DELETE …/tokens/:id — forget it entirely (machines enrolled on it are untouched). */
+export async function deleteEnrollmentToken(id: string): Promise<EnrollmentInfo> {
+  const raw = await send<unknown>(
+    "DELETE",
+    `${BASE_SETTINGS}/enrollment/tokens/${encodeURIComponent(id)}`,
+  );
   return unwrapEnrollment(raw);
 }
 

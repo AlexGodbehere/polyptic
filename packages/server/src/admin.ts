@@ -89,6 +89,8 @@ export class Presence {
    *  ring (not just the latest sample) is what lets an operator surface, and a future feature graph,
    *  a few minutes of history without touching the store or the <150ms path. */
   private readonly vitals = new Map<string, MachineVitals[]>();
+  /** POL-104 — machineId → the peer address of its live agent socket. Live-only (see `machineAddress`). */
+  private readonly addresses = new Map<string, string>();
   /** machineId → ms epoch of the last heartbeat we accepted (with or WITHOUT vitals — a pre-POL-92
    *  agent still proves liveness). Drives `polyptic_machine_last_seen_seconds`. */
   private readonly lastHeartbeat = new Map<string, number>();
@@ -114,6 +116,8 @@ export class Presence {
     const n = (this.agentConns.get(machineId) ?? 0) - 1;
     if (n <= 0) {
       this.agentConns.delete(machineId);
+      // POL-104 — the box is gone, and so is the address it was dialling from.
+      this.addresses.delete(machineId);
       this.agentChannel.delete(machineId);
     } else this.agentConns.set(machineId, n);
   }
@@ -267,6 +271,20 @@ export class Presence {
     return this.lastHeartbeat.get(machineId);
   }
 
+  // ── Peer address (POL-104) ─────────────────────────────────────────────────
+
+  /** The address the agent's socket is coming from, recorded on hello. LIVE-ONLY, exactly like the
+   *  rest of Presence: an IP is a fact about a connection, and a connection that is gone has none —
+   *  persisting it would leave an offline card asserting an address that may now belong elsewhere. */
+  noteMachineAddress(machineId: string, address: string): void {
+    // Normalize the IPv4-mapped IPv6 form node hands us for a plain v4 peer (`::ffff:10.0.0.7`).
+    this.addresses.set(machineId, address.replace(/^::ffff:/, ""));
+  }
+
+  machineAddress(machineId: string): string | undefined {
+    return this.addresses.get(machineId);
+  }
+
   /** A machine was REMOVED (POL-14) — drop everything we hold about it, so an id that is reused
    *  never inherits a dead box's vitals. */
   forgetMachine(machineId: string): void {
@@ -274,6 +292,7 @@ export class Presence {
     this.lastHeartbeat.delete(machineId);
     this.rebootingSince.delete(machineId);
     this.agentConns.delete(machineId);
+    this.addresses.delete(machineId);
   }
 }
 
@@ -287,8 +306,14 @@ export function buildAdminState(
   playerHub: PlayerHub,
   presence: Presence,
   activity: ActivityLog,
+  /** POL-104 — the enrolment policy, so a machine's card can say which token it came in on and whether
+   *  that token has since been revoked. Optional: unit tests that build a view need no policy. */
+  enrollment?: { list(): { id: string; revokedAt: string | null }[] },
 ): ServerToAdminMessage {
   const screens = control.getScreens();
+  const revokedTokenIds = new Set(
+    (enrollment?.list() ?? []).filter((t) => t.revokedAt !== null).map((t) => t.id),
+  );
 
   const machines: MachineView[] = control.getMachines().map((machine) => {
     const machineScreens: ScreenView[] = screens
@@ -329,6 +354,22 @@ export function buildAdminState(
       // a machine that has since gone dark is not health data, it is an epitaph; the console says
       // "System stats unavailable while offline" instead of drawing a stale meter.
       vitals: presence.isMachineOnline(machine.id) ? presence.machineVitals(machine.id) : undefined,
+      // POL-104 — what the box IS. Persisted (so a PENDING card is informative even between boots)
+      // and shown on the card an operator has to make a decision about: 50 identical UUIDs was the
+      // whole reason mass commissioning was 50 blind approvals.
+      hardware: machine.hardware,
+      // Live-only: an IP describes a connection, so an offline box has none.
+      ip: presence.isMachineOnline(machine.id) ? presence.machineAddress(machine.id) : undefined,
+      enrolledVia: machine.enrolledTokenId
+        ? {
+            tokenId: machine.enrolledTokenId,
+            name: machine.enrolledTokenName ?? machine.enrolledTokenId,
+            // Revoked ≠ dead: this box holds a durable per-machine credential and keeps running. The
+            // chip is provenance ("came in on a stick we have since cut"), not a status.
+            revoked: revokedTokenIds.has(machine.enrolledTokenId),
+          }
+        : undefined,
+      preRegistered: machine.preRegistered ?? false,
       // POL-134 — the agent channel of the live session + persisted cert state, for the Settings
       // card and the Machines view ("is this box actually on mTLS?").
       agentChannel: presence.machineChannel(machine.id),
@@ -360,6 +401,8 @@ interface BroadcasterDeps {
   adminHub: AdminHub;
   activity: ActivityLog;
   log: FastifyBaseLogger;
+  /** POL-104 — the live enrolment policy (which token a machine came in on, and whether it is revoked). */
+  enrollment?: { list(): { id: string; revokedAt: string | null }[] };
 }
 
 /**
@@ -379,6 +422,7 @@ export class AdminBroadcaster {
       this.deps.playerHub,
       this.deps.presence,
       this.deps.activity,
+      this.deps.enrollment,
     );
   }
 

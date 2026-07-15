@@ -19,16 +19,20 @@ import type {
   ContentSource,
   CreateContentSourceBody,
   CreateCredentialProfileBody,
+  CreateEnrollmentTokenBody,
+  CreatePreRegistrationBody,
   CredentialProfileTestResult,
   CredentialProfileView,
   DisplaySettings,
   EnrollmentInfo,
+  EnrollmentTokenView,
   LoginBody,
   MachineView,
   Mural,
   NetbootInfo,
   OperatorRole,
   Placement,
+  PreRegistration,
   Scene,
   ScreenView,
   UpdateContentSourceBody,
@@ -111,8 +115,11 @@ export interface ConsoleState {
   /** Whether the initial /auth/me probe has resolved. The router guard runs it exactly once per load
    *  and then trusts `currentUser`, so navigations don't re-hit the network. */
   sessionChecked: boolean;
-  /** Enrollment-token visibility for Settings + the cold-start wizard (open mode vs gated token). */
+  /** Enrollment-token visibility for Settings + the cold-start wizard (open mode vs gated token).
+   *  POL-104: `enrollment.tokens` is the batch-token table the Settings card renders. */
   enrollment: EnrollmentInfo | null;
+  /** POL-104 — boxes an operator declared before they ever booted (Machines ▸ Pre-registered). */
+  preRegistrations: PreRegistration[];
   /** Netboot info for Settings (POL-33): control-plane base, the `/boot/grub.cfg` boot config URL,
    *  and the optional boot-medium download. Null until the Settings view fetches it. */
   netboot: NetbootInfo | null;
@@ -168,6 +175,7 @@ export const useConsoleStore = defineStore("console", {
     currentUser: null,
     sessionChecked: false,
     enrollment: null,
+    preRegistrations: [],
     netboot: null,
     imageUpdates: null,
     settings: null,
@@ -244,9 +252,14 @@ export const useConsoleStore = defineStore("console", {
       return state.enrollment?.mode === "open";
     },
 
-    /** The gated bootstrap token, when in gated mode and loaded; else null. */
+    /** The gated bootstrap token (POL-104: the BAKE token's secret), when gated and loaded; else null. */
     enrollmentToken(state): string | null {
       return state.enrollment?.mode === "gated" ? state.enrollment.token : null;
+    },
+
+    /** POL-104 — every enrolment token, newest first (the Settings table). */
+    enrollmentTokens(state): EnrollmentTokenView[] {
+      return [...(state.enrollment?.tokens ?? [])].reverse();
     },
 
     /** Whether on-screen badges are shown fleet-wide (POL-6). Defaults to false until settings load. */
@@ -566,13 +579,114 @@ export const useConsoleStore = defineStore("console", {
       }
     },
 
-    /** Mint a fresh gated bootstrap token, replacing the shown one. Returns false (no throw) on error. */
+    /** Rotate the baked token (POL-104: the old secret keeps enrolling for its 24 h grace window, so
+     *  media already flashed are not stranded). Returns false (no throw) on error. */
     async regenerateEnrollment(): Promise<boolean> {
       try {
         this.enrollment = await auth.regenerateEnrollment();
         return true;
       } catch (err) {
         console.error("[console] regenerateEnrollment failed", err);
+        return false;
+      }
+    },
+
+    // ── Enrolment tokens (POL-104) ───────────────────────────────────────────────
+
+    async createEnrollmentToken(body: CreateEnrollmentTokenBody): Promise<boolean> {
+      try {
+        this.enrollment = await auth.createEnrollmentToken(body);
+        return true;
+      } catch (err) {
+        console.error("[console] createEnrollmentToken failed", err);
+        return false;
+      }
+    },
+
+    async rotateEnrollmentToken(id: string, graceHours: number): Promise<boolean> {
+      try {
+        this.enrollment = await auth.rotateEnrollmentToken(id, graceHours);
+        return true;
+      } catch (err) {
+        console.error("[console] rotateEnrollmentToken failed", err);
+        return false;
+      }
+    },
+
+    async revokeEnrollmentToken(id: string): Promise<boolean> {
+      try {
+        this.enrollment = await auth.revokeEnrollmentToken(id);
+        return true;
+      } catch (err) {
+        console.error("[console] revokeEnrollmentToken failed", err);
+        return false;
+      }
+    },
+
+    async bakeEnrollmentToken(id: string): Promise<boolean> {
+      try {
+        this.enrollment = await auth.bakeEnrollmentToken(id);
+        return true;
+      } catch (err) {
+        console.error("[console] bakeEnrollmentToken failed", err);
+        return false;
+      }
+    },
+
+    async deleteEnrollmentToken(id: string): Promise<boolean> {
+      try {
+        this.enrollment = await auth.deleteEnrollmentToken(id);
+        return true;
+      } catch (err) {
+        console.error("[console] deleteEnrollmentToken failed", err);
+        return false;
+      }
+    },
+
+    // ── Pre-registration (POL-104) ───────────────────────────────────────────────
+
+    async fetchPreRegistrations(): Promise<void> {
+      try {
+        this.preRegistrations = await api.fetchPreRegistrations();
+      } catch (err) {
+        console.error("[console] fetchPreRegistrations failed", err);
+      }
+    },
+
+    async addPreRegistration(body: CreatePreRegistrationBody): Promise<boolean> {
+      try {
+        await api.createPreRegistration(body);
+        await this.fetchPreRegistrations();
+        return true;
+      } catch (err) {
+        console.error("[console] addPreRegistration failed", err);
+        return false;
+      }
+    },
+
+    /** Paste a CSV of boxes. Returns the per-line errors so the view can show WHICH rows were bad —
+     *  a silently-dropped row in a 50-box paste is a box that never auto-approves and nobody knows why. */
+    async importPreRegistrations(
+      csv: string,
+      autoApprove: boolean,
+    ): Promise<{ created: number; errors: { line: number; text: string; reason: string }[] } | null> {
+      try {
+        const result = await api.importPreRegistrations(csv, autoApprove);
+        await this.fetchPreRegistrations();
+        return { created: result.created.length, errors: result.errors };
+      } catch (err) {
+        console.error("[console] importPreRegistrations failed", err);
+        return null;
+      }
+    },
+
+    async removePreRegistration(id: string): Promise<boolean> {
+      try {
+        await api.deletePreRegistration(id);
+        await this.fetchPreRegistrations();
+        return true;
+      } catch (err) {
+        console.error("[console] removePreRegistration failed", err);
         return false;
       }
     },

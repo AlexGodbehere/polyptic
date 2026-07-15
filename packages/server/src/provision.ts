@@ -731,9 +731,13 @@ export function registerProvisionRoutes(
   const reportBucket = { tokens: REPORT_BURST, refilledAt: Date.now() };
   fastify.post("/boot/report", async (request, reply) => {
     if (!enrollment.open) {
-      const provided = bearerToken(request);
-      const expected = enrollment.currentToken;
-      if (expected === undefined || provided === undefined || !constantTimeEqual(provided, expected)) {
+      // POL-104 — ANY token this deployment RECOGNISES passes, including one we have since revoked or
+      // expired. Deliberate: a box booting on a stick whose token was just cut is exactly the box whose
+      // boot report an operator most needs to read, and this route grants no authority — it is a
+      // rate-limited telemetry line that mutates no registry state. Gating it on the CURRENT bake token
+      // (the pre-POL-104 behaviour) would have gone silent on every medium in the field the moment an
+      // operator rotated.
+      if (!enrollment.knowsSecret(bearerToken(request))) {
         return reply.code(401).send({ error: "unauthorized" });
       }
     }

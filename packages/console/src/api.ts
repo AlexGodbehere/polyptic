@@ -12,11 +12,14 @@ import {
   CreateContentSourceBody,
   CreateCredentialProfileBody,
   CreateMuralBody,
+  CreatePreRegistrationBody,
   CreateSceneBody,
   IdentBody,
+  ImportPreRegistrationsBody,
   RenameMachineBody,
   InspectBody,
   PlaceScreenBody,
+  PreRegistration,
   RenameMuralBody,
   RenameScreenBody,
   RenameVideoWallBody,
@@ -29,6 +32,7 @@ import {
 } from "@polyptic/protocol";
 import type {
   ContentSource,
+  CreatePreRegistrationBody as CreatePreRegistrationBodyT,
   CredentialProfileTestResult,
   CredentialProfileView,
   Scene,
@@ -198,6 +202,41 @@ export function placeScreen(screenId: string, body: PlaceScreenBody): Promise<un
 /** DELETE /api/v1/screens/:screenId/placement — return the screen to the unplaced tray. */
 export function unplaceScreen(screenId: string): Promise<unknown> {
   return send("DELETE", `/screens/${encodeURIComponent(screenId)}/placement`);
+}
+
+// ── Pre-registration (POL-104) ───────────────────────────────────────────────
+
+/** GET /api/v1/pre-registrations — the boxes an operator declared before they ever booted. */
+export async function fetchPreRegistrations(): Promise<PreRegistration[]> {
+  const raw = await send<{ records?: unknown }>("GET", "/pre-registrations");
+  return PreRegistration.array().parse(raw?.records ?? []);
+}
+
+/** POST /api/v1/pre-registrations — declare one box. */
+export function createPreRegistration(body: CreatePreRegistrationBodyT): Promise<unknown> {
+  return send("POST", "/pre-registrations", CreatePreRegistrationBody.parse(body));
+}
+
+/** POST /api/v1/pre-registrations/import — paste a CSV of boxes. Bad lines come back with their
+ *  line number rather than being dropped in silence. */
+export async function importPreRegistrations(
+  csv: string,
+  autoApprove: boolean,
+): Promise<{ created: PreRegistration[]; errors: { line: number; text: string; reason: string }[] }> {
+  const raw = await send<{ created?: unknown; errors?: unknown }>(
+    "POST",
+    "/pre-registrations/import",
+    ImportPreRegistrationsBody.parse({ csv, autoApprove }),
+  );
+  return {
+    created: PreRegistration.array().parse(raw?.created ?? []),
+    errors: (raw?.errors ?? []) as { line: number; text: string; reason: string }[],
+  };
+}
+
+/** DELETE /api/v1/pre-registrations/:id */
+export function deletePreRegistration(id: string): Promise<unknown> {
+  return send("DELETE", `/pre-registrations/${encodeURIComponent(id)}`);
 }
 
 // ── Machines (enrollment, Phase 2b) ──────────────────────────────────────────

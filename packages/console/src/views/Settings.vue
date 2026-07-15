@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { OperatorRole } from "@polyptic/protocol";
-import type { AgentSecurityInfo, HttpsInfo, ImageBuild, Operator } from "@polyptic/protocol";
+import type { AgentSecurityInfo, EnrollmentTokenView, HttpsInfo, ImageBuild, Operator } from "@polyptic/protocol";
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 
@@ -75,18 +75,123 @@ async function setBadges(show: boolean): Promise<void> {
   }
 }
 
-// ── Enrolment token ────────────────────────────────────────────────────────────
-const regenerating = ref(false);
+// ── Enrolment tokens (POL-104) ─────────────────────────────────────────────────
+//
+// One flat token baked into every stick is a fleet credential: a stick that walks out compromises
+// enrolment for the whole estate, and rotating it meant re-flashing every medium. The card is now a
+// TABLE of named, scoped, individually revocable tokens. Exactly one is BAKED into new boot media.
+const busyToken = ref<string | null>(null);
+const showNewToken = ref(false);
+const newTokenName = ref("");
+const newTokenExpiryDays = ref<string>("");
+const newTokenMax = ref<string>("");
+const newTokenBake = ref(false);
 
-async function regenerate(): Promise<void> {
-  if (regenerating.value) return;
-  if (!window.confirm("Regenerate the enrolment token? Machines still using the old token can no longer dial in.")) {
+/** A token's state, in the operator's language. `live` is the only one that enrols anything. */
+type TokenState = "live" | "expired" | "revoked" | "used-up";
+
+function tokenState(token: EnrollmentTokenView): TokenState {
+  if (token.revokedAt) return "revoked";
+  if (token.expiresAt && Date.parse(token.expiresAt) <= Date.now()) return "expired";
+  if (token.maxEnrollments !== null && token.uses >= token.maxEnrollments) return "used-up";
+  return "live";
+}
+
+function tokenScope(token: EnrollmentTokenView): string {
+  const parts: string[] = [];
+  parts.push(
+    token.maxEnrollments === null
+      ? `${token.uses} enrolled · no limit`
+      : `${token.uses} / ${token.maxEnrollments} enrolled`,
+  );
+  if (token.expiresAt) {
+    const when = new Date(token.expiresAt);
+    parts.push(
+      when.getTime() <= Date.now()
+        ? `expired ${when.toLocaleDateString()}`
+        : `expires ${when.toLocaleDateString()}`,
+    );
+  } else {
+    parts.push("never expires");
+  }
+  return parts.join(" · ");
+}
+
+async function createToken(): Promise<void> {
+  const name = newTokenName.value.trim();
+  if (!name || busyToken.value) return;
+  busyToken.value = "new";
+  const days = Number.parseInt(newTokenExpiryDays.value, 10);
+  const max = Number.parseInt(newTokenMax.value, 10);
+  const ok = await store.createEnrollmentToken({
+    name,
+    ...(Number.isFinite(days) && days > 0 ? { expiresInDays: days } : {}),
+    ...(Number.isFinite(max) && max > 0 ? { maxEnrollments: max } : {}),
+    bake: newTokenBake.value,
+  });
+  busyToken.value = null;
+  if (!ok) {
+    showToast("Could not create the token");
     return;
   }
-  regenerating.value = true;
-  await store.regenerateEnrollment();
-  regenerating.value = false;
-  showToast("New enrolment token generated");
+  showNewToken.value = false;
+  newTokenName.value = "";
+  newTokenExpiryDays.value = "";
+  newTokenMax.value = "";
+  newTokenBake.value = false;
+  showToast(`Token "${name}" created`);
+}
+
+async function rotateToken(token: EnrollmentTokenView): Promise<void> {
+  if (busyToken.value) return;
+  const yes = window.confirm(
+    `Rotate "${token.name}"?\n\nA new secret is cut and baked into future boot media. The OLD secret keeps ` +
+      `enrolling for 24 more hours (the grace window), so boots in flight and media not yet re-flashed are ` +
+      `not stranded. Re-bake your boot media before the window closes.`,
+  );
+  if (!yes) return;
+  busyToken.value = token.id;
+  const ok = await store.rotateEnrollmentToken(token.id, 24);
+  busyToken.value = null;
+  showToast(ok ? "Token rotated — old secret valid for 24 h" : "Could not rotate the token");
+}
+
+async function revokeToken(token: EnrollmentTokenView): Promise<void> {
+  if (busyToken.value) return;
+  const yes = window.confirm(
+    `Revoke "${token.name}"?\n\nNo NEW machine can enrol with it — including a box booting from a stick that ` +
+      `carries it. The ${token.uses} machine(s) already enrolled on it hold their own per-machine credential ` +
+      `and KEEP RUNNING; to take one of those off the wall, reject it in Machines.`,
+  );
+  if (!yes) return;
+  busyToken.value = token.id;
+  const ok = await store.revokeEnrollmentToken(token.id);
+  busyToken.value = null;
+  showToast(ok ? `"${token.name}" revoked — running machines untouched` : "Could not revoke the token");
+}
+
+async function bakeToken(token: EnrollmentTokenView): Promise<void> {
+  if (busyToken.value) return;
+  busyToken.value = token.id;
+  const ok = await store.bakeEnrollmentToken(token.id);
+  busyToken.value = null;
+  showToast(ok ? `New boot media will carry "${token.name}"` : "Could not select the token");
+}
+
+async function deleteToken(token: EnrollmentTokenView): Promise<void> {
+  if (busyToken.value) return;
+  const last = store.enrollmentTokens.length === 1;
+  const yes = window.confirm(
+    last
+      ? `Delete the LAST enrolment token?\n\nEnrolment goes back to OPEN mode: every agent that connects is ` +
+          `auto-registered and auto-approved, with no token at all.`
+      : `Delete "${token.name}"? Machines already enrolled on it keep running.`,
+  );
+  if (!yes) return;
+  busyToken.value = token.id;
+  const ok = await store.deleteEnrollmentToken(token.id);
+  busyToken.value = null;
+  showToast(ok ? "Token deleted" : "Could not delete the token");
 }
 
 // ── HTTPS (POL-70/D89) ─────────────────────────────────────────────────────────
@@ -855,33 +960,124 @@ async function onSignOut(): Promise<void> {
         </div>
       </section>
 
-      <!-- Enrolment token ------------------------------------------------------ -->
+      <!-- Enrolment tokens (POL-104) — admin-only (POL-107) ---------------------- -->
       <section v-if="store.isAdmin" class="card">
-        <h2 class="card-title">Enrolment token</h2>
-        <p class="card-sub gap">The shared secret new machines present when they dial in.</p>
+        <h2 class="card-title">Enrolment tokens</h2>
+        <p class="card-sub gap">
+          The secrets a new machine presents when it first dials in. Cut one per batch or site, scope it with an
+          expiry and a cap, and revoke it on its own — a lost stick then costs you one batch, not the estate.
+        </p>
 
         <div v-if="store.enrollment === null" class="hint">Loading…</div>
 
-        <div v-else-if="store.enrollmentOpen" class="open-note">
-          <span class="badge-ok">Open mode</span>
-          <span>
-            Any agent that connects is auto-registered — no token required. Set an enrolment secret on the server to
-            gate access.
-          </span>
-        </div>
+        <template v-else-if="store.enrollmentOpen">
+          <div class="open-note">
+            <span class="badge-ok">Open mode</span>
+            <span>
+              Any agent that connects is auto-registered <em>and auto-approved</em> — no token, no approval. Fine on a
+              dev box, never on a real fleet.
+            </span>
+          </div>
+          <button type="button" class="btn-ghost-sm gap-sm" :disabled="busyToken === 'new'" @click="showNewToken = true">
+            Gate enrolment — create a token
+          </button>
+        </template>
 
         <template v-else>
-          <div class="field-row">
-            <code class="mono-field">{{ store.enrollmentToken }}</code>
-            <button type="button" class="btn-ghost-sm" @click="copy(store.enrollmentToken ?? '', 'Enrolment token copied')">
-              Copy
-            </button>
-            <button type="button" class="btn-ghost-sm" :disabled="regenerating" @click="regenerate">
-              {{ regenerating ? "Regenerating…" : "Regenerate" }}
-            </button>
-          </div>
-          <p class="hint gap-sm">Regenerating revokes access for machines that haven't dialled in yet.</p>
+          <ul class="token-list">
+            <li v-for="token in store.enrollmentTokens" :key="token.id" class="token" :class="tokenState(token)">
+              <div class="token-head">
+                <span class="token-name">{{ token.name }}</span>
+                <span v-if="token.bake" class="chip chip-bake" title="Baked into /boot/grub.cfg and the next boot medium">
+                  On new media
+                </span>
+                <span v-if="token.legacy" class="chip" title="The original bootstrap token, carried by every medium already flashed">
+                  Original
+                </span>
+                <span class="chip" :class="`chip-${tokenState(token)}`">
+                  {{
+                    tokenState(token) === "live"
+                      ? "Live"
+                      : tokenState(token) === "revoked"
+                        ? "Revoked"
+                        : tokenState(token) === "expired"
+                          ? "Expired"
+                          : "Used up"
+                  }}
+                </span>
+              </div>
+              <div class="token-secret">
+                <code class="mono-field">{{ token.secret }}</code>
+                <button type="button" class="btn-ghost-sm" @click="copy(token.secret, 'Token copied')">Copy</button>
+              </div>
+              <p class="hint">{{ tokenScope(token) }}</p>
+              <div class="token-actions">
+                <button
+                  v-if="!token.bake && tokenState(token) === 'live'"
+                  type="button"
+                  class="btn-ghost-sm"
+                  :disabled="busyToken !== null"
+                  @click="bakeToken(token)"
+                >
+                  Bake into new media
+                </button>
+                <button
+                  v-if="tokenState(token) !== 'revoked'"
+                  type="button"
+                  class="btn-ghost-sm"
+                  :disabled="busyToken !== null"
+                  @click="rotateToken(token)"
+                >
+                  Rotate
+                </button>
+                <button
+                  v-if="tokenState(token) !== 'revoked'"
+                  type="button"
+                  class="btn-ghost-sm danger"
+                  :disabled="busyToken !== null"
+                  @click="revokeToken(token)"
+                >
+                  Revoke
+                </button>
+                <button type="button" class="btn-ghost-sm danger" :disabled="busyToken !== null" @click="deleteToken(token)">
+                  Delete
+                </button>
+              </div>
+            </li>
+          </ul>
+
+          <p class="hint gap-sm">
+            Revoking blocks NEW enrolments only — a machine that already enrolled holds its own per-machine credential
+            and keeps running. Rotating leaves the old secret alive for 24 hours, so media already flashed (and boots in
+            flight) still land; re-bake your boot medium inside that window.
+          </p>
+
+          <button type="button" class="btn-ghost-sm gap-sm" @click="showNewToken = !showNewToken">
+            {{ showNewToken ? "Cancel" : "New token" }}
+          </button>
         </template>
+
+        <form v-if="showNewToken" class="token-form" @submit.prevent="createToken">
+          <label class="token-field">
+            <span>Name</span>
+            <input v-model="newTokenName" type="text" placeholder="Floor 3 rollout" required />
+          </label>
+          <label class="token-field">
+            <span>Expires in (days)</span>
+            <input v-model="newTokenExpiryDays" type="number" min="1" placeholder="never" />
+          </label>
+          <label class="token-field">
+            <span>Max machines</span>
+            <input v-model="newTokenMax" type="number" min="1" placeholder="unlimited" />
+          </label>
+          <label class="token-check">
+            <input v-model="newTokenBake" type="checkbox" />
+            <span>Bake into new boot media</span>
+          </label>
+          <button type="submit" class="btn-ghost-sm" :disabled="busyToken === 'new' || !newTokenName.trim()">
+            {{ busyToken === "new" ? "Creating…" : "Create token" }}
+          </button>
+        </form>
       </section>
 
       <!-- HTTPS (POL-70/D89) ----------------------------------------------------- -->
@@ -1937,6 +2133,104 @@ async function onSignOut(): Promise<void> {
   font-size: 12.5px;
   color: var(--muted);
   line-height: 1.5;
+}
+
+/* ── Enrolment tokens (POL-104) ────────────────────────────────────────────── */
+.token-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.token {
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 12px 14px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.token.revoked,
+.token.expired,
+.token.used-up {
+  opacity: 0.72;
+}
+.token-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.token-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.token-secret {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.token-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.btn-ghost-sm.danger {
+  color: var(--bad);
+}
+.chip-live {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+.chip-revoked,
+.chip-expired,
+.chip-used-up {
+  color: var(--bad);
+  background: var(--bad-soft);
+}
+.chip-bake {
+  color: var(--accent-fg);
+  background: var(--accent-soft);
+}
+.token-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.token-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.token-field input {
+  font: inherit;
+  font-weight: 400;
+  font-size: 12.5px;
+  color: var(--fg2);
+  background: var(--muted-bg);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 10px;
+  min-width: 130px;
+}
+.token-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  padding-bottom: 9px;
 }
 
 /* ── Badges ────────────────────────────────────────────────────────────────── */
