@@ -10,6 +10,11 @@
  *   - `agentMtls.enabled=false` renders AGENT_MTLS: "off" — it must EXPLICITLY disable, because the
  *     server now brings the listener up by itself when told nothing;
  *   - `agentMtls.require=true|false` pin AGENT_MTLS_REQUIRE to "1"/"0"; the default "" omits it.
+ *
+ * POL-147 extends this: a third `expose` mode, `ingressRouteTCP`, renders a Traefik TLS-passthrough
+ * IngressRouteTCP on :443 (SNI-split) for clusters where a box can only reach what Traefik routes —
+ * and advertises the SNI host (AGENT_MTLS_ADVERTISE_HOST) instead of a NodePort. Pinned here across
+ * two chart versions (POL-127) so the SNI/passthrough never churns on an upgrade.
  */
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -51,6 +56,18 @@ describe("agent mTLS chart seams (file pins)", () => {
 
   test("the configmap advertises the NodePort (not the bind port) when expose=nodePort", () => {
     expect(CONFIGMAP).toContain("AGENT_MTLS_ADVERTISE_PORT");
+  });
+
+  // POL-147 — the third expose mode: a Traefik TLS-passthrough route on :443 for ingress-only
+  // clusters. Documented in values with a default entrypoint, and the configmap advertises the SNI.
+  test("expose=ingressRouteTCP is a documented option with an entrypoint default", () => {
+    expect(VALUES).toContain("ingressRouteTCP (POL-147)");
+    expect(VALUES).toMatch(/ingressRouteTCP:\n {4}# [^\n]*\n(?: {4}#[^\n]*\n)* {4}host: ""/);
+    expect(VALUES).toContain("entryPoint: websecure");
+  });
+
+  test("the configmap advertises the SNI host (not a port) when expose=ingressRouteTCP", () => {
+    expect(CONFIGMAP).toContain("AGENT_MTLS_ADVERTISE_HOST");
   });
 });
 
@@ -108,6 +125,77 @@ describe.skipIf(!helmAvailable)("helm template — every agent-mTLS posture", ()
   test("agentMtls.enabled=false drops the NodePort Service too", () => {
     expect(render(["--set", "agentMtls.enabled=false"])).not.toContain("test-polyptic-agent-mtls");
   });
+
+  // ── POL-147 — expose=ingressRouteTCP: the Traefik TLS-passthrough route on :443, SNI-split. ──────
+  test("ingressRouteTCP renders a passthrough IngressRouteTCP on the derived mtls. SNI host", () => {
+    const doc = render([
+      "--set",
+      "ingressRoute.enabled=true",
+      "--set",
+      "ingressRoute.host=polyptic.amrc.example",
+      "--set",
+      "agentMtls.expose=ingressRouteTCP",
+    ]);
+    expect(doc).toContain("kind: IngressRouteTCP");
+    expect(doc).toContain("HostSNI(`mtls.polyptic.amrc.example`)");
+    expect(doc).toContain("passthrough: true");
+    // the route targets the pod's mTLS port on the main Service, raw TCP end to end.
+    expect(doc).toMatch(/name: test-polyptic\n\s+port: 8443/);
+  });
+
+  test("ingressRouteTCP advertises the SNI host (AGENT_MTLS_ADVERTISE_HOST) and opens NO NodePort", () => {
+    const doc = render([
+      "--set",
+      "ingressRoute.enabled=true",
+      "--set",
+      "ingressRoute.host=polyptic.amrc.example",
+      "--set",
+      "agentMtls.expose=ingressRouteTCP",
+    ]);
+    expect(doc).toContain('AGENT_MTLS_ADVERTISE_HOST: "mtls.polyptic.amrc.example"');
+    expect(doc).not.toContain("AGENT_MTLS_ADVERTISE_PORT");
+    // no dedicated NodePort Service in this mode — the whole point is that no high port is opened.
+    expect(doc).not.toContain("type: NodePort");
+  });
+
+  test("ingressRouteTCP honours an explicit SNI host + entrypoint override", () => {
+    const doc = render([
+      "--set",
+      "agentMtls.expose=ingressRouteTCP",
+      "--set",
+      "agentMtls.ingressRouteTCP.host=secure.example.com",
+      "--set",
+      "agentMtls.ingressRouteTCP.entryPoint=websecure-mtls",
+    ]);
+    expect(doc).toContain("HostSNI(`secure.example.com`)");
+    expect(doc).toContain("- websecure-mtls");
+    expect(doc).toContain('AGENT_MTLS_ADVERTISE_HOST: "secure.example.com"');
+  });
+
+  test("ingressRouteTCP with no derivable SNI host FAILS the render (never a route that matches nothing)", () => {
+    const res = spawnSync(
+      "helm",
+      ["template", "test", CHART_DIR, "--set", "agentMtls.expose=ingressRouteTCP", "--set", "ingressRoute.host="],
+      { encoding: "utf8" },
+    );
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain("needs an SNI host");
+  });
+
+  test("an explicit publicUrl still wins over ingressRouteTCP (the fullest override)", () => {
+    const doc = render([
+      "--set",
+      "ingressRoute.enabled=true",
+      "--set",
+      "ingressRoute.host=polyptic.amrc.example",
+      "--set",
+      "agentMtls.expose=ingressRouteTCP",
+      "--set",
+      "agentMtls.publicUrl=wss://agent.example/agent",
+    ]);
+    expect(doc).toContain('AGENT_MTLS_PUBLIC_URL: "wss://agent.example/agent"');
+    expect(doc).not.toContain("AGENT_MTLS_ADVERTISE_HOST");
+  });
 });
 
 // ── POL-143 / POL-127: the mTLS NodePort Service survives a version bump. ─────────────────────────
@@ -130,7 +218,7 @@ function mtlsServiceSpec(rendered: string): string {
   return svc.slice(svc.indexOf("spec:")).trimEnd();
 }
 
-function renderAtVersion(version: string): string {
+function renderAtVersion(version: string, args: string[] = []): string {
   const dir = mkdtempSync(join(tmpdir(), "polyptic-mtls-chart-"));
   try {
     const chart = join(dir, "polyptic");
@@ -139,7 +227,7 @@ function renderAtVersion(version: string): string {
       .replace(/^version:.*$/m, `version: ${version}`)
       .replace(/^appVersion:.*$/m, `appVersion: "v${version}"`);
     writeFileSync(join(chart, "Chart.yaml"), yaml);
-    const out = spawnSync("helm", ["template", "polyptic", chart], { encoding: "utf8" });
+    const out = spawnSync("helm", ["template", "polyptic", chart, ...args], { encoding: "utf8" });
     expect(out.status).toBe(0);
     return out.stdout;
   } finally {
@@ -156,5 +244,43 @@ describe.skipIf(!helmAvailable)("the mTLS NodePort Service survives an upgrade (
     const spec = mtlsServiceSpec(renderAtVersion("9.9.9"));
     expect(spec).not.toContain("helm.sh/chart");
     expect(spec).not.toContain("app.kubernetes.io/version");
+  });
+});
+
+// ── POL-147 / POL-127: the passthrough IngressRouteTCP survives a version bump. ──────────────────
+// Its SNI match + passthrough + service target must render from STABLE inputs (agentMtls.* /
+// ingressRoute.host), never the version-carrying labels — an upgrade that re-shuffled the SNI or the
+// passthrough flag would break every box's dial address or expose a terminating route that strips
+// the client cert. Mirrors the NodePort Service pin above.
+
+const IRTCP_ARGS = [
+  "--set",
+  "ingressRoute.enabled=true",
+  "--set",
+  "ingressRoute.host=polyptic.amrc.example",
+  "--set",
+  "agentMtls.expose=ingressRouteTCP",
+];
+
+/** The `spec:` block of the agent-mtls IngressRouteTCP, verbatim. */
+function mtlsRouteSpec(rendered: string): string {
+  const found = rendered
+    .split(/^---$/m)
+    .filter((d) => /^kind: IngressRouteTCP$/m.test(d) && /name: polyptic-agent-mtls$/m.test(d));
+  expect(found).toHaveLength(1);
+  const doc = found[0]!;
+  return doc.slice(doc.indexOf("spec:")).trimEnd();
+}
+
+describe.skipIf(!helmAvailable)("the passthrough IngressRouteTCP survives an upgrade (POL-147/POL-127)", () => {
+  test("its spec is byte-identical across two chart versions — no version-varying input reaches it", () => {
+    expect(mtlsRouteSpec(renderAtVersion("9.9.9", IRTCP_ARGS))).toBe(mtlsRouteSpec(renderAtVersion("0.0.1", IRTCP_ARGS)));
+  });
+
+  test("no version-carrying label reaches the route spec, and passthrough stays ON", () => {
+    const spec = mtlsRouteSpec(renderAtVersion("9.9.9", IRTCP_ARGS));
+    expect(spec).not.toContain("helm.sh/chart");
+    expect(spec).not.toContain("app.kubernetes.io/version");
+    expect(spec).toContain("passthrough: true");
   });
 });

@@ -58,6 +58,12 @@ data:
   # and sits on "moves over on next connection" forever. The server sends this in
   # the cert bundle; the agent dials it instead of guessing.
   AGENT_MTLS_ADVERTISE_PORT: {{ .Values.agentMtls.nodePort | quote }}
+  {{- else if eq .Values.agentMtls.expose "ingressRouteTCP" }}
+  # POL-147 — the box can only reach what Traefik routes. The mTLS listener rides a
+  # Traefik IngressRouteTCP passthrough on :443, matched by a dedicated SNI host, so
+  # the box must dial THAT host (not a NodePort): advertise it, and the server adds
+  # it to the listener's cert SANs so the passed-through handshake validates.
+  AGENT_MTLS_ADVERTISE_HOST: {{ include "polyptic.mtlsSniHost" . | quote }}
   {{- end }}
   {{- if .Values.agentMtls.sans }}
   AGENT_MTLS_SANS: {{ join "," .Values.agentMtls.sans | quote }}
