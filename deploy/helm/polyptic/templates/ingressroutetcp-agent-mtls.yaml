@@ -1,0 +1,37 @@
+{{- /*
+POL-147 — a Traefik IngressRouteTCP with TLS passthrough for the raw-TCP mTLS agent
+listener, for clusters where a box can ONLY reach what Traefik routes (an arbitrary
+NodePort is firewalled off — the AMRC fpd-ago case).
+
+Traefik cannot TERMINATE mutual TLS: doing so would strip the agent's client
+certificate, which is the whole gate. So this route sets `tls.passthrough: true` and
+matches by SNI only — the raw bytes reach the pod's :8443 untouched and the pod
+performs the client-cert handshake itself. On the shared :443 (websecure)
+entrypoint, Traefik routes by SNI: the console host (the plain HTTPS IngressRoute)
+terminates normally, while the dedicated `mtls.<host>` SNI passes straight through.
+
+The chart advertises `wss://<sniHost>` to agents (AGENT_MTLS_ADVERTISE_HOST in the
+ConfigMap) and adds that host to the listener's cert SANs, so the box dials the SNI
+that this route matches and its handshake validates. No high port is opened.
+
+Requires: the Traefik CRDs (traefik.io/v1alpha1) and a :443 TLS entrypoint
+(`entryPoint`, stock K3s: websecure) actually exposed on the target Traefik.
+*/ -}}
+{{- if and .Values.agentMtls.enabled (eq .Values.agentMtls.expose "ingressRouteTCP") }}
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: {{ include "polyptic.fullname" . }}-agent-mtls
+  labels:
+    {{- include "polyptic.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    - {{ .Values.agentMtls.ingressRouteTCP.entryPoint }}
+  routes:
+    - match: HostSNI(`{{ include "polyptic.mtlsSniHost" . }}`)
+      services:
+        - name: {{ include "polyptic.fullname" . }}
+          port: {{ .Values.agentMtls.port }}
+  tls:
+    passthrough: true
+{{- end }}

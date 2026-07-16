@@ -258,7 +258,7 @@ helm upgrade polyptic … # recreates it with stable labels
 database stays up and its data is untouched — the StatefulSet is re-adopted on the
 next upgrade. Fresh installs on v0.2.33+ are unaffected.
 
-## mTLS agent channel — reachability (POL-25/POL-134, POL-143/D135)
+## mTLS agent channel — reachability (POL-25/POL-134, POL-143/D136, POL-147/D138)
 
 The agent channel is mutually authenticated out of the box (`agentMtls.enabled`,
 default `true`): a dedicated TLS listener serves `/agent`, enrolment issues each box
@@ -271,14 +271,20 @@ reachable path, controlled by `agentMtls.expose`:
 | `expose` | What the chart does | When |
 | --- | --- | --- |
 | `nodePort` (**default**) | Renders a dedicated **NodePort** Service (`<release>-agent-mtls`, `agentMtls.nodePort`, default `30843`) and sets `AGENT_MTLS_ADVERTISE_PORT` so the server tells agents to **dial that port on the host they already know**. Reachable off-cluster on stock K3s with nothing else to configure. | The homelab / stock-K3s case. |
-| `none` | Publishes nothing extra (the listener still binds in the pod). Bring your own reachability and point agents at it with `agentMtls.publicUrl`. | A dedicated LoadBalancer on `agentMtls.port`, or a Traefik **`IngressRouteTCP`** TLS-**passthrough** on a *separate* SNI host (it can't share the console's host on `:443`). |
+| `ingressRouteTCP` | Renders a Traefik **`IngressRouteTCP`** with `tls.passthrough: true` on the `websecure` (`:443`) entrypoint, matched by `HostSNI(mtls.<host>)` (derived from `ingressRoute.host`, or an explicit `agentMtls.ingressRouteTCP.host`), and advertises `wss://mtls.<host>` (`AGENT_MTLS_ADVERTISE_HOST`) with that host added to the listener's cert SANs. Traefik SNI-splits `:443`: the console host terminates TLS normally, the `mtls.` SNI passes **through** untouched so the pod does the client-cert handshake. **No high port is opened.** | Clusters where a box can reach **only what Traefik routes** (arbitrary NodePorts firewalled off — the AMRC case). Needs `:443`/`websecure` exposed on the target Traefik + the Traefik CRDs. |
+| `none` | Publishes nothing extra (the listener still binds in the pod). Bring your own reachability and point agents at it with `agentMtls.publicUrl`. | A dedicated LoadBalancer on `agentMtls.port`, or a bespoke `IngressRouteTCP`/host you wire yourself. |
 
-**Why a NodePort and not a `websecure` passthrough by default:** an `IngressRouteTCP`
-with `tls.passthrough` on the existing `websecure` entrypoint would collide with the
-console's HTTPS IngressRoute on the same `Host(...)` — Traefik can't tell a browser
-from an mTLS agent both hitting `:443` with the same SNI. A NodePort sidesteps entry
-points entirely and works on a single-node K3s where the node IP *is* the address the
-box already dials.
+**Why a NodePort is the default, and when to switch to `ingressRouteTCP`:** the NodePort
+sidesteps Traefik entrypoints entirely and works on a single-node K3s where the node IP
+*is* the address the box already dials — nothing to configure. But on a locked-down
+cluster a box can reach *only* what Traefik routes on `:80`/`:443`, and an arbitrary
+NodePort is firewalled off (the box reports *"Can't reach the secure port"* forever).
+There, `ingressRouteTCP` rides Traefik on the one open TLS port: it can't *terminate*
+mutual TLS (that strips the client cert), so it **passes through** by SNI. The collision
+the NodePort avoided — a browser and an mTLS agent both hitting `Host(...)` on `:443` —
+is resolved by giving mTLS its **own SNI host** (`mtls.<host>`, one label under the same
+wildcard cert): Traefik routes the console host to the terminating IngressRoute and the
+`mtls.` host to the passthrough route, on the same entrypoint.
 
 **The server advertises the port; the box never guesses.** The listener's bind port
 (pod `:8443`) and the port agents dial (the NodePort) are deliberately distinct: the
@@ -449,7 +455,8 @@ The bundled Service is also named `polyptic-db` for a release called `polyptic`,
 | `config.secureCookies` | `""` (auto) | Secure follows `PUBLIC_BASE_URL`'s scheme, else `NODE_ENV` — see production note. |
 | `config.captureIntervalMs` | `""` | Live-preview capture cadence (server default when empty). |
 | `agentMtls.enabled` / `.port` / `.require` | `true` / `8443` / `""` | mTLS agent channel: on by default, bind port, self-managing require posture (POL-134). |
-| `agentMtls.expose` / `.nodePort` | `nodePort` / `30843` | How the raw-TCP listener is published so boxes can reach it (POL-143/D135). `none` = BYO reachability + `publicUrl`. See the mTLS reachability section. |
+| `agentMtls.expose` / `.nodePort` | `nodePort` / `30843` | How the raw-TCP listener is published so boxes can reach it (POL-143/D136). `ingressRouteTCP` = Traefik TLS-passthrough on `:443` by SNI (POL-147/D138); `none` = BYO reachability + `publicUrl`. See the mTLS reachability section. |
+| `agentMtls.ingressRouteTCP.host` / `.entryPoint` | `""` / `websecure` | POL-147: the passthrough SNI host (empty → `mtls.<ingressRoute.host>`) and Traefik entrypoint, used only when `expose=ingressRouteTCP`. |
 | `agentMtls.publicUrl` / `.sans` | `""` / `[]` | Full `wss://` dial override (a dedicated LB or `IngressRouteTCP` SNI host) + extra cert SANs. |
 | `tls.mode` / `tls.sans` | `""` / `[]` | `self-signed` → server-native TLS with a persisted, downloadable CA (see the self-signed section). |
 | `letsEncrypt.enabled` / `.email` / `.staging` / `.additionalDnsNames` / `.solverIngressClass` | `false` / `""` / `false` / `[]` / `traefik` | Real ACME certificates via the vendored cert-manager subchart (see the Let's Encrypt section). |

@@ -31,7 +31,7 @@ import { PlayerAuth } from "./player-auth";
 import { registerAuthRoutes } from "./auth-routes";
 import { CaptureCoordinator, ThumbnailStore } from "./capture";
 import { Enrollment } from "./enroll";
-import { AgentMtls, MtlsPosture, mtlsStartupFailureIsFatal, registerAgentSecurityRoutes, resolveAgentMtlsEnv } from "./mtls";
+import { AgentMtls, MtlsPosture, buildAdvertiseUrl, mtlsStartupFailureIsFatal, registerAgentSecurityRoutes, resolveAgentMtlsEnv } from "./mtls";
 import { AgentHub, PlayerHub } from "./hub";
 import { MediaStore, registerMediaServeRoute } from "./media";
 import { createMediaProber } from "./media-probe";
@@ -490,6 +490,9 @@ if (agentMtlsEnv.enabled) {
   };
 
   const sanHosts = [...agentMtlsEnv.sans];
+  // POL-147 — the Traefik passthrough SNI host the box dials is a bare hostname, not a URL; it MUST
+  // be a SAN on the server leaf or the box rejects the handshake it just passed through Traefik.
+  if (agentMtlsEnv.advertiseHost) sanHosts.push(agentMtlsEnv.advertiseHost);
   for (const url of [AGENT_MTLS_PUBLIC_URL, process.env.PUBLIC_BASE_URL?.trim()]) {
     if (!url) continue;
     try {
@@ -523,16 +526,26 @@ if (agentMtlsEnv.enabled) {
       // Evaluate once at boot: a fleet whose last certless machine was removed while the server was
       // down graduates here rather than waiting for the next agent event.
       await posture.evaluate(control, activity, fastify.log);
+      // The wss:// URL the box is told to DIAL. Precedence: a full AGENT_MTLS_PUBLIC_URL override wins
+      // (POL-25); else, on the Traefik-passthrough path (POL-147), a distinct SNI host on :443 —
+      // AGENT_MTLS_ADVERTISE_HOST; else undefined, and the box reuses the host it knows on the
+      // advertised port (POL-143's NodePort, or the bind port when neither is set).
+      const advertiseUrl =
+        AGENT_MTLS_PUBLIC_URL ??
+        (agentMtlsEnv.advertiseHost
+          ? buildAdvertiseUrl(agentMtlsEnv.advertiseHost, agentMtlsEnv.advertisePort)
+          : undefined);
       agentMtlsChannel = {
         server: listener,
         caPem: mtls.caPem,
         signCsr: (csrPem, machineId) => mtls.signCsr(csrPem, machineId),
         // POL-143 — advertise the port boxes must DIAL, which is the NodePort (not the pod's bind
-        // port) on stock K3s; a full AGENT_MTLS_PUBLIC_URL still overrides both. Getting this wrong
-        // is exactly what stranded the homelab fleet on "moves over on next connection".
+        // port) on stock K3s. POL-147 — or a full wss:// URL at a distinct SNI host for the Traefik
+        // passthrough route. Getting this wrong stranded the homelab fleet on "moves over on next
+        // connection"; a full AGENT_MTLS_PUBLIC_URL still overrides both.
         advertise: {
           port: agentMtlsEnv.advertisePort ?? agentMtlsEnv.port,
-          ...(AGENT_MTLS_PUBLIC_URL ? { url: AGENT_MTLS_PUBLIC_URL } : {}),
+          ...(advertiseUrl ? { url: advertiseUrl } : {}),
         },
         required: () => posture.required,
         noteCertIssued: (machineId) => {
@@ -558,11 +571,16 @@ if (agentMtlsEnv.enabled) {
           advertisePort: agentMtlsEnv.advertisePort ?? agentMtlsEnv.port,
           require: posture.required,
           publicUrl: AGENT_MTLS_PUBLIC_URL,
+          // POL-147 — the full wss:// the box is told to dial when it is a distinct SNI host on :443
+          // (the Traefik passthrough route), not just a port swap on the host the box already knows.
+          advertiseUrl,
         },
         `mTLS agent channel up on :${agentMtlsEnv.port}` +
-          (agentMtlsEnv.advertisePort && agentMtlsEnv.advertisePort !== agentMtlsEnv.port
-            ? ` (boxes dial :${agentMtlsEnv.advertisePort})`
-            : "") +
+          (advertiseUrl
+            ? ` (boxes dial ${advertiseUrl})`
+            : agentMtlsEnv.advertisePort && agentMtlsEnv.advertisePort !== agentMtlsEnv.port
+              ? ` (boxes dial :${agentMtlsEnv.advertisePort})`
+              : "") +
           ` (self-test passed: no-cert and rogue-CA handshakes rejected)` +
           (posture.required
             ? " — REQUIRED: the plain /agent channel only enrols + issues certs"

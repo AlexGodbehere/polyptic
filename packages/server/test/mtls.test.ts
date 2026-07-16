@@ -55,6 +55,18 @@ describe("AgentMtls CA lifecycle", () => {
     expect(names).toContain("walls.example.com");
     expect(names).toContain("10.0.0.7");
   });
+
+  // POL-147 — the Traefik passthrough SNI host is what the box dials AND verifies against; it MUST
+  // be a SAN on the leaf or the box rejects the handshake it just passed through Traefik. index.ts
+  // funnels AGENT_MTLS_ADVERTISE_HOST into sanHosts; this pins that the leaf honours it.
+  test("the server leaf carries the advertised SNI host as a SAN (the passthrough handshake validates)", async () => {
+    const store = new MemoryStore();
+    const mtls = await AgentMtls.init(store, { port: 8443, sanHosts: ["mtls.polyptic.example.com"] });
+    const leaf = new x509.X509Certificate(mtls.serverCertPem);
+    const san = leaf.getExtension(x509.SubjectAlternativeNameExtension);
+    const names = san ? san.names.items.map((n) => n.value) : [];
+    expect(names).toContain("mtls.polyptic.example.com");
+  });
 });
 
 describe("AgentMtls.signCsr", () => {

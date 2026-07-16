@@ -307,6 +307,23 @@ host name to end up HTTPS everywhere.
 {{- end }}
 
 {{/*
+POL-147 — the SNI host the mTLS passthrough route answers on (expose=ingressRouteTCP).
+Precedence: an explicit agentMtls.ingressRouteTCP.host → else derived as `mtls.<ingressRoute.host>`
+(same wildcard cert, one label deeper) → else FAIL, because a passthrough route with no host would
+match nothing and the box would dial an address that resolves to nowhere. The box dials
+wss://<this host> and its ClientHello SNI is exactly this, which is what Traefik's HostSNI matches.
+*/}}
+{{- define "polyptic.mtlsSniHost" -}}
+{{- if .Values.agentMtls.ingressRouteTCP.host -}}
+{{- .Values.agentMtls.ingressRouteTCP.host -}}
+{{- else if .Values.ingressRoute.host -}}
+{{- printf "mtls.%s" .Values.ingressRoute.host -}}
+{{- else -}}
+{{- fail "agentMtls.expose=ingressRouteTCP needs an SNI host: set agentMtls.ingressRouteTCP.host, or enable ingressRoute (host) so it can derive mtls.<ingressRoute.host>." -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 TLS_SANS for tls.mode=self-signed (POL-70/D89): the derived public host (if any),
 the in-cluster Service DNS names, plus tls.sans. Comma-joined for the env var; the
 server unions in localhost/loopbacks/os.hostname() itself.

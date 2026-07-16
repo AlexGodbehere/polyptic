@@ -12,7 +12,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { ActivityLog } from "../src/activity";
-import { MtlsPosture, mtlsStartupFailureIsFatal, resolveAgentMtlsEnv, DEFAULT_AGENT_MTLS_PORT } from "../src/mtls";
+import { MtlsPosture, buildAdvertiseUrl, mtlsStartupFailureIsFatal, resolveAgentMtlsEnv, DEFAULT_AGENT_MTLS_PORT } from "../src/mtls";
 import { ControlPlane } from "../src/state";
 import { MemoryStore } from "../src/store/memory";
 
@@ -97,6 +97,30 @@ describe("resolveAgentMtlsEnv — default ON, explicit escape hatches", () => {
         /AGENT_MTLS_ADVERTISE_PORT is not a valid port/,
       );
     }
+  });
+
+  // POL-147 — on an ingress-only cluster the box dials a distinct SNI host on :443 (the Traefik
+  // passthrough route), not a NodePort on the host it knows.
+  test("AGENT_MTLS_ADVERTISE_HOST is parsed, marks the config explicit, and left undefined when unset", () => {
+    const cfg = resolveAgentMtlsEnv({ AGENT_MTLS_ADVERTISE_HOST: "mtls.polyptic.example.com" });
+    expect(cfg.advertiseHost).toBe("mtls.polyptic.example.com");
+    // A deliberately-set dial host is explicit config: a failure to bring the listener up must be
+    // fatal, not a silent degrade to plaintext (same posture as an explicit port).
+    expect(cfg.explicit).toBe(true);
+    expect(resolveAgentMtlsEnv({}).advertiseHost).toBeUndefined();
+    expect(resolveAgentMtlsEnv({ AGENT_MTLS_ADVERTISE_HOST: "  " }).advertiseHost).toBeUndefined();
+  });
+});
+
+// ── buildAdvertiseUrl (POL-147) — the wss:// the box dials for the SNI passthrough route ─────────
+describe("buildAdvertiseUrl — the dial URL for a distinct SNI host", () => {
+  test("omits the port on the standard :443 (SNI must be exactly the host for Traefik's HostSNI)", () => {
+    expect(buildAdvertiseUrl("mtls.polyptic.example.com")).toBe("wss://mtls.polyptic.example.com");
+    expect(buildAdvertiseUrl("mtls.polyptic.example.com", 443)).toBe("wss://mtls.polyptic.example.com");
+  });
+
+  test("appends a non-standard port (a bespoke passthrough entrypoint)", () => {
+    expect(buildAdvertiseUrl("mtls.polyptic.example.com", 8443)).toBe("wss://mtls.polyptic.example.com:8443");
   });
 });
 

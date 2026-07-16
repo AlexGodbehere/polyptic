@@ -338,6 +338,20 @@ export class AgentMtls {
 /** The default agent-mTLS listener port when nothing is configured (mirrors the chart). */
 export const DEFAULT_AGENT_MTLS_PORT = 8443;
 
+/** The standard TLS port an ingress terminates on — omitted from an advertised URL (it is implicit). */
+const STANDARD_TLS_PORT = 443;
+
+/**
+ * POL-147 — build the `wss://` URL a box should DIAL for a distinct SNI host (the Traefik
+ * passthrough route). The host is the advertised SNI; the port is omitted when it is the standard
+ * :443 (so the box's ClientHello SNI is exactly the host, matching Traefik's `HostSNI` rule) and
+ * appended otherwise. The path is left empty — the agent's `deriveMtlsUrl` fills in `/agent`.
+ */
+export function buildAdvertiseUrl(host: string, port?: number): string {
+  const suffix = port !== undefined && port !== STANDARD_TLS_PORT ? `:${port}` : "";
+  return `wss://${host}${suffix}`;
+}
+
 /**
  * The resolved agent-mTLS configuration. `explicit` distinguishes "the operator asked for this"
  * from "the shipped default": an explicitly-requested listener that cannot come up is FATAL (never
@@ -357,6 +371,17 @@ export interface AgentMtlsEnv {
    * override still wins over both.
    */
   advertisePort?: number;
+  /**
+   * POL-147 — the HOST agents are told to DIAL, when it differs from the host they already know. On
+   * an ingress-only cluster the mTLS listener cannot ride a NodePort (Traefik routes only :80/:443);
+   * instead a Traefik `IngressRouteTCP` with `tls.passthrough` on :443 routes a dedicated SNI host
+   * (`mtls.<host>`) straight to the pod's :8443, untouched, so the client-cert handshake still runs.
+   * The box must therefore dial `wss://mtls.<host>` (NOT `<bootHost>:30843`) so its ClientHello SNI
+   * matches the passthrough rule, and the listener's server cert must carry this host as a SAN or the
+   * box rejects the leaf. Set from `AGENT_MTLS_ADVERTISE_HOST`. A full `AGENT_MTLS_PUBLIC_URL` still
+   * wins over both host and port; unset → advertise the host the agent already knows.
+   */
+  advertiseHost?: string;
   /** True when any AGENT_MTLS* env was set — failures are then fatal instead of degrading. */
   explicit: boolean;
   /**
@@ -381,9 +406,11 @@ export function resolveAgentMtlsEnv(env: NodeJS.ProcessEnv = process.env): Agent
   const modeRaw = env.AGENT_MTLS?.trim();
   const portRaw = env.AGENT_MTLS_PORT?.trim();
   const advertisePortRaw = env.AGENT_MTLS_ADVERTISE_PORT?.trim();
+  const advertiseHost = env.AGENT_MTLS_ADVERTISE_HOST?.trim() || undefined;
   const requireRaw = env.AGENT_MTLS_REQUIRE?.trim();
 
-  const explicit = modeRaw !== undefined || (portRaw !== undefined && portRaw !== "");
+  const explicit =
+    modeRaw !== undefined || (portRaw !== undefined && portRaw !== "") || advertiseHost !== undefined;
   const modeOff = modeRaw !== undefined && /^(off|0|false|no)$/i.test(modeRaw);
   const port = portRaw !== undefined && portRaw !== "" ? Number(portRaw) : DEFAULT_AGENT_MTLS_PORT;
   if (!Number.isFinite(port) || !Number.isInteger(port) || port < 0 || port > 65535) {
@@ -416,6 +443,7 @@ export function resolveAgentMtlsEnv(env: NodeJS.ProcessEnv = process.env): Agent
     enabled: !modeOff && port > 0,
     port,
     ...(advertisePort !== undefined ? { advertisePort } : {}),
+    ...(advertiseHost !== undefined ? { advertiseHost } : {}),
     explicit,
     ...(requirePin !== undefined ? { requirePin } : {}),
     publicUrl: env.AGENT_MTLS_PUBLIC_URL?.trim() || undefined,

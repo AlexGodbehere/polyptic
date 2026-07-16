@@ -108,6 +108,17 @@ agentMtls:
   #     EVERY node at `nodePort`, and the chart advertises that port to agents
   #     (AGENT_MTLS_ADVERTISE_PORT): a box dials the same host it already knows on
   #     the NodePort, which forwards to the pod. Works out of the box on K3s.
+  #   ingressRouteTCP (POL-147) — for clusters where the box can ONLY reach what
+  #     Traefik routes (an arbitrary NodePort is firewalled off — the AMRC case).
+  #     The chart renders a Traefik IngressRouteTCP with tls.passthrough on the
+  #     websecure (:443) entrypoint, matched by a dedicated SNI host
+  #     (mtls.<ingressRoute.host> by default). Traefik routes :443 by SNI: the
+  #     console host terminates TLS normally, the mtls. SNI passes THROUGH
+  #     untouched to the pod's :8443 so the client-cert handshake still runs
+  #     (Traefik cannot terminate mutual TLS — it would strip the client cert).
+  #     The chart advertises wss://<sniHost> (AGENT_MTLS_ADVERTISE_HOST) and adds
+  #     that host to the listener's cert SANs. Needs the websecure entrypoint and
+  #     the Traefik CRDs; no high port is opened. See ingressRouteTCP below.
   #   none — publish nothing extra; bring your own reachability (a LoadBalancer on
   #     `port`, or a Traefik IngressRouteTCP passthrough on an existing entrypoint)
   #     and point agents at it with `publicUrl`. See README ▸ mTLS exposure.
@@ -116,10 +127,23 @@ agentMtls:
   # in the cluster's NodePort range (K3s default 30000–32767) and be the port a
   # box can reach the node on. Agents are told to dial THIS port.
   nodePort: 30843
+  # POL-147 — the Traefik TLS-passthrough route, used only when expose=ingressRouteTCP.
+  ingressRouteTCP:
+    # The SNI host the passthrough route answers on, and the host boxes dial
+    # (wss://<host>). Empty derives mtls.<ingressRoute.host> — one label under the
+    # same wildcard, so an existing *.<domain> cert on the console host still
+    # covers the console side of :443 while this SNI passes through. Requires
+    # ingressRoute.host to be set (to derive) or an explicit host here.
+    host: ""
+    # The Traefik entrypoint the route binds. MUST be a :443 TLS entrypoint that
+    # is actually exposed on the target Traefik (stock K3s: websecure). A box
+    # dials :443, so a non-standard port needs publicUrl instead.
+    entryPoint: websecure
   # Optional full wss:// URL agents should dial (AGENT_MTLS_PUBLIC_URL) when the
   # mTLS listener is exposed somewhere other than "same host, this port" — e.g. a
-  # dedicated LoadBalancer or an IngressRouteTCP SNI host. Set with expose=none.
-  # Empty = agents reuse the host they already dial (on the NodePort, per above).
+  # dedicated LoadBalancer or a bespoke IngressRouteTCP SNI host/port. Wins over
+  # every expose mode. Empty = agents reuse the host they already dial (on the
+  # NodePort for expose=nodePort, or the mtls. SNI host for ingressRouteTCP).
   publicUrl: ""
   # Extra SAN hostnames/IPs for the listener's server certificate — every name a
   # box might dial it by (joined into AGENT_MTLS_SANS).
