@@ -53,7 +53,7 @@ import { registerDevtoolsRoutes } from "./devtools-routes";
 import { registerSpaHosting, spaConfigFromEnv } from "./spa";
 import { ControlPlane } from "./state";
 import { createStore } from "./store";
-import { DEFAULT_RENEW_REPUSH_INTERVAL_MS, TokenService } from "./tokens";
+import { TokenService } from "./tokens";
 import { attachWebSockets } from "./ws";
 
 import { ServerToPlayerRender } from "@polyptic/protocol";
@@ -77,14 +77,6 @@ const BUILD_VERSION = process.env.POLYPTIC_VERSION?.trim() || "0.0.0";
 const BUILD_REVISION = process.env.POLYPTIC_REVISION?.trim() || process.env.GIT_SHA?.trim() || "dev";
 // Live-preview capture sweep cadence (ms). 0 disables the periodic sweep (on-demand still works).
 const CAPTURE_INTERVAL_MS = Number(process.env.CAPTURE_INTERVAL_MS ?? 4000);
-// POL-155 — minimum gap between routine credential-token re-pushes for one profile. The token cache
-// refreshes at ~75% of a (short) token life, but re-stamping the wall that often reloads the framed
-// app (Grafana re-inits every plugin) with a visible flash. This throttles the routine re-push to at
-// most once per interval (sized to the framed session's lifetime, not the token cadence) so the wall
-// stays signed in without a periodic flash. Default 30 min; set 0 to re-push on every refresh.
-const CREDENTIAL_REPUSH_MIN_INTERVAL_MS = Number(
-  process.env.CREDENTIAL_REPUSH_MIN_INTERVAL_MS ?? DEFAULT_RENEW_REPUSH_INTERVAL_MS,
-);
 // POL-59 — auto-disarm a remote shell left armed-and-idle this long (default 60 min). 0 disables the
 // sweep (arming stays sticky until a manual disarm). Guards against a forgotten armed box.
 const SHELL_ARM_TTL_MS = Number(process.env.SHELL_ARM_TTL_MS ?? 60 * 60 * 1000);
@@ -278,18 +270,18 @@ const broadcaster = new AdminBroadcaster({
 
 // ── Content auth (POL-24): the OAuth client-credentials token cache. Seeded from the persisted
 // profiles; refreshes in the background at ~75% of each token's lifetime, stamping the current token
-// into a referencing source's URL at send time (decorateSliceForSend). Two events re-push renders to
-// the screens showing content this profile authenticates, each carrying the fresh token:
-//   - token-usable EDGE (first fetch / recovery): a screen stuck on a login page heals itself.
-//   - routine RENEWAL (POL-149): the framed app (e.g. Grafana) re-auths with the new token before its
-//     old session lapses, so an unattended wall never gets bounced to a login screen. POL-86's
-//     proven-before-painted player swaps the re-stamped URL in place (old content stays up until the
-//     new url proves), so this is seamless — not the iframe-reload flash POL-24 originally feared.
-// POL-155 — the routine RENEWAL re-push is THROTTLED per profile inside TokenService (at most once per
-// CREDENTIAL_REPUSH_MIN_INTERVAL_MS): a re-stamp still costs a full framed-app re-init with a visible
-// flash, and the token refreshes far more often than the framed session needs. The usable EDGE is
-// never throttled. This helper is unchanged — it only ever runs when TokenService decides to push. ──
-const rePushForProfile = (profileId: string, reason: "token-usable" | "token-renewed"): void => {
+// into a referencing source's URL at send time (decorateSliceForSend). Exactly ONE event re-pushes
+// renders to the screens showing content this profile authenticates:
+//   - the token-usable EDGE (first fetch / recovery): the stamped auth_token signs the framed app in
+//     (Grafana's url_login mints its own session cookie on first load) and heals a screen stuck on a
+//     login page after an error/secret fix.
+// POL-155 — a routine token RENEWAL does NOT re-push. auth_token is Grafana's sign-in mechanism, not a
+// per-request bearer: once the session cookie exists the wall stays authenticated with no help from
+// us, so re-stamping a new token would only re-navigate the iframe and reboot the app (a visible
+// flash) for no benefit. POL-149's routine re-push was based on the wrong premise that the framed
+// session expires with the JWT; the token cache still refreshes every cycle so any future edge push
+// carries a valid token. ──
+const rePushForProfile = (profileId: string): void => {
   for (const screenId of control.screenIdsUsingProfile(profileId)) {
     const slice = control.getSlice(screenId);
     if (!slice) continue;
@@ -301,21 +293,15 @@ const rePushForProfile = (profileId: string, reason: "token-usable" | "token-ren
     });
     const delivered = hub.send(screenId, message);
     fastify.log.info(
-      { event: "render.push.token", screenId, profileId, reason, delivered },
-      reason === "token-usable"
-        ? "re-pushed render after credential token became usable"
-        : "re-pushed render after credential token was renewed (POL-149)",
+      { event: "render.push.token", screenId, profileId, delivered },
+      "re-pushed render after credential token became usable",
     );
   }
 };
 const tokens = new TokenService({
   log: fastify.log,
   onStatusChange: () => broadcaster.broadcast(),
-  onTokenUsable: (profileId) => rePushForProfile(profileId, "token-usable"),
-  onTokenRenewed: (profileId) => rePushForProfile(profileId, "token-renewed"),
-  renewRePushIntervalMs: Number.isFinite(CREDENTIAL_REPUSH_MIN_INTERVAL_MS)
-    ? CREDENTIAL_REPUSH_MIN_INTERVAL_MS
-    : DEFAULT_RENEW_REPUSH_INTERVAL_MS,
+  onTokenUsable: (profileId) => rePushForProfile(profileId),
 });
 control.setTokenProvider(tokens);
 tokens.setProfiles(control.getCredentialProfilesInternal());
