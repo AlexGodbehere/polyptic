@@ -260,7 +260,7 @@ async function save() {
     if (refresh === null) {
       errorMsg.value =
         draftRefresh.value.mode === "interval"
-          ? "Set how often to reload — a whole number of minutes, hours, or days."
+          ? "Set how often to reload, as a whole number of minutes, hours, or days."
           : "Pick at least one day and a valid time to reload.";
       return;
     }
