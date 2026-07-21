@@ -53,6 +53,16 @@ user = "${p.user}"
 /** Fixed path the launcher script is installed to (mode 0755); greetd's initial_session runs it. */
 export const COMPOSITOR_LAUNCHER = "/usr/local/bin/polyptic-compositor";
 
+/** Driver names (the DRIVER= line of each card's `device/uevent` under /sys/class/drm) that mean a
+ *  REAL GPU — any hit keeps `auto` on hardware-first. Substring match, like the boot probe. */
+export const REAL_GPU_DRIVERS = ["amdgpu", "radeon", "i915", "xe", "nvidia", "nouveau", "msm", "panfrost", "lima"];
+/** Drivers that mean a VIRTUAL GPU with no reliable 3D — `auto` pins software immediately (a
+ *  virtio-gpu's GLES compositor can SURVIVE, so the crash-fallback alone would miss it). */
+export const VIRTUAL_GPU_DRIVERS = ["virtio", "vmwgfx", "qxl", "bochs", "cirrus", "simpledrm", "vboxvideo"];
+/** PCI vendor ids (uevent PCI_ID=) of virtual GPUs, for cards whose DRIVER line is unhelpful:
+ *  Red Hat/virtio, VMware, QEMU/QXL, Bochs, VirtualBox. */
+export const VIRTUAL_GPU_PCI_VENDORS = ["1af4", "15ad", "1b36", "1234", "80ee"];
+
 export interface CompositorLauncherParams {
   /** Display backend — selects the compositor command + the software-render env. */
   backend: Backend;
@@ -73,8 +83,10 @@ export interface CompositorLauncherParams {
  *  2. Empirical hardware/software render selection → renders on GPUs with no working 3D (a QEMU/UTM
  *     virtio-gpu without virgl renders one frame then crashes) WITHOUT handicapping real GPUs. We
  *     do NOT force software rendering unconditionally — CPU-only rendering would cripple a real GPU
- *     wall. `auto` instead measures how long the compositor survives and only switches to software
- *     when the GPU demonstrably can't render.
+ *     wall. `auto` probes /sys/class/drm AT BOOT on the box itself (POL-169/D156 — setup may run in
+ *     an image-build chroot whose /sys is the build machine's, and a bake-time probe once pinned the
+ *     whole fleet to software): a virtual GPU pins software immediately, a real/unknown one starts
+ *     on hardware with the crash timer as backstop.
  */
 export function compositorLauncher(p: CompositorLauncherParams): string {
   const isX11 = p.backend === "x11-i3";
@@ -103,11 +115,10 @@ export function compositorLauncher(p: CompositorLauncherParams): string {
 # Renderer selection via POLYPTIC_RENDER (inherited from the session env; default baked by setup):
 #   hardware  run the compositor as-is on the GPU's GL renderer.
 #   software  always force the wlroots/Mesa software (CPU) renderer.
-#   auto      start on hardware; if the compositor dies within ~\${FAST_EXIT_SECS}s — the signature
-#             of a virtual GPU whose GL renderer paints one frame then crashes — switch to software
-#             for every later relaunch in THIS run and stay there. A real GPU runs for hours and
-#             never trips the switch (so it is never handicapped); a virtual GPU dies in ~1s, trips
-#             it once, and renders in software from then on.
+#   auto      probe /sys/class/drm ON THIS BOX (below): a virtual GPU renders software immediately;
+#             a real/unknown GPU starts on hardware, and if the compositor dies within
+#             ~\${FAST_EXIT_SECS}s — the signature of a GPU whose GL renderer paints one frame then
+#             crashes — switches to software for every later relaunch in THIS run and stays there.
 #
 # \`set -e\` must NOT kill the restart loop: the compositor exiting non-zero (a crash) is the normal
 # case we have to survive, so its invocation below is guarded with \`|| true\`.
@@ -128,10 +139,38 @@ BACKOFF_SECS=2     # pause between relaunches so a hard crash-loop never pins th
 
 log() { echo "polyptic-compositor: \$*" >&2; }
 
-# Effective renderer for this run. \`auto\` starts on hardware and may flip to software after a fast
-# crash (below); once flipped it stays software for every subsequent relaunch.
+# POL-169: \`auto\` probes the GPU HERE, at boot, on the box that owns the pixels — never at setup
+# time. Setup runs inside the image-build chroot, whose /sys is the BUILD machine's (a VM), and a
+# bake-time probe pinned the entire fleet's images to software rendering on real GPUs (D156).
+# Mirrors setup's old detectVirtualGpu: any real-GPU driver → hardware-first (the crash-fallback
+# below still guards the truly broken); else a virtual driver/vendor → software immediately (a
+# virtio-gpu's GLES compositor can SURVIVE, so the crash timer alone would miss it); else hardware.
+probe_gpu_mode() {
+  drm="\${POLYPTIC_DRM_SYS:-/sys/class/drm}"
+  for u in "\$drm"/card*/device/uevent; do
+    [ -r "\$u" ] || continue
+    if grep -Eq '^DRIVER=.*(${REAL_GPU_DRIVERS.join("|")})' "\$u"; then
+      echo hardware; return
+    fi
+  done
+  for u in "\$drm"/card*/device/uevent; do
+    [ -r "\$u" ] || continue
+    if grep -Eq '^DRIVER=.*(${VIRTUAL_GPU_DRIVERS.join("|")})' "\$u" \\
+       || grep -Eiq '^PCI_ID=(${VIRTUAL_GPU_PCI_VENDORS.join("|")}):' "\$u"; then
+      echo software; return
+    fi
+  done
+  echo hardware
+}
+
+# Effective renderer for this run. \`auto\` probes the box's GPU and starts on the result; a hardware
+# start may still flip to software after a fast crash (below), and once flipped it stays software
+# for every subsequent relaunch.
 mode="\$POLYPTIC_RENDER"
-if [ "\$mode" = auto ]; then mode=hardware; fi
+if [ "\$mode" = auto ]; then
+  mode=\$(probe_gpu_mode)
+  log "auto render probe on this box: \$mode"
+fi
 
 log "starting (POLYPTIC_RENDER=\$POLYPTIC_RENDER, backend=${p.backend})"
 
