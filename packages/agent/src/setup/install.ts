@@ -90,11 +90,15 @@ export function runInstall(sys: Sys, opts: SetupOptions, log: Logger): SetupResu
   state.backend = opts.backend;
   state.installedAt = new Date().toISOString();
 
-  // Resolve the effective render mode up front so the compositor launcher AND the browser agree.
-  // An explicit --render wins; `auto` on a virtual GPU is pinned to `software` here (see
-  // resolveRenderMode) — the launcher's runtime crash-fallback alone misses a virtio-gpu, whose
-  // wlroots GLES compositor survives yet needs software cursors and whose browser needs software GL.
-  opts.render = resolveRenderMode(sys, opts.render, log);
+  // The render mode is NOT resolved here (POL-169/D158). Setup may run inside an image-build
+  // chroot whose /sys belongs to the BUILD machine — a bake-time GPU probe once pinned the whole
+  // fleet's images to software rendering on real GPUs. An explicit --render is baked verbatim;
+  // `auto` is baked as `auto`, and the compositor launcher probes /sys/class/drm at BOOT, on the
+  // box that owns the pixels (virtual GPU → software immediately, since a virtio-gpu's GLES
+  // compositor survives and the crash-fallback alone would miss it; real/unknown → hardware-first).
+  if (opts.render === "auto") {
+    log.info("render: auto — the GPU probe runs at boot in the compositor launcher, not at setup time");
+  }
 
   // 1 ─ dependencies
   if (opts.installDeps) {
@@ -860,56 +864,6 @@ function startNow(sys: Sys, log: Logger): void {
   log.step("start greetd now");
   log.warn("restarting greetd takes over VT1 and starts the kiosk session immediately.");
   sys.exec("systemctl", ["restart", "greetd"], { desc: "restart greetd" });
-}
-
-// ── render-mode detection ────────────────────────────────────────────────────────
-
-// DRM driver / PCI-vendor signatures of GPUs with no reliable hardware 3D (GL). A kiosk on these
-// must render in software: the compositor's wlroots GLES path may *survive* (so the launcher's
-// runtime crash-fallback never trips) yet the hardware cursor plane is broken and WebKit's GL path
-// fails on the missing 3D — so we pin `software` at setup time instead.
-const VIRTUAL_GPU_DRIVERS = ["virtio", "vmwgfx", "qxl", "bochs", "cirrus", "simpledrm", "vboxvideo"];
-// virtio(1af4), VMware(15ad), Red Hat/QEMU(1b36), QEMU stdvga/Bochs(1234), VirtualBox(80ee).
-const VIRTUAL_GPU_PCI_VENDORS = ["1af4", "15ad", "1b36", "1234", "80ee"];
-const REAL_GPU_DRIVERS = ["amdgpu", "radeon", "i915", "xe", "nvidia", "nouveau", "msm", "panfrost", "lima"];
-
-/**
- * Sniff the DRM cards in sysfs. Returns a short label of the virtual GPU found (for logging), or
- * null if a real GPU is present (or nothing conclusive). A real GPU anywhere wins — a mixed box
- * (e.g. a passthrough card) should not be forced to software.
- */
-function detectVirtualGpu(sys: Sys): string | null {
-  const cards = sys
-    .probe("ls", ["/sys/class/drm"])
-    .stdout.split(/\s+/)
-    .filter((n) => /^card\d+$/.test(n));
-  let virtualHit: string | null = null;
-  for (const card of cards) {
-    const uevent = sys.readText(`/sys/class/drm/${card}/device/uevent`) ?? "";
-    const driver = (uevent.match(/DRIVER=(\S+)/)?.[1] ?? "").toLowerCase();
-    const vendor = (uevent.match(/PCI_ID=([0-9A-Fa-f]+):/)?.[1] ?? "").toLowerCase();
-    if (REAL_GPU_DRIVERS.some((d) => driver.includes(d))) return null; // real GPU present → not virtual
-    if (VIRTUAL_GPU_DRIVERS.some((d) => driver.includes(d)) || VIRTUAL_GPU_PCI_VENDORS.includes(vendor)) {
-      virtualHit = driver || vendor || card;
-    }
-  }
-  return virtualHit;
-}
-
-/**
- * Effective render mode. An explicit `hardware`/`software` is honoured verbatim. `auto` downgrades
- * to `software` on a detected virtual GPU (no reliable 3D), else stays `auto` so a real GPU keeps
- * hardware rendering with the launcher's runtime crash-fallback as backstop.
- */
-function resolveRenderMode(sys: Sys, requested: RenderMode, log: Logger): RenderMode {
-  if (requested !== "auto") return requested;
-  const virt = detectVirtualGpu(sys);
-  if (virt) {
-    log.info(`render: auto → software (virtual GPU '${virt}' — no reliable hardware 3D)`);
-    return "software";
-  }
-  log.info("render: auto (real/unknown GPU — hardware first, launcher falls back to software on a fast crash)");
-  return "auto";
 }
 
 // ── verification + next steps ───────────────────────────────────────────────────
