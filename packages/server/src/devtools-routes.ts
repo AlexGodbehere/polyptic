@@ -57,7 +57,16 @@ export function registerDevtoolsRoutes(fastify: FastifyInstance, relay: Devtools
 
     const prefix = `/api/v1/screens/${encodeURIComponent(screenId)}/devtools`;
     const host = request.headers.host ?? "localhost";
-    const wsParam = request.protocol === "https" ? "wss" : "ws";
+    // Behind a TLS-terminating proxy (Traefik on amrc-fp) request.protocol is
+    // "http" — the server has no trustProxy, deliberately (request.ip semantics
+    // elsewhere must not trust spoofable headers). Consult X-Forwarded-Proto
+    // here only: the DevTools frontend's CSP hard-blocks ws:// on an https
+    // page, so composing `?ws=` behind TLS can never work. A spoofed header
+    // merely misdirects the spoofer's own redirect.
+    const fwdProto = request.headers["x-forwarded-proto"];
+    const proto = (Array.isArray(fwdProto) ? fwdProto[0] : fwdProto)?.split(",")[0]?.trim()
+      ?? request.protocol;
+    const wsParam = proto === "https" ? "wss" : "ws";
     const frontend =
       `${prefix}/devtools/inspector.html` +
       `?${wsParam}=${encodeURIComponent(`${host}${prefix}/devtools/page/${page.id}`)}`;
