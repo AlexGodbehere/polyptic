@@ -238,6 +238,18 @@ ln -sf "../polyptic-update-poll.timer" "$ROOTFS/etc/systemd/system/timers.target
 mkdir -p "$ROOTFS/etc/systemd/system/sysinit.target.wants"
 ln -sf "/usr/lib/systemd/system/systemd-timesyncd.service" "$ROOTFS/etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service"
 ln -sf "../polyptic-timesync-conf.service" "$ROOTFS/etc/systemd/system/sysinit.target.wants/polyptic-timesync-conf.service"
+# POL-81 — operator SSH is DEFAULT-CLOSED on the image. `openssh-server`'s postinst enables ssh at
+# boot; remove those enable symlinks so the box never comes up listening — the root helper (written by
+# setup at step 4) starts sshd ONLY while an operator has armed the box. Then enable, offline, the
+# arm/disarm watcher (a .path unit) + the boot-reset unit (wipes the debug key every boot). `setup`
+# ran without --enable in the chroot, so it wrote the units/helper/debug-user but not these symlinks.
+rm -f "$ROOTFS"/etc/systemd/system/multi-user.target.wants/ssh.service \
+      "$ROOTFS"/etc/systemd/system/multi-user.target.wants/sshd.service \
+      "$ROOTFS"/etc/systemd/system/sockets.target.wants/ssh.socket
+mkdir -p "$ROOTFS/etc/systemd/system/paths.target.wants"
+ln -sf "../polyptic-sshd.path" "$ROOTFS/etc/systemd/system/paths.target.wants/polyptic-sshd.path"
+ln -sf "../polyptic-sshd-reset.service" "$ROOTFS/etc/systemd/system/multi-user.target.wants/polyptic-sshd-reset.service"
+
 # A live box must not inherit the build host's SAN/snap baggage: multipathd crashes noisily in a live
 # env and sprays the console during the plymouth→greetd handoff; nothing here uses snaps.
 for unit in multipathd.service multipathd.socket snapd.service snapd.socket snapd.seeded.service; do

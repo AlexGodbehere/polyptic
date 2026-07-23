@@ -19,6 +19,12 @@ import {
   REBOOT_TMPFILES_PATH,
   CEC_UDEV_RULES_PATH,
   SESSION_TARGET,
+  SSH_APPLY_SERVICE,
+  SSH_HELPER_PATH,
+  SSH_PATH_UNIT,
+  SSH_RESET_SERVICE,
+  SSH_SUDOERS_PATH,
+  SSHD_DROPIN_PATH,
   SYSTEM_UNIT_DIR,
 } from "./templates";
 import {
@@ -73,6 +79,22 @@ export function runUninstall(sys: Sys, opts: SetupOptions, log: Logger): SetupRe
   sys.remove(`${SYSTEM_UNIT_DIR}/${REBOOT_PATH_UNIT}`);
   sys.remove(`${SYSTEM_UNIT_DIR}/${REBOOT_SERVICE}`);
   sys.remove(REBOOT_TMPFILES_PATH);
+  sys.exec("systemctl", ["daemon-reload"], { desc: "reload systemd manager", allowFail: true });
+
+  // 3b′ ─ disarm + remove the operator-SSH helper (POL-81). Run the helper's disarm first so a box
+  // that was ARMED at uninstall is left closed (sshd stopped, key removed), then tear down the units +
+  // the hardening drop-in + the debug user's sudo grant. The debug user itself is left in place (a
+  // no-login account with no key does nothing) — --purge territory, not a plain uninstall.
+  log.step("remove the operator-SSH helper");
+  sys.exec(SSH_HELPER_PATH, ["disarm"], { desc: "disarm operator SSH", allowFail: true });
+  sys.exec("systemctl", ["disable", "--now", SSH_PATH_UNIT], { desc: `disable ${SSH_PATH_UNIT}`, allowFail: true });
+  sys.exec("systemctl", ["disable", "--now", SSH_RESET_SERVICE], { desc: `disable ${SSH_RESET_SERVICE}`, allowFail: true });
+  sys.remove(`${SYSTEM_UNIT_DIR}/${SSH_PATH_UNIT}`);
+  sys.remove(`${SYSTEM_UNIT_DIR}/${SSH_APPLY_SERVICE}`);
+  sys.remove(`${SYSTEM_UNIT_DIR}/${SSH_RESET_SERVICE}`);
+  sys.remove(SSH_HELPER_PATH);
+  sys.remove(SSHD_DROPIN_PATH);
+  sys.remove(SSH_SUDOERS_PATH);
   sys.exec("systemctl", ["daemon-reload"], { desc: "reload systemd manager", allowFail: true });
 
   // 3c ─ remove the HDMI-CEC udev rule (POL-101). The device node reverts to its stock ownership on

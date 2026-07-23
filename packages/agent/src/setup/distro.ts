@@ -131,6 +131,9 @@ interface PkgSet {
   /** POL-101 — HDMI-CEC tools. OPTIONAL by construction (see `optionalPackages`). */
   cec: string[];
   cast: string[];
+  /** POL-81 — the SSH server for armed operator access. An attack surface, so shipped OFF (setup
+   *  disables the boot-time units) and only started by the root helper while armed. */
+  ssh: string[];
 }
 
 // POL-7 (D43): our theme uses the `script` plugin and draws text via `Image.Text` (the live status
@@ -189,6 +192,7 @@ const PACKAGES: Record<PkgManager, PkgSet> = {
       "va-driver-all",
       "vainfo",
     ],
+    ssh: ["openssh-server"],
   },
   dnf: {
     base: ["greetd", "ca-certificates", "curl"],
@@ -205,6 +209,7 @@ const PACKAGES: Record<PkgManager, PkgSet> = {
     // clear reason when the binary is absent), but avahi + waylandsink are installable. The
     // vendor-neutral VA driver + diagnostics ride along for the hardware-decode path (POL-144).
     cast: ["avahi", "gstreamer1-plugins-bad-free", "mesa-va-drivers", "libva-utils"],
+    ssh: ["openssh"],
   },
   pacman: {
     base: ["greetd", "ca-certificates", "curl"],
@@ -218,6 +223,7 @@ const PACKAGES: Record<PkgManager, PkgSet> = {
     // Arch ships uxplay in the AUR only — casting stays best-effort (see the Fedora note). The
     // Mesa VA driver + diagnostics ride along for the hardware-decode path (POL-144).
     cast: ["avahi", "gst-plugins-bad", "libva-mesa-driver", "libva-utils"],
+    ssh: ["openssh"],
   },
 };
 
@@ -252,8 +258,8 @@ export function corePackages(pm: PkgManager, backend: Backend, splash = true): s
   // Cast (POL-119) rides ONLY with wayland-sway: the receiver renders via waylandsink natively,
   // and POL-67 rules out the Xwayland/X11 software sinks — the x11-i3 backend refuses `setCast`.
   if (backend === "wayland-sway") {
-    return [...set.base, ...set.wayland, ...set.fonts, ...splashPkgs, ...set.codecs, ...set.cast];
+    return [...set.base, ...set.wayland, ...set.fonts, ...splashPkgs, ...set.codecs, ...set.cast, ...set.ssh];
   }
-  if (backend === "x11-i3") return [...set.base, ...set.x11, ...set.fonts, ...splashPkgs, ...set.codecs];
+  if (backend === "x11-i3") return [...set.base, ...set.x11, ...set.fonts, ...splashPkgs, ...set.codecs, ...set.ssh];
   return [...set.base]; // dev-open
 }

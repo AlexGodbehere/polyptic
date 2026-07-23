@@ -434,6 +434,255 @@ ExecStart=/usr/bin/systemctl --no-block reboot
 `;
 }
 
+// ── privileged operator-SSH helper (POL-81) ────────────────────────────────────
+//
+// The COMPLEMENT to the reboot helper above, and the same escalation shape: the unprivileged agent
+// cannot touch sshd or a debug user's authorized_keys, so it drops a request file in the same
+// kiosk-writable /run/polyptic/requests dir and a root-owned `.path`/`.service` acts. Unlike reboot
+// (an empty file — one fixed capability), the SSH request carries a small `key=value` payload, so the
+// helper VALIDATES it: the op is arm|disarm, the key is re-checked as a single well-formed public key
+// before it ever reaches authorized_keys, and nothing from the file is ever eval'd. Security posture
+// enforced here: KEY-ONLY (the sshd drop-in disables passwords + root login), a DEDICATED debug user
+// (never kiosk) with passwordless sudo (root capability, no standing root credential — the root
+// account stays locked), a BOX-SIDE TTL (a transient systemd timer disarms even if the control plane
+// vanished), and DEFAULT-CLOSED on reboot (sshd is not enabled at boot; a boot-reset unit wipes the
+// key every boot).
+
+/** The dedicated debug user (POL-81). Kept in sync with `SSH_DEBUG_USER` in @polyptic/protocol. */
+export const SSH_DEBUG_USER = "polyptic-debug";
+/** The root helper script that arms/disarms sshd + the debug key. Root-owned, root-only (0755). */
+export const SSH_HELPER_PATH = "/usr/local/sbin/polyptic-sshd-helper";
+/** The request file the agent writes and `polyptic-sshd.path` watches. Same dir as the reboot request. */
+export const SSH_REQUEST_PATH = `${REBOOT_REQUEST_DIR}/ssh`;
+export const SSH_PATH_UNIT = "polyptic-sshd.path";
+export const SSH_APPLY_SERVICE = "polyptic-sshd-apply.service";
+export const SSH_RESET_SERVICE = "polyptic-sshd-reset.service";
+export const SSH_TTL_UNIT = "polyptic-ssh-ttl";
+/** The hardened sshd drop-in. Ubuntu's sshd_config includes sshd_config.d/*.conf, so this overrides. */
+export const SSHD_DROPIN_PATH = "/etc/ssh/sshd_config.d/10-polyptic.conf";
+/** The debug user's passwordless-sudo grant. */
+export const SSH_SUDOERS_PATH = "/etc/sudoers.d/polyptic-debug";
+
+/** The hardened sshd config drop-in (POL-81): key-only, no passwords, no root login, debug user only. */
+export function sshdHardeningConf(debugUser: string, port: number): string {
+  return `# ${SSHD_DROPIN_PATH} — ${MANAGED}
+# POL-81 operator SSH. sshd is OFF by default (its boot units are disabled) and only started by the
+# ${SSH_HELPER_PATH} helper while an operator has armed the box. This drop-in is the standing hardening.
+Port ${port}
+# KEY-AUTH ONLY. A password is a leak vector; there is none to surface.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+PermitEmptyPasswords no
+# The root ACCOUNT stays locked forever; root LOGIN is refused outright. Interactive root is reached
+# only through ${debugUser}'s passwordless sudo (armed + key-authed + TTL'd) — never a standing login.
+PermitRootLogin no
+# Only the dedicated debug user may log in. The kiosk (browser) user is NOT here — it gains nothing.
+AllowUsers ${debugUser}
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+PermitTunnel no
+`;
+}
+
+/** The debug user's passwordless-sudo grant (POL-81). Written 0440. */
+export function sshSudoersConf(debugUser: string): string {
+  return `# ${SSH_SUDOERS_PATH} — ${MANAGED}
+# POL-81 — the armed debug user gets passwordless sudo: root CAPABILITY for field debugging (mount,
+# modprobe, dmesg, read the boot journal) WITHOUT a standing root credential. The root account stays
+# locked; this grant only matters while sshd is up (armed) and the operator's key is installed.
+${debugUser} ALL=(ALL) NOPASSWD:ALL
+`;
+}
+
+/**
+ * The root helper (POL-81). Runs as root from the `.path`/`.service`; subcommands:
+ *   apply       read + consume the request file, dispatch arm|disarm.
+ *   disarm      stop sshd, remove the key, cancel the TTL timer (also the TTL timer's own target).
+ *   boot-reset  default-closed at boot: remove the key + ensure sshd is stopped, every boot.
+ * It never eval's anything from the request file and re-validates the public key before installing it.
+ */
+export function sshHelperScript(debugUser: string): string {
+  return `#!/bin/sh
+# ${SSH_HELPER_PATH} — ${MANAGED}
+# POL-81 privileged operator-SSH helper. Root-owned, root-only. See docs/ARCHITECTURE.md.
+set -eu
+
+# The request file (env-overridable so the helper can be exercised off-box; the .path unit always
+# writes the real ${SSH_REQUEST_PATH}). DEBUG_USER is the ONLY account this helper will ever act on.
+REQUEST="\${POLYPTIC_SSH_REQUEST:-${SSH_REQUEST_PATH}}"
+DEBUG_USER="${debugUser}"
+TTL_UNIT="${SSH_TTL_UNIT}"
+
+log() { echo "polyptic-sshd-helper: \$*" >&2; }
+
+# Start/stop sshd tolerant of BOTH socket-activation (Ubuntu default: ssh.socket) and the plain
+# service. Best-effort on whichever unit this box actually has.
+start_sshd() {
+  systemctl start ssh.socket 2>/dev/null || systemctl start ssh.service 2>/dev/null || systemctl start ssh 2>/dev/null || true
+}
+stop_sshd() {
+  systemctl stop ssh.socket 2>/dev/null || true
+  systemctl stop ssh.service 2>/dev/null || systemctl stop ssh 2>/dev/null || true
+}
+
+# authorized_keys path for the debug user, from its real home (never assume /home/<user>).
+authkeys_dir() {
+  home="\$(getent passwd "\$DEBUG_USER" | cut -d: -f6)"
+  [ -n "\$home" ] || { log "debug user \$DEBUG_USER has no home"; return 1; }
+  echo "\$home/.ssh"
+}
+
+install_key() {
+  key="\$1"
+  # Re-validate: a SINGLE line that looks like an SSH public key. The server + agent already checked;
+  # this is the last gate before it reaches authorized_keys, and it must never be bypassed.
+  case "\$key" in
+    ssh-ed25519\\ *|ssh-rsa\\ *|ssh-dss\\ *|ecdsa-sha2-*\\ *|sk-ssh-ed25519@openssh.com\\ *|sk-ecdsa-sha2-*@openssh.com\\ *) : ;;
+    *) log "rejected key: not a recognised SSH public key"; return 1 ;;
+  esac
+  case "\$key" in *"
+"*) log "rejected key: contains a newline"; return 1 ;; esac
+  dir="\$(authkeys_dir)" || return 1
+  mkdir -p "\$dir"
+  chmod 700 "\$dir"
+  # Atomic write, then fix ownership so sshd (StrictModes) accepts it.
+  printf '%s\\n' "\$key" > "\$dir/authorized_keys.tmp"
+  chmod 600 "\$dir/authorized_keys.tmp"
+  mv -f "\$dir/authorized_keys.tmp" "\$dir/authorized_keys"
+  chown -R "\$DEBUG_USER" "\$dir" 2>/dev/null || true
+}
+
+remove_key() {
+  dir="\$(authkeys_dir)" 2>/dev/null || return 0
+  rm -f "\$dir/authorized_keys" "\$dir/authorized_keys.tmp" 2>/dev/null || true
+}
+
+cancel_ttl() {
+  systemctl stop "\${TTL_UNIT}.timer" 2>/dev/null || true
+  systemctl reset-failed "\${TTL_UNIT}.timer" "\${TTL_UNIT}.service" 2>/dev/null || true
+}
+
+schedule_ttl() {
+  ttl="\$1"
+  cancel_ttl
+  # 0 (or unset) = no box-side timer (the server sweep still applies).
+  [ "\$ttl" -gt 0 ] 2>/dev/null || return 0
+  # A transient timer that disarms the box when it fires — so a box whose control plane vanished still
+  # closes itself. Re-arming replaces it (cancel_ttl above).
+  systemd-run --quiet --on-active="\${ttl}s" --unit="\$TTL_UNIT" --timer-property=AccuracySec=5s \\
+    ${SSH_HELPER_PATH} disarm 2>/dev/null || log "could not schedule the box-side TTL timer"
+}
+
+arm() {
+  ttl="\$1"; key="\$2"
+  install_key "\$key" || { log "arm aborted: bad key"; return 1; }
+  start_sshd
+  schedule_ttl "\$ttl"
+  log "armed (user=\$DEBUG_USER, ttl=\${ttl}s)"
+}
+
+disarm() {
+  stop_sshd
+  remove_key
+  cancel_ttl
+  log "disarmed"
+}
+
+boot_reset() {
+  # DEFAULT-CLOSED on every boot: sshd's units are disabled, but wipe any lingering key and make sure
+  # nothing is listening — an armed box that reboots comes up closed, unconditionally.
+  remove_key
+  stop_sshd
+  log "boot reset (default-closed)"
+}
+
+apply() {
+  [ -f "\$REQUEST" ] || { log "no request file"; return 0; }
+  # Parse a flat key=value block. Consume the file FIRST so a failure can't re-trigger the .path unit
+  # into a loop; read into vars from a copy.
+  tmp="\$(mktemp)"
+  cat "\$REQUEST" > "\$tmp"
+  rm -f "\$REQUEST"
+  op=""; user=""; port=""; ttl="0"; key=""
+  while IFS= read -r line; do
+    case "\$line" in
+      op=*)   op="\${line#op=}" ;;
+      user=*) user="\${line#user=}" ;;
+      port=*) port="\${line#port=}" ;;
+      ttl=*)  ttl="\${line#ttl=}" ;;
+      key=*)  key="\${line#key=}" ;;
+    esac
+  done < "\$tmp"
+  rm -f "\$tmp"
+  # Honour the user the server named, if it is the expected debug user (never an arbitrary account).
+  [ "\$user" = "\$DEBUG_USER" ] || { [ -z "\$user" ] || log "ignoring unexpected user '\$user'"; }
+  case "\$op" in
+    # A bad/rejected arm must NOT fail the service unit (it consumed the request + logged the reason);
+    # a failed state would just re-noise the journal. The box stays closed, which is the safe outcome.
+    arm)    arm "\$ttl" "\$key" || log "arm not applied" ;;
+    disarm) disarm ;;
+    *)      log "unknown op '\$op'" ;;
+  esac
+}
+
+case "\${1:-apply}" in
+  apply)      apply ;;
+  disarm)     disarm ;;
+  boot-reset) boot_reset ;;
+  *)          log "usage: polyptic-sshd-helper [apply|disarm|boot-reset]"; exit 2 ;;
+esac
+`;
+}
+
+export function sshPathUnit(): string {
+  return `# ${SYSTEM_UNIT_DIR}/${SSH_PATH_UNIT} — ${MANAGED}
+[Unit]
+Description=Polyptic — watch for the agent's SSH arm/disarm request (POL-81)
+Documentation=https://github.com/polyptic/polyptic/blob/main/docs/ARCHITECTURE.md
+
+[Path]
+PathExists=${SSH_REQUEST_PATH}
+Unit=${SSH_APPLY_SERVICE}
+
+[Install]
+WantedBy=paths.target
+`;
+}
+
+export function sshApplyServiceUnit(): string {
+  return `# ${SYSTEM_UNIT_DIR}/${SSH_APPLY_SERVICE} — ${MANAGED}
+[Unit]
+Description=Polyptic — apply the operator's SSH arm/disarm request (POL-81)
+Documentation=https://github.com/polyptic/polyptic/blob/main/docs/ARCHITECTURE.md
+
+[Service]
+Type=oneshot
+ExecStart=${SSH_HELPER_PATH} apply
+`;
+}
+
+export function sshResetServiceUnit(): string {
+  return `# ${SYSTEM_UNIT_DIR}/${SSH_RESET_SERVICE} — ${MANAGED}
+[Unit]
+Description=Polyptic — reset operator SSH to default-closed at boot (POL-81)
+Documentation=https://github.com/polyptic/polyptic/blob/main/docs/ARCHITECTURE.md
+# Runs every boot so an armed box that reboots comes up with sshd stopped and the debug key removed.
+DefaultDependencies=no
+After=local-fs.target
+Before=sshd.service ssh.service ssh.socket
+
+[Service]
+Type=oneshot
+ExecStart=${SSH_HELPER_PATH} boot-reset
+
+[Install]
+WantedBy=multi-user.target
+`;
+}
+
 // ── HDMI-CEC device access (POL-101) ───────────────────────────────────────────
 //
 // The kernel CEC API lives at /dev/cec* and, on a stock Ubuntu box, is root-owned with no group that

@@ -30,6 +30,13 @@ import {
   REBOOT_SERVICE,
   REBOOT_TMPFILES_PATH,
   SESSION_TARGET,
+  SSH_APPLY_SERVICE,
+  SSH_DEBUG_USER,
+  SSH_HELPER_PATH,
+  SSH_PATH_UNIT,
+  SSH_RESET_SERVICE,
+  SSH_SUDOERS_PATH,
+  SSHD_DROPIN_PATH,
   SYSTEM_UNIT_DIR,
   agentServiceUnit,
   cecUdevRules,
@@ -40,6 +47,12 @@ import {
   rebootServiceUnit,
   rebootTmpfilesConf,
   sessionTargetUnit,
+  sshApplyServiceUnit,
+  sshHelperScript,
+  sshPathUnit,
+  sshResetServiceUnit,
+  sshSudoersConf,
+  sshdHardeningConf,
   swayConfig,
   xinitrc,
 } from "./templates";
@@ -147,6 +160,9 @@ export function runInstall(sys: Sys, opts: SetupOptions, log: Logger): SetupResu
   // 5b ─ the privileged reboot helper (POL-55): reboot-from-the-control-plane needs root, the agent
   // has none, and this image ships neither sudo nor polkit. See templates.ts for why a path unit.
   writeRebootHelper(sys, opts, log, assumptions);
+
+  // 5b′ ─ operator SSH access (POL-81): the dedicated debug user + a root-owned arm/disarm helper.
+  writeSshAccess(sys, opts, log, assumptions);
 
   // 5c ─ HDMI-CEC device access (POL-101): the second rung of panel power, if this box has an adapter.
   writeCecUdevRule(sys, log, assumptions);
@@ -354,6 +370,67 @@ function writeRebootHelper(sys: Sys, opts: SetupOptions, log: Logger, assumption
   assumptions.push(
     `the agent reboots the box by creating ${REBOOT_REQUEST_DIR}/reboot, which ${REBOOT_PATH_UNIT} ` +
       `turns into a root \`systemctl reboot\` — no sudo, no polkit, and no command the agent can choose.`,
+  );
+}
+
+/**
+ * Operator SSH access (POL-81): the dedicated debug user + a root-owned arm/disarm helper, mirroring
+ * the reboot helper's escalation shape (the agent drops a request file; a `.path`/`.service` acts).
+ * sshd itself is DISABLED at boot in enableServices — the helper starts it only while armed, and a
+ * boot-reset unit wipes the debug key every boot (default-closed). The kiosk user gains nothing: the
+ * debug user is separate, and the root account stays locked (root capability is via the debug user's
+ * key-authed, TTL'd, passwordless sudo — no standing credential).
+ */
+function writeSshAccess(sys: Sys, opts: SetupOptions, log: Logger, assumptions: string[]): void {
+  log.step("write operator-SSH access (debug user + privileged helper)");
+
+  // The dedicated debug user, separate from the kiosk user, with NO password (useradd leaves it
+  // locked) and a real shell. Idempotent.
+  if (sys.probe("getent", ["passwd", SSH_DEBUG_USER]).code === 0) {
+    log.skip(`user '${SSH_DEBUG_USER}' already exists`);
+  } else {
+    sys.exec(
+      "useradd",
+      ["--create-home", "--shell", "/bin/bash", "--comment", "Polyptic debug (POL-81)", SSH_DEBUG_USER],
+      { desc: `create debug user ${SSH_DEBUG_USER}`, allowFail: true },
+    );
+  }
+  // Belt-and-braces: ensure the account has NO password set (locked), never a login credential.
+  sys.exec("passwd", ["-l", SSH_DEBUG_USER], { desc: `lock ${SSH_DEBUG_USER}'s password`, allowFail: true });
+
+  // Passwordless sudo for the debug user (root capability, no standing root credential). 0440.
+  sys.writeFile(SSH_SUDOERS_PATH, sshSudoersConf(SSH_DEBUG_USER), {
+    mode: 0o440,
+    desc: "debug user passwordless sudo (sudoers.d)",
+  });
+
+  // The hardened sshd drop-in: key-only, no passwords, no root login, debug user only. 0644.
+  sys.writeFile(SSHD_DROPIN_PATH, sshdHardeningConf(SSH_DEBUG_USER, 22), {
+    mode: 0o644,
+    desc: "hardened sshd drop-in (key-only, no root, debug user only)",
+  });
+
+  // The root helper (root-only, 0755) + its units. The request dir is the SAME kiosk-writable dir the
+  // reboot helper uses (tmpfiles.d already creates it), so no new escalation surface is opened.
+  sys.writeFile(SSH_HELPER_PATH, sshHelperScript(SSH_DEBUG_USER), {
+    mode: 0o755,
+    desc: "privileged operator-SSH helper",
+  });
+  sys.writeFile(`${SYSTEM_UNIT_DIR}/${SSH_PATH_UNIT}`, sshPathUnit(), { mode: 0o644, desc: SSH_PATH_UNIT });
+  sys.writeFile(`${SYSTEM_UNIT_DIR}/${SSH_APPLY_SERVICE}`, sshApplyServiceUnit(), {
+    mode: 0o644,
+    desc: SSH_APPLY_SERVICE,
+  });
+  sys.writeFile(`${SYSTEM_UNIT_DIR}/${SSH_RESET_SERVICE}`, sshResetServiceUnit(), {
+    mode: 0o644,
+    desc: SSH_RESET_SERVICE,
+  });
+
+  assumptions.push(
+    `operator SSH (POL-81) is OFF by default: sshd's boot units are disabled and only started by ` +
+      `${SSH_HELPER_PATH} while an operator has armed the box. Auth is key-only for '${SSH_DEBUG_USER}' ` +
+      `(no passwords, no root login, root account locked); root is reached via that user's TTL'd ` +
+      `passwordless sudo. A boot-reset unit wipes the key every boot, so a reboot comes up closed.`,
   );
 }
 
@@ -838,6 +915,21 @@ function enableServices(sys: Sys, log: Logger, state: SetupState): void {
   // boot, and a chroot install (the live-image build) has no manager to start anything anyway.
   sys.exec("systemctl", ["enable", REBOOT_PATH_UNIT], {
     desc: `enable ${REBOOT_PATH_UNIT} (control-plane reboot)`,
+    allowFail: true,
+  });
+
+  // POL-81 — operator SSH is DEFAULT-CLOSED. openssh-server's postinst enables ssh at boot; DISABLE
+  // both the socket and the service so a box never comes up listening. (Not masked — the helper must
+  // be able to start them while armed.) Then enable the arm/disarm watcher and the boot-reset unit
+  // (which wipes the debug key + stops sshd every boot). allowFail: a dev-open box installs no sshd.
+  sys.exec("systemctl", ["disable", "ssh.socket"], { desc: "disable ssh.socket (default-closed)", allowFail: true });
+  sys.exec("systemctl", ["disable", "ssh.service"], { desc: "disable ssh.service (default-closed)", allowFail: true });
+  sys.exec("systemctl", ["enable", SSH_PATH_UNIT], {
+    desc: `enable ${SSH_PATH_UNIT} (operator SSH arm/disarm)`,
+    allowFail: true,
+  });
+  sys.exec("systemctl", ["enable", SSH_RESET_SERVICE], {
+    desc: `enable ${SSH_RESET_SERVICE} (default-closed at boot)`,
     allowFail: true,
   });
 
