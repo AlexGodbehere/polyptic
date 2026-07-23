@@ -22,13 +22,14 @@ import {
 } from "../src/index";
 
 const gf = (over: Partial<GrafanaDisplay> = {}): GrafanaDisplay => ({ ...gfDefaults(), ...over });
-/** Everything off — the parsed-from-nothing baseline (hideTimePicker is ON in gfDefaults). */
-const off = (over: Partial<GrafanaDisplay> = {}): GrafanaDisplay =>
-  gf({ kiosk: false, hideTimePicker: false, ...over });
+/** Everything off — the parsed-from-nothing baseline (gfDefaults has kiosk ON). */
+const off = (over: Partial<GrafanaDisplay> = {}): GrafanaDisplay => gf({ kiosk: false, ...over });
 
 describe("flag composition (controls → query)", () => {
-  test("kiosk on, picker off → `kiosk=1` (POL-182; never bare `kiosk` per POL-180)", () => {
-    expect(composeQuery(undefined, off({ kiosk: true }))).toBe("?kiosk=1&hideLogo=1");
+  test("kiosk on, picker off → `kiosk=1` + the derived hide-time-picker (POL-182)", () => {
+    expect(composeQuery(undefined, off({ kiosk: true }))).toBe(
+      "?kiosk=1&hideLogo=1&_dash.hideTimePicker=true",
+    );
   });
 
   test("kiosk on, picker on → `kiosk=tv`", () => {
@@ -41,10 +42,19 @@ describe("flag composition (controls → query)", () => {
     expect(composeQuery(undefined, off())).toBe("?hideLogo=1");
   });
 
-  test("hideTimePicker → `_dash.hideTimePicker=true` (grafana/grafana#96595 belt-and-braces)", () => {
-    expect(composeQuery(undefined, off({ hideTimePicker: true }))).toBe(
-      "?hideLogo=1&_dash.hideTimePicker=true",
+  // ONE control decides the picker: `_dash.hideTimePicker=true` is derived from "kiosk on, picker
+  // off", so the dialog can never show two switches that contradict each other.
+  test("the picker control alone decides `_dash.hideTimePicker` — kiosk=tv never hides it", () => {
+    expect(composeQuery(undefined, off({ kiosk: true, picker: true }))).not.toContain(
+      "_dash.hideTimePicker",
     );
+    expect(composeQuery(undefined, off({ kiosk: true, picker: false }))).toContain(
+      "_dash.hideTimePicker=true",
+    );
+  });
+
+  test("kiosk off means the full Grafana UI — no hide-time-picker either", () => {
+    expect(composeQuery(undefined, off({ picker: false }))).toBe("?hideLogo=1");
   });
 
   test("new-source defaults compose kiosk=1 + hideLogo + hideTimePicker", () => {
@@ -76,7 +86,7 @@ describe("flag composition (controls → query)", () => {
 
   test("keep rides first, verbatim, then the flags", () => {
     expect(composeQuery("orgId=1&var-line=A", off({ kiosk: true, refresh: "30s" }))).toBe(
-      "?orgId=1&var-line=A&kiosk=1&hideLogo=1&refresh=30s",
+      "?orgId=1&var-line=A&kiosk=1&hideLogo=1&_dash.hideTimePicker=true&refresh=30s",
     );
   });
 
@@ -114,7 +124,9 @@ describe("schema evolution (POL-182 — old stored compositions parse stable)", 
     const parsed = GrafanaDisplay.parse(legacy);
     expect(parsed).toEqual(off({ kiosk: true }));
     // The upgraded parse must not leak the held-but-inactive from/to, nor gain the new toggles.
-    expect(composeQuery(undefined, parsed)).toBe("?kiosk=1&hideLogo=1");
+    // It DOES gain the derived hide-time-picker, because the row already said "kiosk, no picker" —
+    // Grafana 11.2.x simply ignored that instruction (grafana/grafana#96595).
+    expect(composeQuery(undefined, parsed)).toBe("?kiosk=1&hideLogo=1&_dash.hideTimePicker=true");
   });
 
   test("a pre-POL-182 custom range keeps its from/to and refresh", () => {
@@ -133,15 +145,22 @@ describe("schema evolution (POL-182 — old stored compositions parse stable)", 
   });
 
   test("a current shape without the new keys parses with them off", () => {
-    const { hideTimePicker: _h, autofit: _a, ...rest } = off({ kiosk: true });
+    const { autofit: _a, ...rest } = off({ kiosk: true });
     const parsed = GrafanaDisplay.parse(rest);
-    expect(parsed.hideTimePicker).toBe(false);
     expect(parsed.autofit).toBe(false);
   });
 
-  test("gfDefaults (new sources) turns hideTimePicker ON", () => {
-    expect(gfDefaults().hideTimePicker).toBe(true);
+  test("gfDefaults (new sources) is kiosk without the picker — which hides it both ways", () => {
+    expect(gfDefaults().kiosk).toBe(true);
+    expect(gfDefaults().picker).toBe(false);
     expect(gfDefaults().autofit).toBe(false);
+  });
+
+  // The field existed only on this branch before the picker became the single control.
+  test("a row carrying the short-lived hideTimePicker field still parses", () => {
+    const parsed = GrafanaDisplay.parse({ ...off({ kiosk: true }), hideTimePicker: true });
+    expect(parsed.kiosk).toBe(true);
+    expect("hideTimePicker" in parsed).toBe(false);
   });
 });
 
@@ -217,10 +236,9 @@ describe("extractGrafanaFlags (pairs → controls + keep)", () => {
     expect(out.picker).toBe(true);
   });
 
-  test("no kiosk param → kiosk off, hideTimePicker off (parsed, not defaulted)", () => {
+  test("no kiosk param → kiosk off (parsed, not defaulted)", () => {
     const { gf: out } = extractGrafanaFlags(["orgId=1"]);
     expect(out.kiosk).toBe(false);
-    expect(out.hideTimePicker).toBe(false);
   });
 
   test("hideLogo is absorbed — composition always re-emits it", () => {
@@ -228,9 +246,9 @@ describe("extractGrafanaFlags (pairs → controls + keep)", () => {
     expect(keep).toBe("orgId=1");
   });
 
-  test("_dash.hideTimePicker=true lands in the toggle", () => {
-    expect(extractGrafanaFlags(["_dash.hideTimePicker=true"]).gf.hideTimePicker).toBe(true);
-    expect(extractGrafanaFlags(["_dash.hideTimePicker=1"]).gf.hideTimePicker).toBe(true);
+  test("_dash.hideTimePicker is absorbed — the picker control re-emits it", () => {
+    expect(extractGrafanaFlags(["_dash.hideTimePicker=true"]).keep).toBe("");
+    expect(extractGrafanaFlags(["_dash.hideTimePicker=1"]).keep).toBe("");
   });
 
   test("autofitpanels (bare or valued) lands in the toggle", () => {
@@ -267,7 +285,7 @@ describe("extractGrafanaFlags (pairs → controls + keep)", () => {
 
   test("parse-then-compose round-trips a real dashboard URL", () => {
     const url =
-      "https://g.example.com/d/abc/slug?orgId=1&kiosk=tv&hideLogo=1&_dash.hideTimePicker=true&from=now-24h&to=now&refresh=5m&autofitpanels&theme=light";
+      "https://g.example.com/d/abc/slug?orgId=1&kiosk=1&hideLogo=1&_dash.hideTimePicker=true&from=now-24h&to=now&refresh=5m&autofitpanels&theme=light";
     const p = parseAddress(url);
     const { gf: out, keep } = extractGrafanaFlags(p.pairs);
     expect(composeSourceUrl({ proto: p.proto, address: p.address, keep, gf: out })).toBe(url);

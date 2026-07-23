@@ -21,8 +21,10 @@ const COMPOSITION: SourceComposition = {
   gf: { ...gfDefaults(), kiosk: true, picker: true, refresh: "5m" },
   auth: "none",
 };
+// `kiosk=tv` KEEPS the time picker, so no `_dash.hideTimePicker` rides along — one control decides
+// it (POL-182), and this fixture is the picker-on side of that.
 const COMPOSED =
-  "https://grafana.example.com/d/abc123/factory-overview?orgId=1&kiosk=tv&hideLogo=1&_dash.hideTimePicker=true&refresh=5m";
+  "https://grafana.example.com/d/abc123/factory-overview?orgId=1&kiosk=tv&hideLogo=1&refresh=5m";
 
 let store: MemoryStore;
 let cp: ControlPlane;

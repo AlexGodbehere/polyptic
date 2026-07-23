@@ -23,33 +23,35 @@ export type SourceProto = z.infer<typeof SourceProto>;
 /** The Grafana display controls (dashboard kind only). These compose to query-string flags
  *  (grafana-kiosk's dialect — POL-182):
  *
- *    kiosk ON, picker OFF   →  `kiosk=1` (POL-180: never bare `kiosk` — some builds ignore it)
+ *    kiosk ON, picker OFF   →  `kiosk=1` + `_dash.hideTimePicker=true` (POL-180: never bare
+ *                              `kiosk` — some builds ignore it)
  *    kiosk ON, picker ON    →  `kiosk=tv`
  *    kiosk OFF              →  (no kiosk param)
  *    (always)               →  `hideLogo=1` — Grafana's "Powered by" logo has no place on a wall
- *    hideTimePicker ON      →  `_dash.hideTimePicker=true` — belt-and-braces with kiosk: Grafana
- *                              11.2.x left the time picker visible in full kiosk
- *                              (grafana/grafana#96595); grafana-kiosk sends both
  *    from / to non-empty    →  `from=…` / `to=…` (Grafana's grammar — `now-24h`, epoch ms; empty
  *                              = omitted, the dashboard's saved default applies)
  *    refresh non-empty      →  `refresh=…` (`30s`, `1m`, …; empty = omitted)
  *    autofit ON             →  `autofitpanels` (bare, grafana-kiosk's documented form)
  *    theme ≠ "default"      →  `theme=light` | `theme=dark`
  *
+ *  ONE control decides the time picker, not two. `_dash.hideTimePicker=true` is DERIVED from
+ *  "kiosk on, picker off" rather than being its own toggle: the two would otherwise contradict
+ *  each other on screen (picker ON + hide ON = no picker, which is exactly the confusion POL-180
+ *  was reported for). It rides alongside `kiosk=1` as belt-and-braces because Grafana 11.2.x left
+ *  the picker visible in full kiosk (grafana/grafana#96595) — grafana-kiosk sends both too.
+ *
  *  Schema evolution (POL-182): parse DEFAULTS reproduce what an already-stored composition
- *  composes today — `hideTimePicker`/`autofit` default OFF and absent `from`/`to`/`refresh`
- *  default empty, so an old row's URL only changes when the operator re-saves it. New sources
- *  start from `gfDefaults()`, where hideTimePicker is ON. A pre-POL-182 stored shape (the
+ *  composes today — `autofit` defaults OFF and absent `from`/`to`/`refresh` default empty, so an
+ *  old row's URL only changes when the operator re-saves it. A pre-POL-182 stored shape (the
  *  `range: inherit|custom` enum, `refresh: "default"`) is upgraded in a preprocess step to the
  *  same effect.
  */
 const GrafanaDisplayShape = z.object({
   /** Kiosk mode — hides Grafana's chrome so the wall shows only the dashboard. */
   kiosk: z.boolean(),
-  /** Keep the date/time picker on screen (`kiosk=tv`). Only meaningful while kiosk is on. */
+  /** Keep the date/time picker on screen (`kiosk=tv`). Only meaningful while kiosk is on, and the
+   *  single source of truth for the picker: OFF also emits `_dash.hideTimePicker=true`. */
   picker: z.boolean(),
-  /** `_dash.hideTimePicker=true` — OFF on parse of old data, ON in `gfDefaults()` (new sources). */
-  hideTimePicker: z.boolean().default(false),
   /** Grafana time syntax (`now-24h`, epoch ms, …). Empty = omitted — the dashboard's default. */
   from: z.string().max(64).default(""),
   to: z.string().max(64).default(""),
@@ -64,9 +66,12 @@ const GrafanaDisplayShape = z.object({
  *  `refresh: "default"` meant no param — map both onto the empty-string form so the parsed
  *  composition composes the same URL the row already stores. */
 function upgradeGf(v: unknown): unknown {
-  if (v === null || typeof v !== "object" || !("range" in v)) return v;
+  if (v === null || typeof v !== "object") return v;
   const o = v as Record<string, unknown>;
-  const { range, ...rest } = o;
+  // `hideTimePicker` was briefly its own field before the picker became the single control; drop it
+  // wherever it shows up so a row written by that shape parses cleanly.
+  const { range, hideTimePicker: _dropped, ...rest } = o;
+  if (!("range" in o)) return rest;
   return {
     ...rest,
     from: range === "custom" ? o["from"] : "",
@@ -106,13 +111,12 @@ export const SourceComposition = z.object({
 export type SourceComposition = z.infer<typeof SourceComposition>;
 
 /** The dialog's starting point for a new Grafana dashboard source: kiosk on (a wall wants no
- *  chrome), the time picker hidden twice over (kiosk + `_dash.hideTimePicker` — see
- *  grafana/grafana#96595), everything else the dashboard's own defaults. */
+ *  chrome), picker off — which also hides the time picker the second way (see
+ *  grafana/grafana#96595) — everything else the dashboard's own defaults. */
 export function gfDefaults(): GrafanaDisplay {
   return {
     kiosk: true,
     picker: false,
-    hideTimePicker: true,
     from: "",
     to: "",
     refresh: "",
@@ -129,9 +133,9 @@ export function gfPairs(gf: GrafanaDisplay): string[] {
   if (gf.kiosk) pairs.push(gf.picker ? "kiosk=tv" : "kiosk=1");
   // Always: Grafana's "Powered by" logo has no place on a wall.
   pairs.push("hideLogo=1");
-  // Belt-and-braces with kiosk — Grafana 11.2.x left the time picker visible in full kiosk
-  // (grafana/grafana#96595); grafana-kiosk sends both.
-  if (gf.hideTimePicker) pairs.push("_dash.hideTimePicker=true");
+  // DERIVED from the picker control, never a second toggle (see the header): belt-and-braces with
+  // kiosk, because Grafana 11.2.x left the picker visible in full kiosk (grafana/grafana#96595).
+  if (gf.kiosk && !gf.picker) pairs.push("_dash.hideTimePicker=true");
   const from = gf.from.trim();
   const to = gf.to.trim();
   if (from) pairs.push(`from=${encodeURIComponent(from)}`);
@@ -247,10 +251,8 @@ export function slugName(addr: string): string {
 export function extractGrafanaFlags(pairs: string[]): { gf: GrafanaDisplay; keep: string } {
   const gf = gfDefaults();
   // The extractor reads what the pairs SAY, so its baseline is everything-off — `gfDefaults()`
-  // seeds new sources, not parsed ones (an old URL without `_dash.hideTimePicker` must stay
-  // without it).
+  // seeds NEW sources, not parsed ones.
   gf.kiosk = false;
-  gf.hideTimePicker = false;
   const keep: string[] = [];
 
   const decode = (v: string): string => {
@@ -279,7 +281,7 @@ export function extractGrafanaFlags(pairs: string[]): { gf: GrafanaDisplay; keep
     } else if (key === "hideLogo" && truthy) {
       // Absorbed: composition always emits `hideLogo=1`.
     } else if (key === "_dash.hideTimePicker" && truthy) {
-      gf.hideTimePicker = true;
+      // Absorbed: derived from the picker control, and re-emitted whenever kiosk is on without it.
     } else if (key === "autofitpanels" && truthy) {
       gf.autofit = true;
     } else if (key === "from" && value.length > 0) {

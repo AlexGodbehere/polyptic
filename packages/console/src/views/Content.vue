@@ -330,6 +330,15 @@ const authHint = computed(() => {
   return "Anyone on the network can load this address — nothing is injected.";
 });
 
+/** Quick-fill presets for the free-text range fields (the design's gfPresetBtns): `now-1h` labels
+ *  as "Last 1h". They WRITE into from/to rather than gating them, so anything Grafana's grammar
+ *  accepts stays typeable (POL-182). */
+const GF_PRESETS = ["now-1h", "now-6h", "now-24h", "now-7d", "now-30d", "now-90d"];
+function presetLabel(v: string): string {
+  return `Last ${v.slice(4)}`;
+}
+/** The same idea for the refresh field's common cadences. */
+const GF_CADENCES = ["30s", "1m", "5m", "15m", "1h"];
 /** The picker toggle READS on while kiosk is off — the full Grafana UI includes it (mock's pickOn). */
 const pickerOn = computed(() => (draftGf.value.kiosk ? draftGf.value.picker : true));
 const pickerDesc = computed(() =>
@@ -1292,24 +1301,29 @@ function mediaFacts(s: ContentSource): string {
               ><span class="tog-knob"></span></button>
             </div>
 
-            <!-- POL-182 — `_dash.hideTimePicker=true`, belt-and-braces with kiosk: Grafana 11.2.x
-                 left the time picker visible in full kiosk (grafana/grafana#96595). Default ON for
-                 new sources. -->
-            <div class="gf-row">
-              <div class="gf-row-name">Hide time picker</div>
-              <button
-                type="button"
-                class="tog"
-                :class="{ on: draftGf.hideTimePicker }"
-                aria-label="Hide time picker"
-                @click="draftGf.hideTimePicker = !draftGf.hideTimePicker"
-              ><span class="tog-knob"></span></button>
-            </div>
-
             <!-- POL-182 — free-text from/to (Grafana owns the grammar); empty = the dashboard's
-                 saved default. -->
+                 saved default. The presets fill the fields rather than replacing them, so the
+                 common ranges stay one click away and anything Grafana accepts is still typeable. -->
             <div class="gf-row col">
-              <div class="gf-row-name">Time range</div>
+              <div class="gf-row-line">
+                <div class="gf-row-name">Time range</div>
+                <div class="chips wrap right">
+                  <button
+                    v-for="v in GF_PRESETS"
+                    :key="v"
+                    type="button"
+                    class="chip"
+                    :class="{ on: draftGf.from === v && draftGf.to === 'now' }"
+                    @click="draftGf.from = v; draftGf.to = 'now'"
+                  >{{ presetLabel(v) }}</button>
+                  <button
+                    type="button"
+                    class="chip"
+                    :class="{ on: !draftGf.from.trim() && !draftGf.to.trim() }"
+                    @click="draftGf.from = ''; draftGf.to = ''"
+                  >Dashboard default</button>
+                </div>
+              </div>
               <div class="gf-range-grid">
                 <div>
                   <div class="gf-range-label">From</div>
@@ -1320,10 +1334,29 @@ function mediaFacts(s: ContentSource): string {
                   <input v-model="draftGf.to" class="field mono gf-range" placeholder="now" />
                 </div>
               </div>
+              <div class="gf-syntax">Grafana syntax — relative like now-24h, or absolute timestamps.</div>
             </div>
 
-            <div class="gf-row">
-              <div class="gf-row-name">Auto-refresh</div>
+            <div class="gf-row col">
+              <div class="gf-row-line">
+                <div class="gf-row-name">Auto-refresh</div>
+                <div class="chips wrap right">
+                  <button
+                    v-for="v in GF_CADENCES"
+                    :key="v"
+                    type="button"
+                    class="chip"
+                    :class="{ on: draftGf.refresh.trim() === v }"
+                    @click="draftGf.refresh = v"
+                  >{{ v }}</button>
+                  <button
+                    type="button"
+                    class="chip"
+                    :class="{ on: !draftGf.refresh.trim() }"
+                    @click="draftGf.refresh = ''"
+                  >Dashboard default</button>
+                </div>
+              </div>
               <input
                 v-model="draftGf.refresh"
                 class="field mono gf-range gf-refresh"
@@ -2175,6 +2208,11 @@ function mediaFacts(s: ContentSource): string {
   margin-bottom: 0;
   padding: 8px 10px;
   font-size: 12.5px;
+}
+.gf-syntax {
+  font-size: 11px;
+  color: var(--muted2);
+  margin-top: 6px;
 }
 .gf-refresh {
   width: 110px;
