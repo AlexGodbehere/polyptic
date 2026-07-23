@@ -461,6 +461,85 @@ function shellArmedHint(m: MachineView): string {
   return `Console enabled ${mins < 1 ? "just now" : `${mins} min ago`}. Auto-disables when idle`;
 }
 
+// ── Operator SSH access (POL-81) ─────────────────────────────────────────────
+// The sibling of the console shell arm: OFF by default, admin-only, key-auth only. Arming installs
+// the operator's PUBLIC key for a dedicated debug user and starts sshd; the box reports the live
+// connection details back. Auto-disarms after a TTL, and a reboot comes up closed.
+const armingSsh = reactive(new Set<string>());
+/** The operator's public key, remembered in localStorage so arming a second box doesn't re-paste. */
+const SSH_KEY_STORE = "polyptic.console.sshPublicKey";
+function rememberedSshKey(): string {
+  try {
+    return window.localStorage.getItem(SSH_KEY_STORE) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+async function enableSsh(m: MachineView): Promise<void> {
+  if (armingSsh.has(m.id)) return;
+  const key = window.prompt(
+    `Arm SSH on "${machineDisplayName(m)}"?\n\nPaste your PUBLIC SSH key (e.g. the contents of ~/.ssh/id_ed25519.pub). ` +
+      `While armed, you can SSH in as the debug user (passwordless sudo). It auto-disarms after a while, ` +
+      `and disarming — or a reboot — closes it and removes the key.`,
+    rememberedSshKey(),
+  );
+  if (!key || !key.trim()) return;
+  const trimmed = key.trim();
+  try {
+    window.localStorage.setItem(SSH_KEY_STORE, trimmed);
+  } catch {
+    /* private mode — no big deal, just won't remember it */
+  }
+  armingSsh.add(m.id);
+  try {
+    const error = await store.setMachineSsh(m.id, true, trimmed);
+    if (error) showToast(error);
+  } finally {
+    armingSsh.delete(m.id);
+  }
+}
+
+async function disableSsh(m: MachineView): Promise<void> {
+  menuFor.value = null;
+  const error = await store.setMachineSsh(m.id, false);
+  if (error) showToast(error);
+}
+
+/** `user@host -p port` for the armed box, from the agent-reported status (host is its LAN IP). */
+function sshTarget(m: MachineView): string | null {
+  const s = m.sshStatus;
+  if (!s?.host || !s.user) return null;
+  const port = s.port && s.port !== 22 ? ` -p ${s.port}` : "";
+  return `${s.user}@${s.host}${port}`;
+}
+
+/** "58m left" style label from the box-reported expiry (falls back to the server arm time). */
+function sshTtlLabel(m: MachineView): string {
+  const expiry = m.sshStatus?.expiresAt;
+  if (!expiry) return "";
+  const mins = Math.round((new Date(expiry).getTime() - now.value) / 60000);
+  return mins <= 0 ? "expiring" : `${mins}m left`;
+}
+
+function sshArmedHint(m: MachineView): string {
+  const target = sshTarget(m);
+  if (target) return `SSH is open — ssh ${target}`;
+  if (m.sshEnabled && !m.online) return "SSH is armed; the box is offline";
+  return "SSH is armed; waiting for the box to start sshd";
+}
+
+async function copySshCommand(m: MachineView): Promise<void> {
+  const target = sshTarget(m);
+  if (!target) return;
+  try {
+    await navigator.clipboard.writeText(`ssh ${target}`);
+    showToast("SSH command copied");
+  } catch {
+    showToast(`ssh ${target}`);
+  }
+}
+
 const toast = ref("");
 let toastTimer: number | undefined;
 function showToast(message: string): void {
@@ -708,6 +787,8 @@ function showToast(message: string): void {
                 <!-- status chips: Shell armed is a passive security indicator, always visible while
                      armed, independent of the console button state (POL-68 §2). -->
                 <span v-if="m.shellEnabled" class="chip-armed" :title="shellArmedHint(m)">Shell armed</span>
+                <!-- POL-81 — SSH armed is a passive security indicator, like Shell armed. -->
+                <span v-if="m.sshEnabled" class="chip-armed" :title="sshArmedHint(m)">SSH armed</span>
                 <!-- POL-171 — a wireless box on the local chain is its NORMAL path: a neutral
                      marker, never a warning (the warning strip below is for wired boxes only). -->
                 <span
@@ -786,6 +867,40 @@ function showToast(message: string): void {
                   </div>
                 </div>
 
+                <!-- cluster 2b: operator SSH (POL-81). ADMIN-only sibling of the console button — a
+                     root-capable SSH session is at least as powerful. Not armed → Enable SSH (prompts
+                     for the key); armed → the copyable connection details + TTL (Disable is in ⋯). -->
+                <button
+                  v-if="!m.sshEnabled && store.isAdmin"
+                  class="btn-ghost-sm"
+                  :disabled="!m.online || armingSsh.has(m.id)"
+                  :title="
+                    m.online
+                      ? 'Arm SSH on this box: installs your public key for a debug user (passwordless sudo), key-auth only, auto-disarms after a TTL'
+                      : `${machineDisplayName(m)} is offline, so SSH cannot be armed`
+                  "
+                  @click="enableSsh(m)"
+                >
+                  <template v-if="armingSsh.has(m.id)">
+                    <span class="spinner"></span>Arming…
+                  </template>
+                  <template v-else>Enable SSH</template>
+                </button>
+                <button
+                  v-else-if="m.sshEnabled && store.isAdmin && sshTarget(m)"
+                  class="btn-ghost-sm ssh-conn"
+                  :title="`Click to copy: ssh ${sshTarget(m)}`"
+                  @click="copySshCommand(m)"
+                >
+                  <span class="ssh-mono">ssh {{ sshTarget(m) }}</span>
+                  <span v-if="sshTtlLabel(m)" class="ssh-ttl">· {{ sshTtlLabel(m) }}</span>
+                </button>
+                <span
+                  v-else-if="m.sshEnabled && store.isAdmin"
+                  class="ssh-pending"
+                  :title="sshArmedHint(m)"
+                >SSH {{ m.online ? "starting…" : "armed (offline)" }}</span>
+
                 <!-- cluster 3: ⋯ overflow (Reboot · Revoke access · Remove machine) -->
                 <!-- POL-107 — reboot / revoke / remove are ADMIN verbs. A marketing viewer cannot
                      reboot a box: the button is gone here, and the route 403s regardless. -->
@@ -827,6 +942,15 @@ function showToast(message: string): void {
                         @click="reboot(m)"
                       >
                         Reboot
+                      </button>
+                      <!-- POL-81 — disarm SSH lives here (armed only), like the console's Disable. -->
+                      <button
+                        v-if="m.sshEnabled"
+                        class="menu-item danger"
+                        title="Stop sshd and remove the debug key from this box"
+                        @click="disableSsh(m)"
+                      >
+                        Disable SSH
                       </button>
                       <div class="menu-sep"></div>
                       <button class="menu-item" @click="editTags(m)">Edit tags</button>
@@ -1231,6 +1355,27 @@ function showToast(message: string): void {
   border-radius: 20px;
   color: var(--warn);
   background: var(--warn-soft);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+/* POL-81 — the armed SSH connection details (copyable) + the "starting/offline" placeholder. */
+.ssh-conn {
+  gap: 5px;
+}
+.ssh-mono {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+}
+.ssh-ttl {
+  font-size: 11px;
+  opacity: 0.7;
+}
+.ssh-pending {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 20px;
+  color: var(--muted, #888);
   white-space: nowrap;
   flex: 0 0 auto;
 }

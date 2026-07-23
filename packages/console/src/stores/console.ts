@@ -1165,6 +1165,25 @@ export const useConsoleStore = defineStore("console", {
       }
     },
 
+    /**
+     * Arm or disarm a box for operator SSH (POL-81). Arming carries the operator's public key; the
+     * box installs it, starts sshd, and reports the connection details back (admin/state reconciles).
+     * Returns an error string on failure (e.g. a rejected key), or null on success — so the caller can
+     * surface why. Optimistic on the armed flag for a snappy toggle.
+     */
+    async setMachineSsh(id: string, enabled: boolean, publicKey?: string): Promise<string | null> {
+      const machine = this.machines.find((m) => m.id === id);
+      if (machine) machine.sshEnabled = enabled; // optimistic
+      try {
+        await api.setMachineSsh(id, enabled, publicKey);
+        return null;
+      } catch (err) {
+        if (machine) machine.sshEnabled = !enabled; // revert
+        console.error("[console] setMachineSsh failed", err);
+        return err instanceof api.ApiError ? errorText(err) : "Could not change SSH access";
+      }
+    },
+
     /** Send an `admin/shell-*` frame over the live admin socket (the terminal component's uplink). */
     sendShellFrame(frame: Record<string, unknown>): boolean {
       if (!socket || socket.readyState !== WebSocket.OPEN) return false;

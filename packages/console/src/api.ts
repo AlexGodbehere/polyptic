@@ -348,6 +348,15 @@ export function setMachineShell(machineId: string, enabled: boolean): Promise<un
   return send("POST", `/machines/${encodeURIComponent(machineId)}/shell`, { enabled });
 }
 
+/** Arm or disarm a box for operator SSH (POL-81). Arming carries the operator's public key. */
+export function setMachineSsh(
+  machineId: string,
+  enabled: boolean,
+  publicKey?: string,
+): Promise<unknown> {
+  return send("POST", `/machines/${encodeURIComponent(machineId)}/ssh`, { enabled, publicKey });
+}
+
 // ── Tags + selector-targeted bulk operations (POL-103) ──────────────────────
 
 /** PUT /api/v1/machines/:machineId/tags — replace the machine's whole tag set (add == remove). */
