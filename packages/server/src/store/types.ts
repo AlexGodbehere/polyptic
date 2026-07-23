@@ -100,6 +100,13 @@ export interface PersistedScreen {
   /** POL-119 — operator enabled casting (AirPlay receiver) on this screen. Persistent, no TTL.
    *  Undefined on legacy rows → false. */
   castEnabled?: boolean;
+  /** POL-181 — pointer events reach this screen's web content (touch kiosk / DevTools driving).
+   *  Persistent, no TTL. Undefined on legacy rows → false. */
+  interactive?: boolean;
+  /** POL-183 — Chrome's `--hide-scrollbars` on this screen's browser. NOTE THE POLARITY: undefined
+   *  on legacy rows → TRUE (a fleet that never opted in still gets clean walls) — the opposite of
+   *  `interactive`'s absent-means-false. */
+  hideScrollbars?: boolean;
   /** POL-111 — the screen's template variables ("line" → "Line 3"). Undefined on legacy rows → {}.
    *  Note what is NOT here: any substituted content. Variables live on the SCREEN; the content rows
    *  keep their clean `{{placeholder}}` templates and substitution happens at send time. */

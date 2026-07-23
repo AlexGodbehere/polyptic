@@ -672,6 +672,7 @@ export class SwayBackend implements DisplayBackend {
               url: target.url,
               connector,
               devtoolsPort: this.devtoolsPortFor(connector),
+              hideScrollbars: target.hideScrollbars, // POL-183 (absent ⇒ true in the builder)
             })
           : buildSurfArgs({ url: target.url, inspector: target.inspector });
       // Pipe the browser's stdio instead of discarding it (POL-86). It used to be `stdio: "ignore"`,
@@ -751,12 +752,13 @@ export class SwayBackend implements DisplayBackend {
     return b;
   }
 
-  async showScreen(connector: string, url: string): Promise<void> {
+  async showScreen(connector: string, url: string, hideScrollbars?: boolean): Promise<void> {
     const bin = await this.ensureBin();
     await requireSwaymsg();
     const output = await this.resolveConnector(connector);
     const supervised = this.ensureBrowser(connector, output, bin);
-    await supervised.setUrl(url);
+    // POL-183 — part of the launch target, so a flipped flag relaunches (like a url change).
+    await supervised.setUrl(url, hideScrollbars);
   }
 
   async hideScreen(connector: string): Promise<void> {
@@ -930,6 +932,8 @@ export class SwayBackend implements DisplayBackend {
               // POL-153 — carry the source's page zoom onto the placed Chrome (device scale factor),
               // so a web-window matches the iframe path's zoom.
               zoom: spec.window.zoom,
+              // POL-183 — same per-screen scrollbar setting as the player underneath (see showWindow).
+              hideScrollbars: target.hideScrollbars,
             })
           : buildSurfArgs({ url: target.url, inspector: false });
       child = spawnChild(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -978,13 +982,25 @@ export class SwayBackend implements DisplayBackend {
     // wall span gained/lost an output) also needs a relaunch so the window is re-parented cleanly.
     const zoomChanged = (prev?.window.zoom ?? 1) !== win.zoom;
     const connectorsChanged = !sameStringSet(prev?.connectors ?? [], connectors);
+    // POL-183 — the window inherits its SCREEN's scrollbar setting (the player browser under it holds
+    // the per-connector truth from the apply). A span keeps scrollbars hidden unless EVERY covered
+    // screen opted out — one opted-in screen must not force scrollbars onto a shared window.
+    const hideScrollbars = connectors.every(
+      (c) => this.browsers.get(c)?.hideScrollbars ?? true,
+    );
     const conId = this.windowConIds.get(win.id);
 
     // Geometry-only change on a live window: re-place the existing container in place — no relaunch,
     // no flash (the agent-channel echo of D5). placeWindowSurface re-picks the path from the NEW spec
     // (already stored above), so a region change that flips full-region ↔ sub-region switches between
     // the POL-162 fullscreen path and the floating self-verify path cleanly.
-    if (supervised.running && supervised.url === win.url && !zoomChanged && !connectorsChanged) {
+    if (
+      supervised.running &&
+      supervised.url === win.url &&
+      !zoomChanged &&
+      !connectorsChanged &&
+      supervised.hideScrollbars === hideScrollbars
+    ) {
       if (conId !== undefined) {
         await this.placeWindowSurface(win.id, conId);
         this.log(`web-window ${win.id}: re-placed over ${connectors.join("+")}`);
@@ -996,9 +1012,10 @@ export class SwayBackend implements DisplayBackend {
     } else if (supervised.running && (zoomChanged || connectorsChanged)) {
       // A url change relaunches via setTarget on its own; a zoom/span change with the SAME url would
       // otherwise be a no-op (SupervisedBrowser keys on the target), so stop first to force it.
+      // (A hideScrollbars change needs no stop: it is IN the target, so setTarget relaunches itself.)
       await supervised.stop();
     }
-    await supervised.setTarget({ url: win.url, inspector: false });
+    await supervised.setTarget({ url: win.url, inspector: false, hideScrollbars });
   }
 
   async hideWindow(id: string): Promise<void> {

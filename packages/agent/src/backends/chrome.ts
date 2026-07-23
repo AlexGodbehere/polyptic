@@ -39,6 +39,10 @@ export interface ChromeLaunchSpec {
   devtoolsPort: number;
   /** Any extra flags (escape hatch, e.g. a lab-only option). */
   extra?: string[];
+  /** POL-183 — `--hide-scrollbars`. ABSENT MEANS TRUE: the wall's clean default. Chrome folds the
+   *  flag into every page's web preferences, so it reaches cross-origin subframes (a Grafana iframe)
+   *  where CSS `overflow: hidden` on the iframe cannot — which is why it is this flag and not CSS. */
+  hideScrollbars?: boolean;
 }
 
 /**
@@ -77,8 +81,9 @@ function chromeBaseArgs(
   url: string,
   dataDir: string,
   devtoolsPort: number,
+  hideScrollbars: boolean,
 ): string[] {
-  return [
+  const args = [
     // The whole point (POL-67): native Wayland — EGL/GBM straight to the GPU, no Xwayland, no DRI3.
     "--ozone-platform=wayland",
     `--app=${url}`,
@@ -98,6 +103,11 @@ function chromeBaseArgs(
     // player would have to fall back to muted playback (which it does, deliberately — see audio.ts).
     "--autoplay-policy=no-user-gesture-required",
   ];
+  // POL-183 — wall content never shows a scrollbar, unless this screen was opted out (touch kiosks
+  // that want native scroll affordances). Shared here so the player's kiosk and the POL-18
+  // web-window cannot drift: both browsers on one screen answer to the same per-screen setting.
+  if (hideScrollbars) args.push("--hide-scrollbars");
+  return args;
 }
 
 /**
@@ -109,7 +119,12 @@ export function buildChromeArgs(
   spec: ChromeLaunchSpec,
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
-  const base = chromeBaseArgs(spec.url, chromeDataDir(spec.connector, env), spec.devtoolsPort);
+  const base = chromeBaseArgs(
+    spec.url,
+    chromeDataDir(spec.connector, env),
+    spec.devtoolsPort,
+    spec.hideScrollbars ?? true,
+  );
   // The player fullscreens; splice `--kiosk` in right after the ozone flag (order is cosmetic).
   const args = [base[0]!, "--kiosk", ...base.slice(1)];
   // POL-132 — the player's shell service worker (what lets a wall RELOAD while the control plane is
@@ -142,6 +157,9 @@ export interface ChromeWindowSpec {
   /** POL-153 — the source's page zoom (1 = 100%). Applied as Chrome's device scale factor so a placed
    *  window matches the iframe path's zoom. Optional/absent ⇒ 1 (no flag). */
   zoom?: number;
+  /** POL-183 — `--hide-scrollbars`, from the SCREEN the window covers (absent ⇒ true). The placed
+   *  window and the player's kiosk answer to the same per-screen setting — see chromeBaseArgs. */
+  hideScrollbars?: boolean;
 }
 
 /** Per-window Chrome profile dir — process-isolation key AND the stale-reap token (POL-18). */
@@ -165,7 +183,12 @@ export function buildChromeWindowArgs(
   // The SAME GPU/native-Wayland base as the player (POL-146): a placed window that software-rendered
   // while the player ran on the GPU would come up black on real amdgpu — the two must never diverge
   // on the flags that decide GPU vs software render, which is why both build from chromeBaseArgs.
-  const args = chromeBaseArgs(spec.url, chromeWindowDataDir(spec.windowId, env), spec.devtoolsPort);
+  const args = chromeBaseArgs(
+    spec.url,
+    chromeWindowDataDir(spec.windowId, env),
+    spec.devtoolsPort,
+    spec.hideScrollbars ?? true,
+  );
   // POL-153 — a web-window is the agent's to zoom (the player only scales its own iframes). Chrome's
   // device scale factor is the closest analogue to browser zoom that a `--app` window honours from
   // launch: it renders the whole page at `zoom×`, matching the iframe path. A no-op 1 adds no flag, so

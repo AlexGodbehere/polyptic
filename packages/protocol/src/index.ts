@@ -458,6 +458,19 @@ export const Screen = z.object({
    *  advertised under the screen's friendlyName, and a sender's PIN entry (always on, displayed on the
    *  glass) is the per-session gate, so leaving this enabled is not an open door. */
   castEnabled: z.boolean().default(false),
+  /** POL-181 — pointer events reach this screen's web content. The wall is deliberately glanceable
+   *  (`pointer-events: none` on every surface frame); this per-screen toggle flips that for a
+   *  touch-screen kiosk, or for a panel an operator is driving through the POL-59 DevTools tunnel.
+   *  A display preference like `castEnabled` — persistent, TTL-less, not render data. Folded into
+   *  each web surface's `interactive` at SEND time (decorateSliceForSend), so the player wire shape
+   *  is unchanged and the stored slices stay clean. */
+  interactive: z.boolean().default(false),
+  /** POL-183 — Chrome's `--hide-scrollbars` for this screen's browser. DEFAULT TRUE: wall content
+   *  never shows a scrollbar unless an operator opts this screen out (the flag is folded into the
+   *  page's web preferences by the browser process, so it reaches cross-origin subframes — a Grafana
+   *  iframe — where CSS `overflow: hidden` cannot). A LAUNCH flag: it rides the agent apply, and a
+   *  change relaunches that screen's browser. */
+  hideScrollbars: z.boolean().default(true),
   /** POL-111 — this screen's local flavour ("line" → "Line 3"), substituted into the content it is
    *  sent at SEND time. Part of the screen registry, not of any content: one source stays one source. */
   variables: ScreenVariables.default({}),
@@ -1396,6 +1409,11 @@ export const ServerToAgentApply = z.object({
        *  receiver advertises it on mDNS, so the Screen Mirroring menu shows "Boardroom Left", not a
        *  connector id. A rename re-applies and restarts that receiver (brief advertisement blip). */
       friendlyName: z.string().optional(),
+      /** POL-183 — launch this connector's browser with Chrome's `--hide-scrollbars`. Rides the
+       *  apply because it is desired STATE and a LAUNCH flag (a change relaunches the browser).
+       *  Optional = back-compat with older servers; ABSENT MEANS TRUE — a fleet that never opted
+       *  out keeps clean walls, so the safe default must survive an old server's silence. */
+      hideScrollbars: z.boolean().optional(),
     }),
   ),
 });
@@ -2837,6 +2855,16 @@ export type BulkOpResponse = z.infer<typeof BulkOpResponse>;
  *  (POL-119). Persistent, no TTL; disabling kills the receiver and any live session immediately. */
 export const CastArmBody = z.object({ enabled: z.boolean() });
 export type CastArmBody = z.infer<typeof CastArmBody>;
+
+/** POST /api/v1/screens/:id/interactive — pointer events reach (or stop reaching) this screen's web
+ *  content (POL-181). Persistent, no TTL; the same-revision render re-push applies it live. */
+export const InteractiveBody = z.object({ enabled: z.boolean() });
+export type InteractiveBody = z.infer<typeof InteractiveBody>;
+
+/** POST /api/v1/screens/:id/hide-scrollbars — hide (default) or show scrollbars on this screen's
+ *  browser (POL-183). A launch flag: applying a change restarts that screen's browser. */
+export const HideScrollbarsBody = z.object({ enabled: z.boolean() });
+export type HideScrollbarsBody = z.infer<typeof HideScrollbarsBody>;
 
 /** POST /api/v1/screens/:id/variables — replace this screen's variable map wholesale (POL-111).
  *  Whole-map PUT semantics: the console edits a small table, and a partial patch protocol would only

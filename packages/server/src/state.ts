@@ -277,6 +277,9 @@ export interface ScreenAssignment {
   /** POL-119 — run a cast (AirPlay) receiver on this connector, advertised as `friendlyName`. */
   castEnabled: boolean;
   friendlyName: string;
+  /** POL-183 — launch this connector's browser with Chrome's `--hide-scrollbars` (a change
+   *  relaunches the browser). Wire-optional for back-compat, but always composed here. */
+  hideScrollbars: boolean;
 }
 
 export interface RegisterMachineInput {
@@ -718,6 +721,9 @@ export class ControlPlane {
         machineId: s.machineId,
         connector: s.connector,
         castEnabled: s.castEnabled ?? false,
+        interactive: s.interactive ?? false,
+        // POL-183 — polarity: an absent value means HIDDEN (true), the fleet-safe default.
+        hideScrollbars: s.hideScrollbars ?? true,
         variables: s.variables ?? {},
       });
     }
@@ -1084,6 +1090,8 @@ export class ControlPlane {
           machineId,
           connector: output.connector,
           castEnabled: false,
+          interactive: false,
+          hideScrollbars: true, // POL-183 — a new screen never shows a scrollbar unless opted out
           variables: {},
         } satisfies Screen;
         this.state.screens.push(screen);
@@ -1118,6 +1126,7 @@ export class ControlPlane {
         ...(windows.length > 0 ? { windows } : {}),
         castEnabled: screen.castEnabled,
         friendlyName: screen.friendlyName,
+        hideScrollbars: screen.hideScrollbars,
       });
     }
 
@@ -1175,6 +1184,8 @@ export class ControlPlane {
       machineId: screen.machineId,
       connector: screen.connector,
       castEnabled: screen.castEnabled,
+      interactive: screen.interactive,
+      hideScrollbars: screen.hideScrollbars,
       variables: screen.variables,
     });
   }
@@ -1920,6 +1931,43 @@ export class ControlPlane {
       screen.castEnabled = enabled;
       await this.persistScreen(screen);
       this.emit("info", `Casting ${enabled ? "enabled" : "disabled"} on ${screen.friendlyName}`);
+    }
+    return screen;
+  }
+
+  /**
+   * Let pointer events reach (or stop reaching) one screen's web content (POL-181). Persistent and
+   * TTL-less like the cast toggle — a touch kiosk stays touchable until an operator turns it off.
+   * Registry metadata: write-through, NO revision bump (the stored slice is untouched — only its
+   * send-time decoration changes). The caller re-pushes the SAME-revision render; the fold in
+   * decorateSliceForSend flips each web surface's `interactive` and the player DOM-diffs the class
+   * on, no reload. Returns the screen, or null if unknown.
+   */
+  async setScreenInteractive(screenId: string, enabled: boolean): Promise<Screen | null> {
+    const screen = this.state.screens.find((s) => s.id === screenId);
+    if (screen === undefined) return null;
+    if (screen.interactive !== enabled) {
+      screen.interactive = enabled;
+      await this.persistScreen(screen);
+      this.emit("info", `Interactivity ${enabled ? "enabled" : "disabled"} on ${screen.friendlyName}`);
+    }
+    return screen;
+  }
+
+  /**
+   * Hide (default) or show scrollbars on one screen's browser (POL-183). Registry metadata like the
+   * cast toggle: write-through, no revision bump. Unlike `interactive` this is a LAUNCH flag — it
+   * rides the agent apply, not the player render — so the caller re-pushes a same-revision
+   * `server/apply` and the agent relaunches that connector's browser with (or without)
+   * `--hide-scrollbars`. Returns the screen, or null if unknown.
+   */
+  async setScreenHideScrollbars(screenId: string, enabled: boolean): Promise<Screen | null> {
+    const screen = this.state.screens.find((s) => s.id === screenId);
+    if (screen === undefined) return null;
+    if (screen.hideScrollbars !== enabled) {
+      screen.hideScrollbars = enabled;
+      await this.persistScreen(screen);
+      this.emit("info", `Scrollbars ${enabled ? "hidden" : "shown"} on ${screen.friendlyName}`);
     }
     return screen;
   }
@@ -4089,6 +4137,7 @@ export class ControlPlane {
         ...(windows.length > 0 ? { windows } : {}),
         castEnabled: screen.castEnabled,
         friendlyName: screen.friendlyName,
+        hideScrollbars: screen.hideScrollbars,
       });
     }
     return assignments;
@@ -4265,6 +4314,7 @@ export class ControlPlane {
         playerUrl: this.playerUrlFor(s.id),
         castEnabled: s.castEnabled,
         friendlyName: s.friendlyName,
+        hideScrollbars: s.hideScrollbars,
       }));
   }
 
@@ -4455,6 +4505,19 @@ export class ControlPlane {
       slice = {
         ...slice,
         surfaces: slice.surfaces.map((surface) => ({ ...surface, sourceId: assignedSourceId })),
+      };
+    }
+
+    // POL-181 — the screen-level interactivity toggle, OR-ed into each web surface's own flag at
+    // send time (the same clean-at-rest rule as everything else here: the stored slice keeps the
+    // surface's authored value, so turning the screen toggle off restores exactly what was there).
+    // The player already flips `pointer-events` off the wire flag, so it needs no new shape.
+    if (this.getScreen(slice.screenId)?.interactive) {
+      slice = {
+        ...slice,
+        surfaces: slice.surfaces.map((surface) =>
+          surface.type === "web" && !surface.interactive ? { ...surface, interactive: true } : surface,
+        ),
       };
     }
 

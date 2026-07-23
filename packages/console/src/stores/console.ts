@@ -1457,6 +1457,38 @@ export const useConsoleStore = defineStore("console", {
     },
 
     /**
+     * Let pointer events reach (or stop reaching) one screen's web content (POL-181). Persistent,
+     * no TTL — a touch kiosk stays touchable until an admin turns it off. Optimistic like the cast
+     * toggle; revert on failure and let the authoritative admin/state broadcast reconcile.
+     */
+    async setScreenInteractive(screenId: string, enabled: boolean): Promise<void> {
+      const screen = this.screenById(screenId);
+      if (screen) screen.interactive = enabled; // optimistic
+      try {
+        await api.setScreenInteractive(screenId, enabled);
+      } catch (err) {
+        if (screen) screen.interactive = !enabled; // revert
+        console.error("[console] setScreenInteractive failed", err);
+      }
+    },
+
+    /**
+     * Hide (default) or show scrollbars on one screen's browser (POL-183). A LAUNCH flag: the agent
+     * relaunches that screen's browser to apply it — the row's tooltip says so. Optimistic like the
+     * toggles above; revert on failure, the admin/state broadcast reconciles.
+     */
+    async setScreenHideScrollbars(screenId: string, enabled: boolean): Promise<void> {
+      const screen = this.screenById(screenId);
+      if (screen) screen.hideScrollbars = enabled; // optimistic
+      try {
+        await api.setScreenHideScrollbars(screenId, enabled);
+      } catch (err) {
+        if (screen) screen.hideScrollbars = !enabled; // revert
+        console.error("[console] setScreenHideScrollbars failed", err);
+      }
+    },
+
+    /**
      * Replace one screen's template variables (POL-111). Whole-map semantics — the Inspector edits a
      * small table and sends it entire. Optimistic like the cast toggle; the authoritative admin/state
      * broadcast reconciles (and brings the recomputed `unresolvedVariables` warning list with it).

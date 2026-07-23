@@ -137,6 +137,8 @@ interface ScreenRow {
   machine_id: string;
   connector: string;
   cast_enabled: boolean | null;
+  interactive: boolean | null;
+  hide_scrollbars: boolean | null;
   variables: unknown;
 }
 
@@ -374,12 +376,19 @@ export class PostgresStore implements Store {
         friendly_name text NOT NULL,
         machine_id    text NOT NULL,
         connector     text NOT NULL,
-        cast_enabled  boolean NOT NULL DEFAULT false,
-        variables     jsonb NOT NULL DEFAULT '{}'::jsonb
+        cast_enabled    boolean NOT NULL DEFAULT false,
+        interactive     boolean NOT NULL DEFAULT false,
+        hide_scrollbars boolean NOT NULL DEFAULT true,
+        variables       jsonb NOT NULL DEFAULT '{}'::jsonb
       )
     `;
     // Idempotent migration for databases created before POL-119: existing screens are not castable.
     await sql`ALTER TABLE screens ADD COLUMN IF NOT EXISTS cast_enabled boolean NOT NULL DEFAULT false`;
+    // POL-181 — pointer events reach the screen's web content. Pre-POL-181 screens stay glanceable.
+    await sql`ALTER TABLE screens ADD COLUMN IF NOT EXISTS interactive boolean NOT NULL DEFAULT false`;
+    // POL-183 — hide scrollbars on the screen's browser. DEFAULT TRUE (mind the polarity): a fleet
+    // that predates the column never opted in and must still get clean walls.
+    await sql`ALTER TABLE screens ADD COLUMN IF NOT EXISTS hide_scrollbars boolean NOT NULL DEFAULT true`;
     // POL-111 — per-screen template variables. Clean-at-rest holds: this is the ONLY place a
     // substitution input is persisted; no substituted OUTPUT is ever written anywhere.
     await sql`ALTER TABLE screens ADD COLUMN IF NOT EXISTS variables jsonb NOT NULL DEFAULT '{}'::jsonb`;
@@ -749,7 +758,7 @@ export class PostgresStore implements Store {
       audioPreferenceRows,
     ] = await Promise.all([
       sql<MachineRow[]>`SELECT id, label, agent_version, backend, outputs, status, credential_hash, last_seen, shell_enabled, shell_armed_at, tags, image_id, image_id_at, boot_path, boot_path_at, boot_path_detail, boot_mode, boot_mode_at, disks, staged_image_id, staged_image_id_at, hardware, enrolled_token_id, enrolled_token_name, pre_registered, mtls_cert_issued_at, mtls_seen_at FROM machines`,
-      sql<ScreenRow[]>`SELECT id, friendly_name, machine_id, connector, cast_enabled, variables FROM screens`,
+      sql<ScreenRow[]>`SELECT id, friendly_name, machine_id, connector, cast_enabled, interactive, hide_scrollbars, variables FROM screens`,
       sql<ContentRow[]>`SELECT screen_id, canvas, surfaces, source_id FROM screen_content`,
       sql<MetaRow[]>`SELECT revision, active_scene_id FROM meta WHERE id = 1`,
       sql<MuralRow[]>`SELECT id, name FROM murals`,
@@ -818,6 +827,9 @@ export class PostgresStore implements Store {
         machineId: row.machine_id,
         connector: row.connector,
         castEnabled: row.cast_enabled ?? false,
+        interactive: row.interactive ?? false,
+        // POL-183 — polarity: an absent value means HIDDEN (true), never shown.
+        hideScrollbars: row.hide_scrollbars ?? true,
         variables: variables.success ? variables.data : {},
       };
     });
@@ -1062,21 +1074,25 @@ export class PostgresStore implements Store {
   async upsertScreen(screen: PersistedScreen): Promise<void> {
     const sql = this.sql;
     await sql`
-      INSERT INTO screens (id, friendly_name, machine_id, connector, cast_enabled, variables)
+      INSERT INTO screens (id, friendly_name, machine_id, connector, cast_enabled, interactive, hide_scrollbars, variables)
       VALUES (
         ${screen.id},
         ${screen.friendlyName},
         ${screen.machineId},
         ${screen.connector},
         ${screen.castEnabled ?? false},
+        ${screen.interactive ?? false},
+        ${screen.hideScrollbars ?? true},
         ${sql.json(screen.variables ?? {})}
       )
       ON CONFLICT (id) DO UPDATE SET
-        friendly_name = EXCLUDED.friendly_name,
-        machine_id    = EXCLUDED.machine_id,
-        connector     = EXCLUDED.connector,
-        cast_enabled  = EXCLUDED.cast_enabled,
-        variables     = EXCLUDED.variables
+        friendly_name   = EXCLUDED.friendly_name,
+        machine_id      = EXCLUDED.machine_id,
+        connector       = EXCLUDED.connector,
+        cast_enabled    = EXCLUDED.cast_enabled,
+        interactive     = EXCLUDED.interactive,
+        hide_scrollbars = EXCLUDED.hide_scrollbars,
+        variables       = EXCLUDED.variables
     `;
   }
 
