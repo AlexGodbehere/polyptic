@@ -78,6 +78,20 @@ describe("buildChromeArgs", () => {
     expect(httpsArgs.some((a) => a.startsWith("--unsafely-treat-insecure-origin-as-secure"))).toBe(false);
   });
 
+  // POL-183 — --hide-scrollbars is fed into every page's web preferences by the browser process, so
+  // it covers cross-origin subframes (a Grafana iframe) where CSS on the iframe cannot reach.
+  test("scrollbars are hidden BY DEFAULT — an unopinionated launch never shows one", () => {
+    expect(args).toContain("--hide-scrollbars");
+  });
+
+  test("an opted-out screen (hideScrollbars: false) launches WITHOUT the flag", () => {
+    const shown = buildChromeArgs(
+      { url: URL, connector: "DP-1", devtoolsPort: 9222, hideScrollbars: false },
+      ENV,
+    );
+    expect(shown).not.toContain("--hide-scrollbars");
+  });
+
   test("insecurePlayerOrigin: http origin extracted, https/garbage → null", () => {
     expect(insecurePlayerOrigin("http://10.0.0.5:8080/player/?screen=s1")).toBe("http://10.0.0.5:8080");
     expect(insecurePlayerOrigin("https://walls.example.org/player/")).toBeNull();
@@ -147,6 +161,16 @@ describe("buildChromeWindowArgs (POL-18 web-window)", () => {
       ENV,
     );
     expect(zoomed).toContain("--force-device-scale-factor=1.5");
+  });
+
+  // POL-183 — the window and the player under it answer to the SAME per-screen scrollbar setting.
+  test("hides scrollbars by default, and drops the flag when the screen opted out", () => {
+    expect(args).toContain("--hide-scrollbars");
+    const shown = buildChromeWindowArgs(
+      { url: URL, windowId: "surface-7", devtoolsPort: 9230, hideScrollbars: false },
+      ENV,
+    );
+    expect(shown).not.toContain("--hide-scrollbars");
   });
 
   test("zoom 1 (or absent) adds NO scale flag — an unzoomed window's argv is unchanged", () => {

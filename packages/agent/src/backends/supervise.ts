@@ -50,18 +50,26 @@ export function deprioritiseChildForOom(
   }
 }
 
-/** What one output should be showing, and how. A change to either field forces a relaunch. */
+/** What one output should be showing, and how. A change to any field forces a relaunch. */
 export interface LaunchTarget {
   /** Player URL (already carrying `?screen=<id>`). */
   url: string;
   /** Launch with the browser's Web Inspector enabled (surf `-N`), so it can be popped on the wall. */
   inspector: boolean;
+  /** POL-183 — launch Chrome with `--hide-scrollbars`. ABSENT MEANS TRUE (the wall's clean default;
+   *  an old server that never sends the field must not flip a fleet's scrollbars on). A launch flag,
+   *  so it is part of the target: a change relaunches, exactly like a url change. */
+  hideScrollbars?: boolean;
 }
 
 /** Are two targets the same launch? */
 function sameTarget(a: LaunchTarget | null, b: LaunchTarget | null): boolean {
   if (a === null || b === null) return a === b;
-  return a.url === b.url && a.inspector === b.inspector;
+  return (
+    a.url === b.url &&
+    a.inspector === b.inspector &&
+    (a.hideScrollbars ?? true) === (b.hideScrollbars ?? true)
+  );
 }
 
 /** Make a connector name safe as a filename / WM class token. */
@@ -308,9 +316,19 @@ export class SupervisedBrowser extends SupervisedProcess<LaunchTarget> {
     return this.desired?.inspector ?? false;
   }
 
-  /** Point this output at `url`, preserving the current inspector setting. */
-  async setUrl(url: string): Promise<void> {
-    await this.setTarget({ url, inspector: this.inspector });
+  /** POL-183 — is this output's browser hiding scrollbars? Absent target field reads TRUE. */
+  get hideScrollbars(): boolean {
+    return this.desired?.hideScrollbars ?? true;
+  }
+
+  /** Point this output at `url`, preserving the current inspector setting. POL-183 — an omitted
+   *  `hideScrollbars` preserves the current value, so pre-POL-183 callers change nothing. */
+  async setUrl(url: string, hideScrollbars?: boolean): Promise<void> {
+    await this.setTarget({
+      url,
+      inspector: this.inspector,
+      hideScrollbars: hideScrollbars ?? this.hideScrollbars,
+    });
   }
 
   /**
@@ -320,6 +338,6 @@ export class SupervisedBrowser extends SupervisedProcess<LaunchTarget> {
   async setInspector(on: boolean): Promise<void> {
     const url = this.url;
     if (url === null) throw new Error(`nothing is placed on ${this.connector}`);
-    await this.setTarget({ url, inspector: on });
+    await this.setTarget({ url, inspector: on, hideScrollbars: this.hideScrollbars });
   }
 }

@@ -152,6 +152,33 @@ const hoursSummary = computed(() => {
   return `${h.on}–${h.off}`;
 });
 
+// ── Per-screen interactivity (POL-181) ────────────────────────────────────────
+// Wall content ignores pointer events by default (the player's `pointer-events: none`); this toggle
+// lets them through for THIS screen's web surfaces — a touch kiosk, or a panel being driven through
+// the DevTools tunnel. Optimistic via the store; the admin/state broadcast reconciles.
+const interactiveTitle = computed(() =>
+  props.screen.interactive
+    ? "Pointer events reach this screen's content"
+    : "Pointer events do not reach this screen's content",
+);
+function toggleInteractive(): void {
+  void store.setScreenInteractive(props.screen.id, !props.screen.interactive);
+}
+
+// ── Per-screen scrollbars (POL-183) ───────────────────────────────────────────
+// Chrome's `--hide-scrollbars`, DEFAULT ON: wall content never shows a scrollbar unless an admin
+// opts this screen out (a touch kiosk that wants native scroll affordances). A LAUNCH flag — the
+// agent relaunches this screen's browser to apply it — so the tooltip is honest about the restart.
+const scrollbarsShown = computed(() => props.screen.hideScrollbars === false);
+const scrollbarsTitle = computed(() =>
+  scrollbarsShown.value
+    ? "Scrollbars show on this screen's content. Changing this restarts its browser"
+    : "Scrollbars stay hidden on this screen's content. Changing this restarts its browser",
+);
+function toggleScrollbars(): void {
+  void store.setScreenHideScrollbars(props.screen.id, !props.screen.hideScrollbars);
+}
+
 onUnmounted(() => {
   if (identTimer) clearTimeout(identTimer);
 });
@@ -243,6 +270,35 @@ function remove(): void {
       @click="togglePower"
     >
       <span class="power-glyph" aria-hidden="true">{{ asleep ? "☀" : "☾" }}</span>{{ powerLabel }}
+    </button>
+
+    <!-- POL-181 — per-screen interactivity: pointer events reach (or don't) this screen's web
+         content. Wall content is deliberately glanceable (`pointer-events: none` in the player);
+         this flips it for a touch kiosk or a DevTools-driven panel. Admin, like Inspect: it changes
+         what someone at the glass can do to the wall. Persistent — reflects `screen.interactive`
+         from the registry, applied optimistically and reconciled by the admin/state broadcast. -->
+    <button
+      v-if="store.isAdmin"
+      class="interactive-btn"
+      :class="{ active: screen.interactive }"
+      :title="interactiveTitle"
+      :aria-pressed="screen.interactive"
+      @click="toggleInteractive"
+    >
+      <span class="interactive-glyph" aria-hidden="true">⬉</span>Interactive
+    </button>
+
+    <!-- POL-183 — scrollbars on this screen's browser. Quiet at the default (hidden); accent marks
+         the opted-out state, so a wall of rows only lights up where someone changed something. -->
+    <button
+      v-if="store.isAdmin"
+      class="scrollbars-btn"
+      :class="{ active: scrollbarsShown }"
+      :title="scrollbarsTitle"
+      :aria-pressed="scrollbarsShown"
+      @click="toggleScrollbars"
+    >
+      <span class="scrollbars-glyph" aria-hidden="true">▐</span>Scrollbars
     </button>
 
     <button
@@ -397,6 +453,70 @@ function remove(): void {
   height: 6px;
   border-radius: 50%;
   background: var(--accent);
+}
+/* POL-181 — interactivity toggle: same chip idiom as Inspect; active = pointer events are through. */
+.interactive-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line2);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg2);
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+  box-shadow: var(--shadow-sm);
+}
+.interactive-btn:hover {
+  background: var(--muted-bg);
+}
+.interactive-btn.active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-fg);
+}
+.interactive-glyph {
+  font-size: 12px;
+  color: var(--muted2);
+}
+.interactive-btn.active .interactive-glyph {
+  color: var(--accent);
+}
+/* POL-183 — scrollbars toggle: same chip idiom; active = this screen was opted OUT of hiding. */
+.scrollbars-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line2);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg2);
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+  box-shadow: var(--shadow-sm);
+}
+.scrollbars-btn:hover {
+  background: var(--muted-bg);
+}
+.scrollbars-btn.active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-fg);
+}
+.scrollbars-glyph {
+  font-size: 10.5px;
+  color: var(--muted2);
+}
+.scrollbars-btn.active .scrollbars-glyph {
+  color: var(--accent);
 }
 .inspect-btn {
   display: inline-flex;

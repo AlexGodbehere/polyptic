@@ -31,8 +31,10 @@ export interface DisplayBackend {
    */
   discoverOutputs(): Promise<string[] | null>;
 
-  /** Place/point a player at `url` on the given output `connector`. Idempotent per (connector,url). */
-  showScreen(connector: string, url: string): Promise<void>;
+  /** Place/point a player at `url` on the given output `connector`. Idempotent per
+   *  (connector, url, hideScrollbars). POL-183 — `hideScrollbars` (absent ⇒ true) is a Chrome
+   *  LAUNCH flag: a change relaunches that connector's browser; surf backends ignore it. */
+  showScreen(connector: string, url: string, hideScrollbars?: boolean): Promise<void>;
 
   /** Tear down whatever `showScreen` placed on `connector`. */
   hideScreen(connector: string): Promise<void>;

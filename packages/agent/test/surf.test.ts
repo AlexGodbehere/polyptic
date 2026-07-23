@@ -94,7 +94,7 @@ describe("SupervisedBrowser launch identity", () => {
 
     await sup.setInspector(true);
     expect(launches).toHaveLength(2);
-    expect(launches[1]).toEqual({ url: URL, inspector: true });
+    expect(launches[1]).toEqual({ url: URL, inspector: true, hideScrollbars: true });
     expect(sup.inspector).toBe(true);
   });
 
@@ -104,7 +104,7 @@ describe("SupervisedBrowser launch identity", () => {
     await sup.setInspector(true);
     await sup.setInspector(false);
     expect(launches).toHaveLength(3);
-    expect(launches[2]).toEqual({ url: URL, inspector: false });
+    expect(launches[2]).toEqual({ url: URL, inspector: false, hideScrollbars: true });
     expect(sup.inspector).toBe(false);
   });
 
@@ -123,7 +123,7 @@ describe("SupervisedBrowser launch identity", () => {
     await sup.setInspector(true);
     const next = `${URL}&v=2`;
     await sup.setUrl(next);
-    expect(launches.at(-1)).toEqual({ url: next, inspector: true });
+    expect(launches.at(-1)).toEqual({ url: next, inspector: true, hideScrollbars: true });
   });
 
   test("setInspector on an output with nothing placed throws — there is no page to inspect", async () => {

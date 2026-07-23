@@ -21,11 +21,13 @@ import {
   CreatePreRegistrationBody,
   CreateSceneBody,
   CreateScheduleBody,
+  HideScrollbarsBody,
   IdentBody,
   ImportPreRegistrationsBody,
   InstallMachineBody,
   RenameMachineBody,
   InspectBody,
+  InteractiveBody,
   MoveTargetsBody,
   PanelHoursBody,
   PanelPowerBody,
@@ -439,6 +441,28 @@ export function inspectScreen(screenId: string, body: InspectBody): Promise<unkn
  *  (POL-119). Persistent, no TTL; disabling kills the receiver and any live session immediately. */
 export function setScreenCast(screenId: string, enabled: boolean): Promise<unknown> {
   return send("POST", `/screens/${encodeURIComponent(screenId)}/cast`, CastArmBody.parse({ enabled }));
+}
+
+/** POST /api/v1/screens/:screenId/interactive { enabled } — pointer events reach (or stop reaching)
+ *  this screen's web content (POL-181). Persistent, no TTL; the server re-pushes the screen's render
+ *  at the same revision, so the wall flips pointer-events in place — no reload. Admin-only. */
+export function setScreenInteractive(screenId: string, enabled: boolean): Promise<unknown> {
+  return send(
+    "POST",
+    `/screens/${encodeURIComponent(screenId)}/interactive`,
+    InteractiveBody.parse({ enabled }),
+  );
+}
+
+/** POST /api/v1/screens/:screenId/hide-scrollbars { enabled } — hide (default) or show scrollbars on
+ *  this screen's browser (POL-183). A LAUNCH flag: the agent relaunches that screen's browser to
+ *  apply it. Persistent, no TTL. Admin-only. */
+export function setScreenHideScrollbars(screenId: string, enabled: boolean): Promise<unknown> {
+  return send(
+    "POST",
+    `/screens/${encodeURIComponent(screenId)}/hide-scrollbars`,
+    HideScrollbarsBody.parse({ enabled }),
+  );
 }
 
 /** POST /api/v1/screens/:screenId/variables { variables } — replace this screen's template variables

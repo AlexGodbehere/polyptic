@@ -174,6 +174,13 @@ function readAgentVersion(): string {
   return agentVersion();
 }
 
+/** POL-183 — the `placed` dedupe signature for one connector: every LAUNCH input, so a scrollbar
+ *  flip with an unchanged URL still reaches the backend (which relaunches — launch flags cannot be
+ *  applied to a live browser). The prefix cannot collide with a URL: none starts with `#`. */
+function placementKey(url: string, hideScrollbars: boolean): string {
+  return `${hideScrollbars ? "#hs" : "#sb"}|${url}`;
+}
+
 // Narrowed server-frame variants.
 type ApplyMsg = Extract<ServerToAgentMessage, { t: "server/apply" }>;
 type IdentMsg = Extract<ServerToAgentMessage, { t: "server/ident" }>;
@@ -239,7 +246,9 @@ class Agent {
   private devtools: DevtoolsManager | null = null;
 
   private lastAppliedRevision = 0;
-  /** connector → player URL currently placed (dedupes repeat opens on reconnect/re-apply). */
+  /** connector → placement signature currently placed (dedupes repeat opens on reconnect/re-apply).
+   *  POL-183 — the signature is `placementKey(url, hideScrollbars)`, not the bare URL: every LAUNCH
+   *  input belongs in the key, or a flipped flag with an unchanged URL would dedupe to a no-op. */
   private readonly placed = new Map<string, string>();
   /** POL-18 — window id → what is placed (connector + spec signature); diffed on every apply so an
    *  unchanged window is never relaunched and a vanished one is torn down. */
@@ -524,13 +533,18 @@ class Agent {
     const wanted = new Set<string>();
     for (const screen of msg.screens) {
       wanted.add(screen.connector);
-      if (this.placed.get(screen.connector) === screen.playerUrl) {
-        // already pointed at this URL — nothing to do (content updates over the player channel)
+      // POL-183 — absent means TRUE (an old server's silence must not flip a fleet's scrollbars on).
+      const hideScrollbars = screen.hideScrollbars !== false;
+      // The dedupe key carries every LAUNCH input, so a scrollbar flip with an unchanged URL still
+      // reaches the backend (which relaunches — a launch flag cannot be applied to a live browser).
+      const placement = placementKey(screen.playerUrl, hideScrollbars);
+      if (this.placed.get(screen.connector) === placement) {
+        // already pointed at this launch — nothing to do (content updates over the player channel)
         this.status.set(screen.connector, { ok: true });
       } else {
         try {
-          await this.backend.showScreen(screen.connector, screen.playerUrl);
-          this.placed.set(screen.connector, screen.playerUrl);
+          await this.backend.showScreen(screen.connector, screen.playerUrl, hideScrollbars);
+          this.placed.set(screen.connector, placement);
           this.status.set(screen.connector, { ok: true });
           log(`placed ${screen.screenId} on ${screen.connector}`);
         } catch (err) {
@@ -1134,10 +1148,12 @@ class Agent {
     );
     if (!msg.pendingUrl) return; // older server: nothing to show, keep the previous behaviour
     for (const output of this.outputs) {
-      if (this.placed.get(output.connector) === msg.pendingUrl) continue;
+      // The pending board rides the POL-183 default (scrollbars hidden) — no screen registry exists
+      // yet to say otherwise, and the board is ours (it never scrolls anyway).
+      if (this.placed.get(output.connector) === placementKey(msg.pendingUrl, true)) continue;
       try {
-        await this.backend.showScreen(output.connector, msg.pendingUrl);
-        this.placed.set(output.connector, msg.pendingUrl);
+        await this.backend.showScreen(output.connector, msg.pendingUrl, true);
+        this.placed.set(output.connector, placementKey(msg.pendingUrl, true));
       } catch (err) {
         logError(`failed to show the pending board on ${output.connector}: ${(err as Error).message}`);
       }

@@ -54,9 +54,11 @@ import {
   CreateMuralBody,
   CreatePreRegistrationBody,
   CreateSceneBody,
+  HideScrollbarsBody,
   IdentBody,
   ImportPreRegistrationsBody,
   InspectBody,
+  InteractiveBody,
   InstallMachineBody,
   ServerToAgentInstall,
   machineHasName,
@@ -1303,6 +1305,94 @@ export function registerRestRoutes(
         delivered,
       },
       body.data.enabled ? "casting enabled" : "casting disabled",
+    );
+    return { ok: true, screen, delivered };
+  });
+
+  // POST /api/v1/screens/:screenId/interactive  { enabled }  -> per-screen interactivity (POL-181)
+  //
+  // Pointer events reach (or stop reaching) this screen's web content — a touch kiosk, or a panel
+  // driven through the DevTools tunnel. Registry metadata like the cast toggle: persisted first, no
+  // revision bump, then a same-revision `server/render` re-push — decorateSliceForSend folds the
+  // screen flag into each web surface's `interactive`, and the player DOM-diffs the pointer-events
+  // class on in place. No reload, and nothing for the agent: this never leaves the player channel.
+  // Absent from ROUTE_POLICY on purpose — deny-by-default makes it admin-only, like DevTools.
+  fastify.post("/api/v1/screens/:screenId/interactive", async (request, reply) => {
+    const params = ScreenParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+    const body = InteractiveBody.safeParse(request.body ?? {});
+    if (!body.success) {
+      return reply.code(400).send({ error: "invalid body", issues: body.error.issues });
+    }
+    const screen = await control.setScreenInteractive(params.data.screenId, body.data.enabled);
+    if (!screen) {
+      return reply.code(404).send({ error: `unknown screen: ${params.data.screenId}` });
+    }
+
+    const delivered = pushRender(screen.id, control.sliceForPlayer(screen.id));
+    broadcaster.broadcast();
+
+    fastify.log.info(
+      {
+        event: "screen.interactive",
+        screenId: screen.id,
+        machineId: screen.machineId,
+        connector: screen.connector,
+        enabled: body.data.enabled,
+        delivered,
+      },
+      body.data.enabled ? "interactivity enabled" : "interactivity disabled",
+    );
+    return { ok: true, screen, delivered };
+  });
+
+  // POST /api/v1/screens/:screenId/hide-scrollbars  { enabled }  -> per-screen scrollbars (POL-183)
+  //
+  // Chrome's `--hide-scrollbars`, default ON — a wall never shows a scrollbar unless an operator
+  // opts a screen out (the browser folds the flag into every page's web preferences, so it reaches
+  // cross-origin subframes like a Grafana iframe, where CSS on the iframe cannot). A LAUNCH flag,
+  // so unlike `interactive` it rides the AGENT channel: persisted first (an offline box reconciles
+  // from its next hello's apply), then a same-revision `server/apply` re-push makes the connected
+  // agent relaunch that connector's browser now. No revision bump — not render data — and no render
+  // push: the player never sees this flag. Absent from ROUTE_POLICY on purpose — deny-by-default
+  // makes it admin-only, matching the Interactive toggle beside it.
+  fastify.post("/api/v1/screens/:screenId/hide-scrollbars", async (request, reply) => {
+    const params = ScreenParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "invalid params", issues: params.error.issues });
+    }
+    const body = HideScrollbarsBody.safeParse(request.body ?? {});
+    if (!body.success) {
+      return reply.code(400).send({ error: "invalid body", issues: body.error.issues });
+    }
+    const screen = await control.setScreenHideScrollbars(params.data.screenId, body.data.enabled);
+    if (!screen) {
+      return reply.code(404).send({ error: `unknown screen: ${params.data.screenId}` });
+    }
+
+    const delivered = agentHub.send(
+      screen.machineId,
+      ServerToAgentApply.parse({
+        t: "server/apply",
+        revision: control.state.revision,
+        machineId: screen.machineId,
+        screens: control.assignmentsFor(screen.machineId),
+      }),
+    );
+    broadcaster.broadcast();
+
+    fastify.log.info(
+      {
+        event: "screen.hide-scrollbars",
+        screenId: screen.id,
+        machineId: screen.machineId,
+        connector: screen.connector,
+        enabled: body.data.enabled,
+        delivered,
+      },
+      body.data.enabled ? "scrollbars hidden" : "scrollbars shown",
     );
     return { ok: true, screen, delivered };
   });

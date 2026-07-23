@@ -519,6 +519,8 @@ export function buildAdminState(
           panelHours: control.getPanelHours(s.id),
           castEnabled: s.castEnabled, // POL-119 — the persistent operator toggle
           castActive: presence.isScreenCasting(s.id), // POL-119 — a session is live NOW
+          interactive: s.interactive, // POL-181 — pointer events reach this screen's web content
+          hideScrollbars: s.hideScrollbars, // POL-183 — Chrome --hide-scrollbars (default true)
           variables: s.variables, // POL-111 — this screen's local flavour, edited in the Inspector
           // POL-111 — placeholders this screen's content uses that resolve to nothing: they render as
           // EMPTY on the glass (never literal braces), so the console warning badge is the only way an
