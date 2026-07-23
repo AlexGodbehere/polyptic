@@ -960,7 +960,7 @@ function showToast(message: string): void {
                 <strong>Install failed</strong><template v-if="m.installing.detail"> — {{ m.installing.detail }}</template>
               </div>
               <div v-else-if="m.installing?.phase === 'done'" class="install-strip done">
-                <strong>Installed</strong> — reboot begins the disk boot.
+                <strong>Installed</strong> — restarting to boot from disk.
               </div>
 
               <!-- POL-176 — the box's own poll staged an image to its inactive slot. Applying it is

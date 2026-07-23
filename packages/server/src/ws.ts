@@ -38,6 +38,7 @@ import {
   ServerToAgentApply,
   ServerToAgentEnrolled,
   ServerToAgentPending,
+  ServerToAgentReboot,
   ServerToAgentRejected,
   ServerToAgentUpdateAvailable,
   ServerToPlayerCastPin,
@@ -914,7 +915,21 @@ function handleAgent(
       if (msg.phase === "done") {
         activity.push(
           "good",
-          `${label} installed Polyptic to disk${msg.detail ? `: ${msg.detail}` : ""} — it boots from disk after its next reboot`,
+          `${label} installed Polyptic to disk${msg.detail ? `: ${msg.detail}` : ""} — restarting it to boot from disk`,
+        );
+        // POL-177 — finish the job: a successful install's whole point is to run from disk, so the
+        // control plane (the brain — the agent stays a dumb reconciler) pushes the reboot itself
+        // rather than leaving the box live-booted until someone remembers to click. The reboot rides
+        // the existing POL-55 frame, so the agent's ack → "rebooting…" presence → reconnect-as-
+        // installed narration all just happen; a refusal surfaces loudly via the reboot-ack path.
+        // This also catches the REPLAYED `done` (an agent that died mid-install and reported the
+        // outcome on restart): the box is still live, so the restart is still the right move.
+        agentHub.send(
+          msg.machineId,
+          ServerToAgentReboot.parse({
+            t: "server/reboot",
+            reason: "install finished — restarting into the installed system",
+          }),
         );
       } else if (msg.phase === "failed") {
         activity.push(
