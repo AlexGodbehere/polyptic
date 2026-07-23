@@ -52,11 +52,14 @@ export type GrafanaDisplay = z.infer<typeof GrafanaDisplay>;
 
 /** How the dialog's simplified auth picker maps onto what the server does:
  *
- *    none          the page loads with no credentials.
- *    forward-auth  a proxy in front of the content signs every request; Polyptic sends nothing.
- *                  (Same wire behaviour as `none` — recorded so the dialog reopens truthfully.)
- *    kiosk         a POL-24 credential profile's short-lived token is stamped into the URL at send
- *                  time (`credentialProfileId` names the profile).
+ *    none          the page loads with no credentials — nothing is injected.
+ *    forward-auth  "Grafana service account · forward-auth": a POL-24 credential profile's
+ *                  short-lived token is stamped into the URL at send time
+ *                  (`credentialProfileId` names the profile) — credentials injected at the edge,
+ *                  the stored URL itself never carries secrets.
+ *    kiosk         "Kiosk sign-in · shared account": the screens sign in with a shared kiosk
+ *                  account before the page loads — outside Polyptic, so nothing is stored beyond
+ *                  the mode itself (recorded so the dialog reopens truthfully).
  */
 export const SourceAuthMode = z.enum(["none", "forward-auth", "kiosk"]);
 export type SourceAuthMode = z.infer<typeof SourceAuthMode>;
@@ -164,21 +167,32 @@ export function parseAddress(raw: string): ParsedAddress {
   const pairs = query.split("&").filter((p) => p.length > 0);
   const grafana =
     /\/d(?:-solo)?\/[^/]+/.test(address) || pairs.some((p) => /^kiosk(=|$)/.test(p));
-  const slug = /\/d\/[^/?]+\/([^/?]+)/.exec(address)?.[1];
-  const suggestedName = slug ? nameFromSlug(slug) : undefined;
+  const suggestedName = slugName(address);
   return { proto, address, pairs, grafana, ...(suggestedName ? { suggestedName } : {}) };
 }
 
-/** `factory-overview` → `Factory overview`. */
-function nameFromSlug(slug: string): string {
-  let s = slug;
+/**
+ * A display name suggested from an address's last path segment — the dialog's "Use “…”" chip.
+ * Prefers a Grafana dashboard slug (`/d/<uid>/<slug>`); refuses to suggest an opaque id (16+ hex
+ * chars), a file name (`menu.png`) or anything shorter than 3 characters; title-cases each word.
+ * `""` = nothing worth suggesting.
+ */
+export function slugName(addr: string): string {
+  const a = (addr ?? "").split("?")[0] ?? "";
+  const segs = a.split("/").filter(Boolean);
+  if (segs.length < 2) return "";
+  let s = segs[segs.length - 1] ?? "";
+  const dm = /\/d\/[\w-]+\/([\w-]+)/i.exec(a);
+  if (dm) s = dm[1]!;
+  if (!s || /^[a-f0-9-]{16,}$/i.test(s) || /\.\w{2,4}$/.test(s)) return "";
   try {
-    s = decodeURIComponent(slug);
+    s = decodeURIComponent(s);
   } catch {
     // an unparseable escape stays as typed
   }
-  const words = s.replace(/[-_]+/g, " ").trim();
-  return words.length ? words.charAt(0).toUpperCase() + words.slice(1) : "";
+  s = s.replace(/[-_]+/g, " ").trim();
+  if (s.length < 3) return "";
+  return s.replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
 /**
@@ -243,11 +257,13 @@ export function extractGrafanaFlags(pairs: string[]): { gf: GrafanaDisplay; keep
   return { gf, keep: keep.join("&") };
 }
 
-/** One line naming what the controls will do — the dialog's card summary. */
+/** One line naming what the controls change — the library row's read-out. Only the non-default
+ *  choices speak ("kiosk · time picker", "now-7d → now", "refresh 5m", "dark theme"); a dashboard
+ *  left entirely on its own defaults reads as nothing at all. */
 export function gfSummary(gf: GrafanaDisplay): string {
   const bits: string[] = [];
-  bits.push(gf.kiosk ? (gf.picker ? "kiosk with time picker" : "kiosk") : "full Grafana chrome");
-  bits.push(gf.range === "custom" ? `${gf.from} → ${gf.to}` : "dashboard time range");
+  if (gf.kiosk) bits.push(gf.picker ? "kiosk · time picker" : "kiosk");
+  if (gf.range === "custom") bits.push(`${gf.from} → ${gf.to}`);
   if (gf.refresh !== "default") bits.push(`refresh ${gf.refresh}`);
   if (gf.theme !== "default") bits.push(`${gf.theme} theme`);
   return bits.join(" · ");

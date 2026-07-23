@@ -1,7 +1,8 @@
 /**
  * POL-175 — vendored SVG icons for the URL-backed content kinds, shown in the Add/Edit source
- * dialog's type picker (an icon well beside the dropdown). Raw-imported so they inline as markup
- * and inherit `currentColor` — an `<img src>` cannot be tinted per kind or per theme.
+ * dialog's type picker (an icon well beside the dropdown). Copied from the design project; each
+ * carries its own colours (the Grafana mark is the official logo with its gradient), so they are
+ * raw-imported and inlined rather than referenced by `<img src>`.
  *
  * Kept out of `content.ts` on purpose: that module is imported by unit tests running outside Vite,
  * where `?raw` asset imports do not resolve.

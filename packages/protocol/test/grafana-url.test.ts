@@ -14,8 +14,10 @@ import {
   composeSourceUrl,
   extractGrafanaFlags,
   gfDefaults,
+  gfSummary,
   normalizeComposition,
   parseAddress,
+  slugName,
   type GrafanaDisplay,
 } from "../src/index";
 
@@ -103,16 +105,31 @@ describe("parseAddress (paste-to-import)", () => {
     expect(parseAddress("https://host/dash?kiosk=tv").grafana).toBe(true);
   });
 
-  test("suggests a name from the dashboard slug", () => {
+  test("suggests a title-cased name from the dashboard slug", () => {
     expect(parseAddress("https://g.example.com/d/abc123/factory-overview?kiosk").suggestedName).toBe(
-      "Factory overview",
+      "Factory Overview",
     );
   });
 
-  test("no slug, no suggestion; a fragment is dropped", () => {
-    const p = parseAddress("https://example.com/page#panel-3");
-    expect(p.suggestedName).toBeUndefined();
-    expect(p.address).toBe("example.com/page");
+  test("a fragment is dropped", () => {
+    expect(parseAddress("https://example.com/page#panel-3").address).toBe("example.com/page");
+  });
+});
+
+describe("slugName (the Use-“…” chip)", () => {
+  test("title-cases a plain last segment", () => {
+    expect(slugName("intranet.example.com/energy-monitoring")).toBe("Energy Monitoring");
+  });
+
+  test("prefers the /d/<uid>/<slug> segment", () => {
+    expect(slugName("g.example.com/d/abc123/factory-overview/extra")).toBe("Factory Overview");
+  });
+
+  test("refuses an opaque hex id, a file name, and anything too short", () => {
+    expect(slugName("g.example.com/d/deadbeefdeadbeefdead")).toBe("");
+    expect(slugName("cdn.example.com/menu.png")).toBe("");
+    expect(slugName("example.com/ab")).toBe("");
+    expect(slugName("example.com")).toBe("");
   });
 });
 
@@ -166,6 +183,16 @@ describe("extractGrafanaFlags (pairs → controls + keep)", () => {
     const p = parseAddress(url);
     const { gf: out, keep } = extractGrafanaFlags(p.pairs);
     expect(composeSourceUrl({ proto: p.proto, address: p.address, keep, gf: out })).toBe(url);
+  });
+});
+
+describe("gfSummary (library row read-out)", () => {
+  test("only the non-default choices speak, in the mock's format", () => {
+    expect(gfSummary(gf({ kiosk: true, picker: true, range: "custom", from: "now-7d", to: "now", refresh: "5m", theme: "dark" }))).toBe(
+      "kiosk · time picker · now-7d → now · refresh 5m · dark theme",
+    );
+    expect(gfSummary(gf({ kiosk: true }))).toBe("kiosk");
+    expect(gfSummary(gf({ kiosk: false }))).toBe("");
   });
 });
 
